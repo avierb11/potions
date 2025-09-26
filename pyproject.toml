@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "Andrew Vierbicher", email = "acv5255@psu.edu" }]
+name = "potions"
+version = "2025.0.0"
+dependencies = ["numpy", "scipy", "pandas", "matplotlib"]
+description = "A simple reactive transport model framework"
+
+[tool.setuptools.packages.find]
+where = ["src"]
