@@ -9,8 +9,8 @@ import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Series
-from .interfaces import Zone, StepResult, StateType, ForcingType, StepResultType
-from .hydro import HydroForcing, HydroStep, HydrologicZone # Still needed for run_hydro_model
+from .interfaces import Zone, StateType, ForcingType
+from .hydro import HydroForcing, HydrologicZone  # Still needed for run_hydro_model
 
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
@@ -26,6 +26,7 @@ class ForcingData:
         temp: Time series of temperature (e.g., °C).
         pet: Time series of potential evapotranspiration (e.g., mm/day).
     """
+
     precip: Series[f64]
     temp: Series[f64]
     pet: Series[f64]
@@ -49,14 +50,11 @@ class Layer(Generic[ZoneType]):
         """Initializes a Layer with a list of Zone objects."""
         ...
 
-    def __init__(self, *args: Any) -> None: # type: ignore
+    def __init__(self, *args: Any) -> None:  # type: ignore
         if len(args) == 1 and isinstance(args[0], list):
             self.__zones: list[ZoneType] = args[0]
         else:
             self.__zones = list(args)
-
-
-    
 
     @property
     def zones(self) -> list[ZoneType]:
@@ -86,6 +84,7 @@ class Hillslope(Generic[ZoneType]):
     Attributes:
         layers: A list of Layer objects, ordered from top to bottom.
     """
+
     layers: list[Layer[ZoneType]]
 
     def __iter__(self) -> Iterator[Layer[ZoneType]]:
@@ -127,6 +126,7 @@ class ModelStep(Generic[StateType]):
         lat_flux: A list of the lateral fluxes for each zone.
         vert_flux: A list of the vertical fluxes for each zone.
     """
+
     state: list[StateType]
     forc_flux: list[StateType]
     vap_flux: list[StateType]
@@ -143,6 +143,7 @@ class Model(Generic[ZoneType]):
     connectivity between all zones, and provides a `step` method to advance
     the simulation in time.
     """
+
     def __init__(
         self, hillslopes: list[Hillslope[ZoneType]], scales: list[list[float]]
     ) -> None:
@@ -164,7 +165,9 @@ class Model(Generic[ZoneType]):
         self.__vert_matrix: NDArray[f64] = self.get_vert_mat()
         flat_scales: list[float] = reduce(operator.add, scales, [])
         self.__forcing_mat: NDArray[f64] = self.get_forc_mat(flat_scales)
-        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(flat_scales, relative=True)
+        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(
+            flat_scales, relative=True
+        )
 
     @property
     def lat_mat(self) -> NDArray[f64]:
@@ -219,7 +222,7 @@ class Model(Generic[ZoneType]):
             layer: Layer
             for layer_id, layer in enumerate(hillslope.layers):
                 zone_id: int
-                _zone: HydrologicZone
+                # _zone: HydrologicZone
                 for zone_id, _zone in enumerate(layer.zones):
                     positions.append(
                         ZonePosition(cur_zone, zone_id, layer_id, hillslope_id)
@@ -261,8 +264,18 @@ class Model(Generic[ZoneType]):
         for i, (zone, (s_i, d_i)) in enumerate(zip(self.flat_model, zip(state, ds))):
             # Calculate incoming flux from previously stepped zones.
             # This works for both floats and numpy arrays.
-            q_in_lat = sum(self.lat_mat[i, j] * flux_j for j, flux_j in enumerate(lat_fluxes)) if lat_fluxes else zero_flux
-            q_in_vert = sum(self.vert_mat[i, j] * flux_j for j, flux_j in enumerate(vert_fluxes)) if vert_fluxes else zero_flux
+            q_in_lat = (
+                sum(self.lat_mat[i, j] * flux_j for j, flux_j in enumerate(lat_fluxes))
+                if lat_fluxes
+                else zero_flux
+            )
+            q_in_vert = (
+                sum(
+                    self.vert_mat[i, j] * flux_j for j, flux_j in enumerate(vert_fluxes)
+                )
+                if vert_fluxes
+                else zero_flux
+            )
             q_in = q_in_lat + q_in_vert
 
             step_res = zone.step(s_i, d_i, dt, q_in)
@@ -377,7 +390,7 @@ class Model(Generic[ZoneType]):
         for i, layer in enumerate(hs):
             # For each zone in the layer, check if it has a neighbor to the right
             for j, zone in enumerate(layer):
-                if layer[j + 1] is not None: # Check for neighbor
+                if layer[j + 1] is not None:  # Check for neighbor
                     mat[cz, rect_domain[i, j + 1]] = 1.0
                 cz += 1
 
@@ -449,7 +462,9 @@ class Model(Generic[ZoneType]):
             # Create a mask for rows where sum is not zero to avoid division by zero
             non_zero_sum_rows = row_sums != 0
             # Perform division only for rows with non-zero sum
-            relative_mat[non_zero_sum_rows] = mat[non_zero_sum_rows] / row_sums[non_zero_sum_rows, np.newaxis]
+            relative_mat[non_zero_sum_rows] = (
+                mat[non_zero_sum_rows] / row_sums[non_zero_sum_rows, np.newaxis]
+            )
             return relative_mat
         else:
             return mat
@@ -474,6 +489,7 @@ class ZonePosition:
         layer_id: The index of the layer within its hillslope (vertically).
         hillslope_id: The index of the hillslope within the model.
     """
+
     model_id: int
     zone_id: int
     layer_id: int
@@ -490,6 +506,7 @@ class AnnotatedZone:
         pos: The `ZonePosition` of this zone in the model.
         incoming_fluxes: A list of model_ids for zones that flow into this one.
     """
+
     zone: HydrologicZone
     size: float
     pos: ZonePosition
@@ -504,6 +521,7 @@ class HydroModelResults:
         state: A DataFrame containing the time series of states for all zones.
         fluxes: A DataFrame containing the time series of fluxes for all zones.
     """
+
     state: DataFrame
     fluxes: DataFrame
 
@@ -535,8 +553,12 @@ def run_hydro_model_older(
     """
     num_steps: Final[int] = len(forc)  # Number of steps
     num_zones: Final[int] = len(model)
-    storages: NDArray[np.float64] = np.full((num_steps, num_zones), fill_value=np.nan, dtype=float)
-    fluxes: NDArray[np.float64] = np.full((num_steps, num_zones, 4), fill_value=np.nan, dtype=float)
+    storages: NDArray[np.float64] = np.full(
+        (num_steps, num_zones), fill_value=np.nan, dtype=float
+    )
+    fluxes: NDArray[np.float64] = np.full(
+        (num_steps, num_zones, 4), fill_value=np.nan, dtype=float
+    )
 
     state: NDArray[np.float64] = init_state
 
@@ -569,6 +591,7 @@ def run_hydro_model_older(
 
     out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
     return out_df
+
 
 def run_hydro_model(
     model: Model[HydrologicZone],
@@ -618,15 +641,25 @@ def run_hydro_model(
             )
         fd: ForcingData
         for i, fd in enumerate(forc):
-            if not (len(fd.precip) == num_steps and len(fd.temp) == num_steps and len(fd.pet) == num_steps):
+            if not (
+                len(fd.precip) == num_steps
+                and len(fd.temp) == num_steps
+                and len(fd.pet) == num_steps
+            ):
                 raise ValueError(
                     f"ForcingData at index {i} has series lengths inconsistent with num_steps ({num_steps}). "
                     f"P length: {len(fd.precip)}, T length: {len(fd.temp)}, PET length: {len(fd.pet)}"
                 )
-        all_precip_sources_matrix: NDArray[f64] = np.vstack([fd.precip.to_numpy() for fd in forc]).T # type: ignore
-        all_temp_sources_matrix: NDArray[f64] = np.vstack([fd.temp.to_numpy() for fd in forc]).T # type: ignore
-        all_pet_sources_matrix: NDArray[f64] = np.vstack([fd.pet.to_numpy() for fd in forc]).T # type: ignore
-    else: # forc is empty
+        all_precip_sources_matrix: NDArray[f64] = np.vstack(
+            [fd.precip.to_numpy() for fd in forc]
+        ).T  # type: ignore
+        all_temp_sources_matrix: NDArray[f64] = np.vstack(
+            [fd.temp.to_numpy() for fd in forc]
+        ).T  # type: ignore
+        all_pet_sources_matrix: NDArray[f64] = np.vstack(
+            [fd.pet.to_numpy() for fd in forc]
+        ).T  # type: ignore
+    else:  # forc is empty
         if num_forcing_sources_expected > 0:
             raise ValueError(
                 f"Model expects {num_forcing_sources_expected} forcing inputs, but 'forc' list is empty."
@@ -642,17 +675,23 @@ def run_hydro_model(
     zone_temp_series = all_temp_sources_matrix @ model.temp_mat.T
     zone_pet_series = all_pet_sources_matrix @ model.pet_mat.T
 
-    storages: NDArray[f64] = np.full((num_steps, num_zones), fill_value=np.nan, dtype=float)
-    fluxes: NDArray[f64] = np.full((num_steps, num_zones, 4), fill_value=np.nan, dtype=float)
+    storages: NDArray[f64] = np.full(
+        (num_steps, num_zones), fill_value=np.nan, dtype=float
+    )
+    fluxes: NDArray[f64] = np.full(
+        (num_steps, num_zones, 4), fill_value=np.nan, dtype=float
+    )
 
     state: NDArray[f64] = init_state
 
     for t_idx in range(num_steps):
         # Forcings for the current time step, one HydroForcing object per zone
         ds_for_step: list[HydroForcing] = [
-            HydroForcing(precip=zone_precip_series[t_idx, j],
-                         temp=zone_temp_series[t_idx, j],
-                         pet=zone_pet_series[t_idx, j])
+            HydroForcing(
+                precip=zone_precip_series[t_idx, j],
+                temp=zone_temp_series[t_idx, j],
+                pet=zone_pet_series[t_idx, j],
+            )
             for j in range(num_zones)
         ]
 

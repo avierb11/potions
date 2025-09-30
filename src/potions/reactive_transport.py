@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import ClassVar, TypeAlias, Callable, Any
+from typing import TypeAlias, Callable, Any
 from numpy.typing import NDArray
 from dataclasses import dataclass
 import numpy as np
@@ -23,6 +23,7 @@ class RtForcing:
         q_lat_out: Outgoing lateral water flux from this zone (mm/day).
         q_vert_out: Outgoing vertical water flux from this zone (mm/day).
     """
+
     temp: float
     s: float
     q_in: float
@@ -45,6 +46,7 @@ class RtStep(StepResult[NDArray]):
         lat_flux: The lateral flux of chemicals out of the zone.
         vert_flux: The vertical flux of chemicals out of the zone.
     """
+
     state: NDArray
     forc_flux: NDArray
     vap_flux: NDArray
@@ -59,6 +61,7 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
     and transport logic are provided as functions during initialization. This
     allows for flexible model definition without requiring subclassing.
     """
+
     _reaction_fn: Callable[[NDArray, RtForcing, dict[str, Any]], NDArray]
     _transport_fn: Callable[[NDArray, RtForcing, NDArray, dict[str, Any]], NDArray]
     params: dict[str, Any]
@@ -146,6 +149,9 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
         # Assuming one chemical species for now
         name = f"{self.name}_{zone_id}"
         return [
-            f"c_{name}", f"j_forc_{name}", f"j_vap_{name}",
-            f"j_lat_{name}", f"j_vert_{name}",
+            f"c_{name}",
+            f"j_forc_{name}",
+            f"j_vap_{name}",
+            f"j_lat_{name}",
+            f"j_vert_{name}",
         ]

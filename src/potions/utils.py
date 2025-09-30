@@ -51,11 +51,22 @@ class KineticParams:
 @dataclass(frozen=True)
 class MonodRateParams(KineticParams):
     max_rate: NDArray[f64]  # Vector of maximum rates
-    monod_const: NDArray[f64]  # Matrix of half-saturation constants
-    inhib_const: NDArray[f64]  # Matrix of inhibition constants
+    monod_const: NDArray[
+        f64
+    ]  # Matrix of half-saturation constants - 2 dimensions with shape (num primary species x num ????)
+    inhib_const: NDArray[f64]  # Matrix of inhibition constants - 2 dimensions
 
     def rate(self, state: NDArray[f64], d: RtForcing) -> NDArray[f64]:
-        raise NotImplementedError()
+        """
+        Calculate the rate of reaction for a Monod rate law when provided the state concentrations as a vector
+        """
+        monod_terms: NDArray[f64] = state / (self.monod_const + state)
+        inhib_terms: NDArray[f64] = self.inhib_const / (self.inhib_const + state)
+
+        monod_rate: NDArray[f64] = monod_terms.prod(axis=1)
+        inhib_rate: NDArray[f64] = inhib_terms.prod(axis=1)
+
+        return self.max_rate * monod_rate * inhib_rate
 
 
 @dataclass(frozen=True)
