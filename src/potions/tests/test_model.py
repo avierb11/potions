@@ -5,16 +5,16 @@ import pandas as pd
 from pandas import DataFrame
 from numpy.typing import NDArray
 from numpy import float64 as f64
-from ..hydro import GroundZone, SnowZone, SoilZone, HydroForcing
-from ..model import Layer, Hillslope, HydrologicModel, HydroModelStep, ForcingData, run_hydro_model
+from ..hydro import GroundZone, SnowZone, SoilZone, HydroForcing, HydrologicZone
+from ..model import Layer, Hillslope, Model, ModelStep, ForcingData, run_hydro_model
 from .utils import approx_eq
 
 
-def test_HydrologicModel_connection_matrices_simple_3_box() -> None:
+def test_Model_connection_matrices_simple_3_box() -> None:
     layer: Layer = Layer([GroundZone(0.0, 0.0, 0.0)])
 
     scales = [[1.0]]
-    model: HydrologicModel = HydrologicModel(
+    model: Model[HydrologicZone] = Model(
         hillslopes=[Hillslope([layer, layer, layer])], scales=scales
     )
 
@@ -35,12 +35,12 @@ def test_HydrologicModel_connection_matrices_simple_3_box() -> None:
     assert approx_eq(act_forc_mat, model.get_forc_mat(scales[0]))
 
 
-def test_HydrologicModel_connection_matrix_mixed_sizes() -> None:
+def test_Model_connection_matrix_mixed_sizes() -> None:
     zone: GroundZone = GroundZone(0.0, 0.0, 0.0)
     layer: Layer = Layer([zone, zone])
 
     scales = [[0.6, 0.4]]
-    model: HydrologicModel = HydrologicModel(
+    model: Model[HydrologicZone] = Model(
         hillslopes=[Hillslope([layer, layer, Layer([zone])])], scales=scales
     )
 
@@ -86,12 +86,12 @@ def test_HydrologicModel_connection_matrix_mixed_sizes() -> None:
     assert approx_eq(act_forc_mat, model.get_forc_mat(scales[0]))
 
 
-def test_HydrologicModel_connection_matrices_3_by_2() -> None:
+def test_Model_connection_matrices_3_by_2() -> None:
     zone: GroundZone = GroundZone(0.0, 0.0, 0.0)
     layer: Layer = Layer([zone, zone])
 
     scales = [[0.6, 0.4]]
-    model: HydrologicModel = HydrologicModel(
+    model: Model[HydrologicZone] = Model(
         hillslopes=[Hillslope([layer, layer, layer])], scales=scales
     )
 
@@ -151,7 +151,7 @@ def test_3_box_simple_model_steady_state() -> None:
         layers=[Layer([snow]), Layer([soil]), Layer([ground])]
     )
 
-    model = HydrologicModel(hillslopes=[hillslope], scales=[[1.0]])
+    model: Model[HydrologicZone] = Model(hillslopes=[hillslope], scales=[[1.0]])
 
     const_forcing = HydroForcing(1.0, 25.0, 1.0)
     forcing: list[HydroForcing] = [const_forcing] * 3
@@ -164,8 +164,8 @@ def test_3_box_simple_model_steady_state() -> None:
 
     start = time.time()
     for i in range(num_steps):
-        model_step: HydroModelStep = model.step(state, forcing, 1.0)
-        new_state = model_step.state
+        model_step: ModelStep = model.step(list(state), forcing, 1.0)
+        new_state = np.array(model_step.state)
         new_error = abs(new_state - state).sum()
         state = new_state
         assert new_error < error
@@ -176,10 +176,10 @@ def test_3_box_simple_model_steady_state() -> None:
 
     print(f"Error: {error}")
     print(f"New state: {new_state}")
-    print(f"Vaporization flux: {model_step.vap_flux.round(2)}") # type: ignore
-    print(f"Forcing flux: {model_step.forc_flux.round(2)}") # type: ignore
-    print(f"Lateral flux: {model_step.lat_flux.round(2)}") # type: ignore
-    print(f"Vertical flux: {model_step.vert_flux.round(2)}") # type: ignore
+    print(f"Vaporization flux: {np.array(model_step.vap_flux).round(2)}")
+    print(f"Forcing flux: {np.array(model_step.forc_flux).round(2)}")
+    print(f"Lateral flux: {np.array(model_step.lat_flux).round(2)}")
+    print(f"Vertical flux: {np.array(model_step.vert_flux).round(2)}")
     print(f"Total time: {round(dur, 2)} seconds, {round(rate)} iterations per second")
 
 
@@ -194,7 +194,7 @@ def test_3_box_simple_model_steady_state_v2() -> None:
         layers=[Layer([snow]), Layer([soil]), Layer([ground])]
     )
 
-    model = HydrologicModel(hillslopes=[hillslope], scales=[[1.0]])
+    model: Model[HydrologicZone] = Model(hillslopes=[hillslope], scales=[[1.0]])
 
     num_steps: int = 2_000 # Number of simulation steps
     dt: float = 1.0      # Time step
