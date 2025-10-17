@@ -9,6 +9,9 @@ import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Series
+
+from potions.database import ReactionNetwork
+from potions.reactive_transport import ReactiveTransportZone, RtForcing
 from .interfaces import Zone, StateType, ForcingType
 from .hydro import HydroForcing, HydrologicZone  # Still needed for run_hydro_model
 
@@ -723,3 +726,82 @@ def run_hydro_model(
 
     out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
     return out_df
+
+def run_reactive_transport_model(
+    model: Model[ReactiveTransportZone],
+    init_state: NDArray[f64],
+    hydro_results: HydroModelResults,
+    rt_forcing: list[ForcingData],  # Assuming ForcingData contains solute concentrations
+    dates: Series[datetime.date],
+    dt: float,
+) -> DataFrame:
+    """Runs a complete reactive transport simulation.
+
+    This function simulates the movement and reaction of chemical species through
+    the domain defined by the model. It uses the results from a prior
+    hydrologic model run to define the flow paths and water volumes.
+
+    Args:
+        model: The configured `Model[ReactiveTransportZone]` instance to run.
+        init_state: A 2D array of initial chemical concentrations for each zone
+            and each species, with shape (num_zones, num_species).
+        hydro_results: A `HydroModelResults` object containing the time series
+            of states (e.g., storage) and fluxes from the hydrologic model run.
+        rt_forcing: A list of `ForcingData` objects, one for each forcing
+            source, containing the time series of solute concentrations in
+            precipitation or other inputs.
+        dates: A pandas Series of dates for the output DataFrame index.
+        dt: The time step duration in days.
+
+    Returns:
+        A pandas DataFrame containing the time series of concentrations for
+        all species in all zones.
+    """
+    # 1. Get dimensions and validate inputs
+    # num_steps = len(dates)
+    # num_zones = len(model)
+    # num_species = init_state.shape[1]
+
+    # 2. Prepare chemical forcing data
+    # Similar to run_hydro_model, distribute the chemical forcing (e.g., solute
+    # concentrations in rain) from the sources to each individual zone for all
+    # time steps. This will create a `zone_concentration_series` array with
+    # shape (num_steps, num_zones, num_species).
+
+    # 3. Initialize storage for results
+    # concentrations = np.full((num_steps, num_zones, num_species), np.nan)
+
+    # 4. Set initial state
+    # state = init_state  # Shape: (num_zones, num_species)
+
+    # 5. Loop over each time step
+    # for t_idx in range(num_steps):
+    #     # a. Extract hydrologic data for the current step from hydro_results
+    #     #    - Get water volume/storage for each zone.
+    #     #    - Get water fluxes (lateral, vertical, forcing) for each zone.
+
+    #     # b. Construct the forcing object (`ds`) for each zone for the current step
+    #     #    This will be a list of `RtForcing` objects, one for each zone.
+    #     #    Each `RtForcing` object needs to be populated with the hydrologic
+    #     #    data from (a) and the chemical forcing data from step 2.
+    #     ds_for_step: list[RtForcing] = []
+
+    #     # c. Step the reactive transport model
+    #     #    The `state` here is a list of 1D arrays, where each array holds
+    #     #    the concentrations for one zone.
+    #     # step_res: ModelStep = model.step(list(state), ds_for_step, dt)
+
+    #     # d. Store the new concentrations from step_res
+    #     # concentrations[t_idx] = np.array(step_res.state)
+
+    #     # e. Update the state for the next iteration
+    #     # state = np.array(step_res.state)
+
+    # 6. Format and return results
+    #    - Create a pandas DataFrame from the `concentrations` array.
+    #    - Name the columns appropriately to identify the zone and species
+    #      (e.g., "z0_Cl", "z0_Na", "z1_Cl", etc.).
+    #    - Set the DataFrame index to `dates`.
+    #    - Return the DataFrame.
+
+    raise NotImplementedError("Outline complete. Implementation pending.")

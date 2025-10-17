@@ -1,52 +1,59 @@
 from __future__ import annotations
-from typing import TypeAlias, Callable, Any
+from abc import abstractmethod
+from typing import Callable, Any, TypeVar, Generic
 from numpy.typing import NDArray
 from dataclasses import dataclass
 import numpy as np
 from scipy.integrate import solve_ivp
+from numpy import float64 as f64
 
 from .interfaces import Zone, StepResult
+from .hydro import HydroForcing
 
 
-ChemicalState: TypeAlias = NDArray
-"""Type alias for the chemical state of a zone, typically an array of concentrations."""
+M = TypeVar("M", bound=int)
+N = TypeVar("N", bound=int)
+Vector = np.ndarray[tuple[N], np.dtype[f64]]
+Matrix = np.ndarray[tuple[M, N], np.dtype[f64]]
+NumTot = TypeVar("NumTot", bound=int)  # Number of total species
+NumPrim = TypeVar("NumPrim", bound=int)  # Number of primary aqueous species
+NumMin = TypeVar("NumMin", bound=int)  # Number of mineral species
+NumSec = TypeVar("NumSec", bound=int)  # Number of secondary aqueous species
+NumSpec = TypeVar("NumSpec", bound=int)  # Number of species in the model
+
+
+@dataclass(frozen=True)
+class ChemicalState(Generic[NumMin, NumPrim, NumTot, NumSec]):
+    """Represents the chemical state of a zone, partitioned by species type."""
+    prim_aq_conc: Vector[NumPrim]
+    min_conc: Vector[NumMin]
+    sec_conc: Vector[NumSec]
+
+    def to_primary_array(self) -> Vector[NumTot]:
+        """Concatenates primary aqueous and mineral species into a single array."""
+        return np.concatenate([self.prim_aq_conc, self.min_conc])  # type: ignore
 
 
 @dataclass(frozen=True)
 class RtForcing:
-    """Contains the hydrologic drivers for a reactive transport step for a single zone.
-
-    Attributes:
-        temp: Temperature (°C) for rate calculations.
-        s: Hydrologic state (storage) of the zone (mm).
-        q_in: Total incoming water flux from connected zones (mm/day).
-        q_lat_out: Outgoing lateral water flux from this zone (mm/day).
-        q_vert_out: Outgoing vertical water flux from this zone (mm/day).
-    """
-
-    temp: float
-    s: float
+    """Contains the hydrologic and chemical drivers for a reactive transport step."""
+    conc_in: ChemicalState
     q_in: float
     q_lat_out: float
     q_vert_out: float
+    hydro_forc: HydroForcing
+    s_w: float
+    z_w: float
+
+    @property
+    def q_out(self) -> float:
+        """The total flux of water out of this zone"""
+        return self.q_lat_out + self.q_vert_out
 
 
 @dataclass(frozen=True)
 class RtStep(StepResult[NDArray]):
-    """Holds the results of a single time step for a ReactiveTransportZone.
-
-    This is an immutable data structure that contains the new state and the
-    calculated fluxes for a single zone over a single time step (`dt`). The state
-    and fluxes are NumPy arrays to account for multiple chemical species.
-
-    Attributes:
-        state: The updated chemical state (e.g., concentrations) of the zone.
-        forc_flux: The flux of chemicals into the zone from external forcing.
-        vap_flux: The flux of chemicals out of the zone (e.g., volatilization).
-        lat_flux: The lateral flux of chemicals out of the zone.
-        vert_flux: The vertical flux of chemicals out of the zone.
-    """
-
+    """Holds the results of a single time step for a ReactiveTransportZone."""
     state: NDArray
     forc_flux: NDArray
     vap_flux: NDArray
@@ -55,15 +62,21 @@ class RtStep(StepResult[NDArray]):
 
 
 class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
-    """A concrete class for a single-zone reactive transport model.
+    """A zone that solves reactive transport using a generic, function-based approach.
 
-    This class uses a composition-based approach, where the specific reaction
-    and transport logic are provided as functions during initialization. This
-    allows for flexible model definition without requiring subclassing.
+    This class acts as an ODE solver and orchestrator. It is initialized with
+    functions that define the specific transport and kinetic reaction logic.
+    This allows for a flexible definition of the model's biogeochemistry without
+    hard-coding it into the zone itself.
+
+    The `step` method uses operator splitting:
+    1. Solves the ODE for transport and kinetic reactions.
+    2. Solves for instantaneous chemical equilibrium.
     """
 
     _reaction_fn: Callable[[NDArray, RtForcing, dict[str, Any]], NDArray]
     _transport_fn: Callable[[NDArray, RtForcing, NDArray, dict[str, Any]], NDArray]
+    _equilibrium_fn: Callable[[NDArray, RtForcing, dict[str, Any]], NDArray]
     params: dict[str, Any]
     name: str
 
@@ -71,59 +84,55 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
         self,
         reaction_fn: Callable[[NDArray, RtForcing, dict[str, Any]], NDArray],
         transport_fn: Callable[[NDArray, RtForcing, NDArray, dict[str, Any]], NDArray],
+        equilibrium_fn: Callable[[NDArray, RtForcing, dict[str, Any]], NDArray],
         params: dict[str, Any],
         name: str = "unnamed",
     ):
-        """Initializes the ReactiveTransportZone with specific logic and parameters.
+        """Initializes the zone with specific logic functions and parameters.
 
         Args:
-            reaction_fn: A function that calculates the rate of change
-                due to biogeochemical reactions.
-            transport_fn: A function that calculates the rate of change
-                due to advective-dispersive transport.
-            params: A dictionary of parameters required by the reaction and
-                transport functions.
+            reaction_fn: A function calculating dC/dt from reactions.
+            transport_fn: A function calculating dC/dt from transport.
+            equilibrium_fn: A function that solves for equilibrium concentrations.
+            params: A dictionary of parameters for the provided functions.
             name: The name of this zone type.
         """
         self._reaction_fn = reaction_fn
         self._transport_fn = transport_fn
+        self._equilibrium_fn = equilibrium_fn
         self.params = params
         self.name = name
 
-    def _mass_balance(self, c: NDArray, d: RtForcing, q_in: NDArray) -> NDArray:
-        """Calculates the net rate of change of concentration (dC/dt)."""
-        reaction = self._reaction_fn(c, d, self.params)
-        transport = self._transport_fn(c, d, q_in, self.params)
-        return reaction + transport
+    def _mass_balance_ode(self, c: NDArray, d: RtForcing, q_in: NDArray) -> NDArray:
+        """Calculates the net rate of change of concentration (dC/dt).
+
+        This method is conceptually based on the equation from the documentation:
+        dm/dt = (dm/dt)_reaction + (dm/dt)_transport
+        It calls the external functions provided during initialization.
+        """
+        reaction_rate = self._reaction_fn(c, d, self.params)
+        transport_rate = self._transport_fn(c, d, q_in, self.params)
+        return reaction_rate + transport_rate
 
     def step(self, s_0: NDArray, d: RtForcing, dt: float, q_in: NDArray) -> RtStep:
-        """Advances the chemical state by one time step.
+        """Advances the chemical state by one time step."""
 
-        Args:
-            s_0: The initial chemical state (concentrations) of the zone.
-            d: The hydrologic forcing data for the current time step.
-            dt: The duration of the time step in days.
-            q_in: The total incoming chemical mass flux from other connected zones.
-
-        Returns:
-            An `RtStep` object containing the new state and all calculated fluxes.
-        """
-
+        # 1. Solve the ODE for kinetic reactions and transport
         def f(t: float, c: NDArray) -> NDArray:
-            return self._mass_balance(c, d, q_in)
+            return self._mass_balance_ode(c, d, q_in)
 
         res = solve_ivp(f, (0, dt), y0=s_0, dense_output=True)
-        c_new = res.y[:, -1]
+        c_after_kinetics = res.y[:, -1]
 
-        # For this simple model, assume no direct chemical forcing or vaporization
-        forc_flux = np.zeros_like(c_new)
+        # 2. Solve for instantaneous chemical equilibrium
+        c_new = self._equilibrium_fn(c_after_kinetics, d, self.params)
+
+        # 3. Calculate output fluxes for the time step
+        forc_flux = q_in
         vap_flux = np.zeros_like(c_new)
 
-        # Partition the outgoing flux into lateral and vertical components
-        # based on the proportions of the water fluxes.
-        total_q_out_water = d.q_lat_out + d.q_vert_out
+        total_q_out_water = d.q_out
         if total_q_out_water > 1e-9:
-            # Outgoing mass flux is based on the average concentration over the step
             c_avg = res.sol(dt / 2)
             total_mass_out_flux = total_q_out_water * c_avg
             lat_flux = total_mass_out_flux * (d.q_lat_out / total_q_out_water)
@@ -140,13 +149,9 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
             vert_flux=vert_flux,
         )
 
-    def param_list(self) -> list[float]:
-        """Returns the list of parameter values for the zone."""
-        return [v for v in self.params.values() if isinstance(v, (float, int))]
-
     def columns(self, zone_id: int) -> list[str]:
         """Gets the column names for this zone for the output DataFrame."""
-        # Assuming one chemical species for now
+        # This will need to be updated based on the number of species.
         name = f"{self.name}_{zone_id}"
         return [
             f"c_{name}",

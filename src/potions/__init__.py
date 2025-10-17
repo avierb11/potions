@@ -14,15 +14,12 @@ from .model import (
     Model,
     HydroModelResults,
     run_hydro_model_older,
-    run_hydro_model
+    run_hydro_model,
 )
 
 from .calibrate import calibrate
 
-from .interfaces import (
-    Zone,
-    StepResult
-)
+from .interfaces import Zone, StepResult
 
 from .reactive_transport import (
     ChemicalState,
@@ -31,4 +28,16 @@ from .reactive_transport import (
     ReactiveTransportZone,
     # reaction_rate_first_order, # Example functions can be excluded if desired
     # transport_rate_advective
+)
+
+from .database import (
+    ExchangeReaction,
+    MineralKineticReaction,
+    MonodReaction,
+    PrimaryAqueousSpecies,
+    SecondarySpecies,
+    SurfaceComplexationReaction,
+    TstReaction,
+    MineralSpecies,
+    ChemicalDatabase,
 )
