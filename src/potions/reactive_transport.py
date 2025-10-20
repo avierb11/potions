@@ -1,10 +1,12 @@
 from __future__ import annotations
 from abc import abstractmethod
-from typing import Callable, Any, TypeVar, Generic
+from typing import Callable, Any, Final, TypeVar, Generic
 from numpy.typing import NDArray
 from dataclasses import dataclass
 import numpy as np
 from scipy.integrate import solve_ivp
+import scipy.linalg as la
+from scipy.optimize import fsolve
 from numpy import float64 as f64
 
 from .interfaces import Zone, StepResult
@@ -20,6 +22,8 @@ NumPrim = TypeVar("NumPrim", bound=int)  # Number of primary aqueous species
 NumMin = TypeVar("NumMin", bound=int)  # Number of mineral species
 NumSec = TypeVar("NumSec", bound=int)  # Number of secondary aqueous species
 NumSpec = TypeVar("NumSpec", bound=int)  # Number of species in the model
+NumAqueous = TypeVar("NumAqueous", bound=int)  # Number of aqueous species in the model
+
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,62 @@ class RtForcing:
         """The total flux of water out of this zone"""
         return self.q_lat_out + self.q_vert_out
 
+
+@dataclass(frozen=True)
+class EquilibriumParameters(Generic[NumSec, NumTot, NumAqueous]):
+    stoich: Matrix # Matrix describing the stoichiometry of the secondary species
+    equilibrium: Vector[NumSec] # Vector of the equilibrium constants for the secondary species
+    total: Matrix # Matrix describing the mass and charge balance of the species 
+
+    @property
+    def stoich_null_space(self) -> Matrix[NumAqueous, NumTot]:
+        """Return the null space of the stoichiometry matrix
+        """
+        raise NotImplementedError()
+    
+    @property
+    def log10_k_w(self) -> Vector[NumSec]:
+        """Return a vector of the equilibrium constants in base-10 logarithm
+        """
+        return np.log10(self.equilibrium) # type: ignore
+
+
+    @property
+    def x_particular(self) -> Vector[NumAqueous]:
+        """
+        Return a vector of the particular solution of the null space of the stoichiometry
+        """
+        raise NotImplementedError()
+
+    def solve_equilibrium(self, chms: ChemicalState) -> ChemicalState:
+        """
+        Solve for the equilibrium concentrations of all of the species
+        """
+        c_tot: Final[Vector[NumTot]] = self.total @ np.concatenate([chms.prim_aq_conc, chms.sec_conc]) # type: ignore
+
+
+        def conc(x: Vector[NumTot]) -> Vector[NumAqueous]:
+            """
+            Return a vector of the aqueous concentrations in base-10 logarithm
+            """
+            return 10 ** (self.stoich_null_space @ x + self.x_particular) # type: ignore
+
+        def f(x: Vector[NumTot]) -> Vector[NumTot]:
+            return c_tot - self.total @ conc(x) # type: ignore
+
+        sol = fsolve(f, x0=np.zeros_like(c_tot))
+
+        new_conc: Vector[NumAqueous] = conc(sol) # type: ignore
+        
+
+        prim_conc: Vector[NumTot]
+        sec_conc: Vector[NumTot]
+
+        return ChemicalState(
+            prim_aq_conc=new_conc[:len(chms.prim_aq_conc)], # type: ignore
+            min_conc=chms.min_conc,
+            sec_conc=new_conc[len(chms.prim_aq_conc):], # type: ignore
+        )
 
 @dataclass(frozen=True)
 class RtStep(StepResult[NDArray]):
@@ -141,6 +201,8 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
             lat_flux = np.zeros_like(c_new)
             vert_flux = np.zeros_like(c_new)
 
+        # Need to solve for equilibrium now
+
         return RtStep(
             state=c_new,
             forc_flux=forc_flux,
@@ -160,3 +222,8 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
             f"j_lat_{name}",
             f"j_vert_{name}",
         ]
+
+    # def solve_equilibrium(self, c: ChemicalState) -> ChemicalState:
+    #     """
+    #     Solve for the equilibrium concentrations
+    #     """
