@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime
+from tabnanny import verbose
 from typing import Final, Iterator, Optional, overload, Any, Generic, TypeVar
 from functools import reduce
 import operator
@@ -148,7 +149,7 @@ class Model(Generic[ZoneType]):
     """
 
     def __init__(
-        self, hillslopes: list[Hillslope[ZoneType]], scales: list[list[float]]
+        self, hillslopes: list[Hillslope[ZoneType]], scales: list[list[float]], verbose: bool = False
     ) -> None:
         """Initializes the model engine.
 
@@ -157,6 +158,7 @@ class Model(Generic[ZoneType]):
             scales: A nested list defining the relative area of each hillslope
                 and each forcing source within that hillslope.
         """
+        self.verbose: bool = verbose
         self.__hillslopes: list[Hillslope[ZoneType]] = hillslopes
         self.__scales: list[list[float]] = scales
         # self.__flat_model: list[AnnotatedZone] = self.flatten(
@@ -166,7 +168,12 @@ class Model(Generic[ZoneType]):
         self.__size: int = reduce(operator.add, map(len, self.hillslopes), 0)
         self.__lat_matrix: NDArray[f64] = self.get_lat_mat()
         self.__vert_matrix: NDArray[f64] = self.get_vert_mat()
-        flat_scales: list[float] = reduce(operator.add, scales, [])
+        flat_scales: list[float] = [
+            item for sublist in scales for item in sublist
+        ]
+        self.flat_scales: list[float] = flat_scales
+        if verbose:
+            print(f"Flattened scales: {flat_scales}")
         self.__forcing_mat: NDArray[f64] = self.get_forc_mat(flat_scales)
         self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(
             flat_scales, relative=True
@@ -456,6 +463,9 @@ class Model(Generic[ZoneType]):
         """
         conn_mat: NDArray[f64] = self.get_size_mat()
         s_arr: NDArray[f64] = np.array(sizes)
+        if self.verbose:
+            print(f"Connection matrix: {conn_mat}")
+            print(f"Sizes array: {s_arr}")
         mat: NDArray[f64] = conn_mat @ np.diag(s_arr)
 
         if relative:

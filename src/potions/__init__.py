@@ -41,3 +41,5 @@ from .database import (
     MineralSpecies,
     ChemicalDatabase,
 )
+
+from .hydro_models import HbvParameters, run_hbv_model
