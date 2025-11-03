@@ -1,0 +1,11 @@
+FeII_oxidation 2 'tst' 5 1.0 'Fe+++'  0.500 'H2O' -0.25 'O2(aq)' -1.0 'Fe++' -1.0 'H+' 8.4887
+   1.53e-06 3 'tot_Fe++' 1.0  'O2(aq)' 1.0 'H+' -2.0
+   41.4868 2 'tot_Fe++' 1.0 'O2(aq)' 1.0
+Sr90_decay  1 'irreversible'  2  -1.0  'Sr++'   1.0  'Y+++'   40.000
+   0.024068  1  'tot_Sr++' 1.0
+Y90_decay  1  'irreversible' 2  -1.0  'Y+++'   1.0  'Zr++++'   40.000
+   94.875  1  'tot_Y++++' 1.0
+Cs_decay  1  'irreversible'  1  -1.0  'Cs+'   40.00
+   40.0   1  'tot_Cs+'  1.0
+Tracer_decay  1  'irreversible'  1  -1.0  'Tracer'   40.00
+   0.1   1  'tot_Tracer'  1.0

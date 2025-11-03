@@ -1,0 +1,16 @@
+>FeOH_strong     0.0
+>FeOH_weak       0.0
+>FeO-_str       -1.0
+>FeOH2+_str      1.0
+>FeOHZn+_str     1.0
+>FeOHZn+_w       1.0
+>FeO-_w         -1.0
+>FeOH2+_w        1.0
+>FeOH-Ca_w       1.0
+>FeOH-Mg_w       1.0
+>FeOH-Mn_w       1.0
+>SOH2+           1.0
+>SO-            -1.0
+>SOH             0.0
+>SOH2-CrO4-     -1.0
+>SOH2-HCrO4      0.0

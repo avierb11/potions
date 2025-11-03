@@ -33,6 +33,7 @@ class MineralSpecies:
     name: str  # Name of the species
     molar_mass: float  # Molar mass, in grams per mole, of this species
     stoichiometry: dict[str, float]  # Stiochiometry describing this mineral species
+    eq_consts: list[float]
     molar_volume: float  # Molar volume of this mineral, in grams per mole
 
 
@@ -90,8 +91,10 @@ class ChemicalDatabase:
     secondary_species: dict[str, SecondarySpecies]
     mineral_species: dict[str, MineralSpecies]
     exchange_reactions: dict[str, ExchangeReaction]
-    tst_reactions: dict[str, TstReaction]
-    monod_reactions: dict[str, MonodReaction]
+    tst_reactions: dict[
+        str, dict[str, TstReaction]
+    ]  # First key is Mineral name, second key is reaction label
+    monod_reactions: dict[str, dict[str, MonodReaction]]
     surface_complexation_reactions: dict[str, SurfaceComplexationReaction]
 
     @staticmethod

@@ -1,0 +1,751 @@
++----------------------------------------------------
+HCl(c)
+  label = default
+  type  = irreversible
+  rate(25C) = -10.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++----------------------------------------------------
+HNO3(c)
+  label = default
+  type  = irreversible
+  rate(25C) = -10.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Cs-Illite
+  label = default
+  type  = irreversible
+  rate(25C) = -5.00
+  activation = 0.0  (kcal/mole)
+  dependence :   CsXhan1  1.0
++----------------------------------------------------
+SO4_mod_NH3
+  label = default
+  type = tst
+  rate(25C) = -13.0   !eg
+  activation = 0.0 (kcal/mole)
+  dependence :
++----------------------------------------------------
+Fe(OH)3_mod_NH3
+  label = default
+  type = tst
+  rate(25C) = -14.144   !eg
+  activation = 0.0 (kcal/mole)
+  dependence :
++----------------------------------------------------
+MnO2_mod_NH3
+  label = default
+  type = tst
+  rate(25C) = -15.2   !eg
+  activation = 0.0 (kcal/mole)
+  dependence :
++----------------------------------------------------
+SO4_monod
+  label = default
+  type = monod
+  rate(25C) = -13.0   !eg
+  activation = 0.0  (kcal/mole)
+  monod_terms :  SO4--  1600.0e-06
+  inhibition :
++----------------------------------------------------
+Fe(OH)3_monod
+  label = default
+  type = monod
+  rate(25C) = -14.144   !eg
+  activation = 0.0  (kcal/mole)
+  monod_terms :
+  inhibition :
++----------------------------------------------------
+Fe+++_monod
+  label = default
+  type = monod
+  rate(25C) = -14.144   !eg
+  activation = 0.0  (kcal/mole)
+  monod_terms :
+  inhibition :
++----------------------------------------------------
+Bogusite
+  label = default
+  type  = tst
+  rate(25C) = -35.00
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 Calcite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+MnO2_monod
+  label = default
+  type = monod
+  rate(25C) = -15.2   !eg
+  activation = 0.0  (kcal/mole)
+  monod_terms :
+  inhibition :
++----------------------------------------------------
+Gypsum
+  label = default
+  type  = tst
+  rate(25C) = -6.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Calcite(s)
+  label = default
+  type  = tst
+  rate(25C) = -9.19
+  activation = 15.0  (kcal/mole)
+  dependence :
+    1.0 Calcite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+Calcite-lz(s)
+  label = default
+  type  = tst
+  rate(25C) = -9.19
+  activation = 15.0  (kcal/mole)
+  dependence :
+    1.0 Calcite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+Calcite
+  label = h+
+  type  = tst
+  rate(25C) = -3.00
+  activation = 15.0  (kcal/mole)
+  dependence :     H+  1.0
+  1.0 Calcite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+Calcite
+  label = nitao
+  type  = tst
+  rate(25C) = -7.00
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 Calcite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+OldPyrite
+  label = default
+  type = tst
+  rate(25C) = -12.4   !eg
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Pyrite
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
+  1.0 Pyrite + 1.0 H2O + 3.5 O2(aq) = 1.0 Fe+2 + 2.0 SO4-2 + 2.0 H+
++---------------------------------------------------
+Pyrite
+  label = oxygen
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :    O2(aq)  0.5  H+ -0.11
+  1.0 Pyrite + 1.0 H2O + 3.5 O2(aq) = 1.0 Fe+2 + 2.0 SO4-2 + 2.0 H+
++---------------------------------------------------
+Pyrite
+  label = ferric
+  type  = tst
+  rate(25C) = -4.50
+  activation = 15.0  (kcal/mole)
+  dependence :    Fe+++  0.62
+  1.0 Pyrite + 8.0 H2O + 14.0 Fe+3 = 15.0 Fe+2 + 2.0 SO4-2 + 16.0 H+
++---------------------------------------------------
+Fe(OH)2
+  label = default
+  type  = tst
+  rate(25C) = -7.90
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Fe(OH)3
+  label = default
+  type  = tst
+  rate(25C) = -11.40   !eg
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+FeS(am)
+  label = default
+  type  = tst
+  rate(25C) = -8.90
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 FeS(am) + 1.0 H+ =  1.0 Fe+2 + 1.0 HS-
++---------------------------------------------------
+Vivianite
+  label = default
+  type = tst
+  rate(25C) = -8.0
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Hydroxylapatite
+  label = default
+  type = tst
+  rate(25C) = -11.0
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+CARFAP
+  label = default
+  type = tst
+  rate(25C) = -11.0
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+PO4ads
+  label = default
+  type = tst
+  rate(25C) = -11.0
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+SiO2(am)
+  label = default
+  type = tst
+  rate(25C) = -11.8
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+SiO2(am)
+  label = pH
+  type = tst
+  rate(25C) = -11.8
+  activation = 0.0 (kcal/mole)
+  dependence :     H+  -0.3
++---------------------------------------------------
+Katoite
+  label = default
+  type = tst
+  rate(25C) = -9
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+CSH(1.8)
+  label = default
+  type = tst
+  rate(25C) = -9
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Portlandite
+  label = default
+  type = tst
+  rate(25C) = -9
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Ca-Oxalate
+  label = default
+  type = tst
+  rate(25C) = -9
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Ca-Oxalate-3Waters
+  label = default
+  type = tst
+  rate(25C) = -9
+  activation = 0.0 (kcal/mole)
+  dependence :
++---------------------------------------------------
+Aragonite
+  label = default
+  type  = tst
+  rate(25C) = -8.10
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 Aragonite + 1.0 H+ =  1.0 Ca+2 + 1.0 HCO3-
++---------------------------------------------------
+Dolomite
+  label = default
+  type  = tst
+  rate(25C) = -7.70
+  activation = 15.0  (kcal/mole)
+  dependence :
+  1.0 Dolomite + 2.0 H+ =  1.0 Ca+2 + 1.0 Mg+2 + 2.0 HCO3-
++---------------------------------------------------
+Dolomite-dis
+  label = default
+  type  = tst
+  rate(25C) = -7.70
+  activation = 15.0  (kcal/mole)
+  dependence :
+  1.0 Dolomite + 2.0 H+ =  1.0 Ca+2 + 1.0 Mg+2 + 2.0 HCO3-
++---------------------------------------------------
+Magnesite
+  label = default
+  type  = tst
+  rate(25C) = -9.40
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 Magnesite + 1.0 H+ =  1.0 Mg+2 + 1.0 HCO3-
++---------------------------------------------------
+Siderite
+  label = default
+  type  = tst
+  rate(25C) = -8.90
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1.0 Siderite + 1.0 H+ =  1.0 Fe+2 + 1.0 HCO3-
++----------------------------------------------------
+C5H7O2N(s)
+  label = default
+  type = tst
+  rate(25C) = -14.0   !eg
+  activation = 15.0 (kcal/mole)
+  dependence :
++----------------------------------------------------
+SOC
+  label = default
+  type = tst
+  rate(25C) = -14.699   !eg
+  activation = 0.0  (kcal/mole)
+  dependence :
++----------------------------------------------------
+SOC(s)
+  label = test
+  type = monod
+  rate(25C) = -10.2   ! -14.5 eg MODIFIED HANG
+  activation = 0.0  (kcal/mole)
+  dependence :
+  biomass :
+  num_monod = 1
+  monod_terms : SOC(s) 6.0E-6 
+  num_inhibition = 0
+  inhibition : 0
++---------------------------------------------------
+SOC
+  label = konza
+  type = monod
+  rate(25C) = -12.6   !Kayal
+  activation = 0.0  (kcal/mole)
+  dependence :
+  biomass : C5H7O2N(s)
+  num_monod = 1
+  monod_terms : SOC 6.00E-10
+  num_inhibition = 0
+  inhibition : 0
++---------------------------------------------------
+SOC-lz(s)
+  label = test
+  type = monod
+  rate(25C) = -9.2   !eg
+  activation = 0.0  (kcal/mole)
+  dependence :
+  num_monod = 1
+  monod_terms : DOC 5.0e-3
+  inhibition :
++---------------------------------------------------
+CH2O
+  label = aerobic_respiration
+  type  = monod
+  rate(25C) = -9.699          !  Regnier and Steefel (1999)
+  activation = 0.0  (kcal/mole)
+  monod_terms :  O2(aq)  15.0e-06
+  inhibition :
+  1 CH2O + 106 O2(aq) -->  96 CO2(aq) + 14 HCO3- + 16 NH4+ + HPO4-2 + 92 H2O
++---------------------------------------------------
+CH2O
+  label = denitrification
+  type  = monod
+  rate(25C) = -10.00          !  Regnier and Steefel (1999)
+  activation = 0.0  (kcal/mole)
+  monod_terms :  NO3-  45.0e-06
+  inhibition :  O2(aq)  30.0e-06
+  1 CH2O + 94.4 NO3- --> 13.6 CO2(aq) + 92.4 HCO3- + 55.2 N2(aq) + HPO4-2 + 84.8 H2O
++---------------------------------------------------
+CH2O_SO4
+  label = default
+  type  = monod
+  rate(25C) = -12.40
+  activation = 0.0  (kcal/mole)
+  monod_terms :  SO4--  1600.0e-06
+  inhibition :
+  1 ch2o_so4 + 14 h+ + 53 so4-2 --> 53 h2s(aq) +  1 hpo4-2 + 16 nh4+ + 106 hco3-
++---------------------------------------------------
+CH2O_SO4
+  label = bogus
+  type  = tst
+  rate(25C) = -12.40
+  activation = 0.0  (kcal/mole)
+  dependence :
+  1 ch2o_so4 + 14 h+ + 53 so4-2 --> 53 h2s(aq) +  1 hpo4-2 + 16 nh4+ + 106 hco3-
++---------------------------------------------------
+Iron
+  label = default
+  type  = tst
+  rate(25C) = -11.30
+  activation = 15.0    (kcal/mole)
+  dependence :
++---------------------------------------------------
+Iron
+  label = oxygen
+  type  = tst
+  rate(25C) = -6.40
+  activation = 15.0   (kcal/mole)
+  dependence :    O2(aq) 1.0
+  1.0 Iron + 2.0 H+ + 0.5 O2(aq) =  1.0 Fe+2 + 1.0 H2O
++---------------------------------------------------
+Iron
+  label = ferric
+  type  = tst
+  rate(25C) = -6.40
+  activation = 15.0  (kcal/mole)
+  dependence :     Fe++ 1.0
+  1.0 Iron + 2.0 Fe+3 =  3.0 Fe+2
++---------------------------------------------------
+Iron
+  label = hydrolysis
+  type  = tst
+  rate(25C) = -10.00
+  activation = 15.0  (kcal/mole)
+  dependence :
+  1.0 Iron + 2.0 H+ =  1.0 Fe+2 + 1.0 H2(aq)
++---------------------------------------------------
+Iron
+  label = dce
+  type  = irreversible
+  rate(25C) = -7.45
+  activation = 15.0  (kcal/mole)
+  dependence :     DCE(aq) 1.0
+  1.0 Iron + 0.5 DCE(aq) =  1.0 Fe+2 + 0.5 RH(aq) + 1.0 Cl-
++---------------------------------------------------
+Iron
+  label = tce
+  type  = irreversible
+  rate(25C) = -6.92
+  activation = 15.0  (kcal/mole)
+  dependence :   TCE(aq) 1.0
+  1.0 Iron + 0.333 TCE(aq) + 1.0 H+ =  1.0 Fe+2 + 0.5 RH(aq) + 1.0 Cl-
++---------------------------------------------------
+Muscovite
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Muscovite
+  label = h+
+  type  = tst
+  rate(25C) = -11.38
+  activation = 15.0  (kcal/mole)
+  dependence :    H+  0.39
++---------------------------------------------------
+Muscovite
+  label = oh-
+  type  = tst
+  rate(25C) = -11.91
+  activation = 15.0  (kcal/mole)
+  dependence : OH-  0.22
++---------------------------------------------------
+Quartz
+  label = default
+  type  = tst
+  rate(25C) = -13.39
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Quartz25C
+  label = default
+  type  = tst
+  rate(25C) = -13.39
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Quartz
+  label = pH
+  type  = tst
+  rate(25C) = -14.30
+  activation = 15.0  (kcal/mole)
+  dependence :     H+  -0.3
++---------------------------------------------------
+Kaolinite
+  label = h+
+  type  = tst
+  rate(25C) = -11.58
+  activation = 15.0  (kcal/mole)
+  dependence :     H+  0.1666
++---------------------------------------------------
+Kaolinite
+  label = oh-
+  type  = tst
+  rate(25C) = -10.88
+  activation = 15.0  (kcal/mole)
+  dependence :     OH-  0.54
++---------------------------------------------------
+Kaolinite
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+KaoliniteGeorgia
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+K-Feldspar
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+K-Feldspar
+  label = H+
+  type  = tst
+  rate(25C) = -9.80
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.5
++---------------------------------------------------
+K-Feldspar
+  label = OH-
+  type  = tst
+  rate(25C) = -10.15
+  activation = 0.0  (kcal/mole)
+  dependence :  OH-  0.54
++---------------------------------------------------
+Albite
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+PlagOelkers
+  label = default
+  type = tst
+  rate(25C) = -10.5
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+PlagHekpoort
+  label = default
+  type = tst
+  rate(25C) = -10.5
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+PlagHekpoort
+  label = pH
+  type = tst
+  rate(25C) = -8.86
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.5
++---------------------------------------------------
+Albite
+  label = OH-
+  type  = tst
+  rate(25C) = -9.78
+  activation = 0.0  (kcal/mole)
+  dependence :  OH-  0.3
++---------------------------------------------------
+Anorthite
+  label = default
+  type  = tst
+  rate(25C) = -11.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Anorthite
+  label = H+
+  type  = tst
+  rate(25C) = -7.66
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.67
++---------------------------------------------------
+Magnetite
+  label = default
+  type  = tst
+  rate(25C) = -12.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Ilmenite
+  label = default
+  type  = tst
+  rate(25C) = -12.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Enstatite57
+  label = default
+  type  = tst
+  rate(25C) = -11.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Enstatite57
+  label = H+
+  type  = tst
+  rate(25C) = -9.80
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.5
++---------------------------------------------------
+Diopside57
+  label = default
+  type  = tst
+  rate(25C) = -10.20
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.1
++---------------------------------------------------
+Smectite-low-Fe-Mg
+  label = default
+  type  = tst
+  rate(25C) = -12.5
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Gibbsite
+  label = default
+  type  = tst
+  rate(25C) = -10.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Diaspore
+  label = default
+  type  = tst
+  rate(25C) = -10.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Boehmite
+  label = default
+  type  = tst
+  rate(25C) = -10.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+CO2(c)
+  label = default
+  type  = tst
+  rate(25C) = -13.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Chalcedony
+  label = default
+  type  = tst
+  rate(25C) = -13.39
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Ettringite
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+EttringiteMarchand
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+PortlanditeMarchand
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+GypsumMarchand
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+CSHMarchand
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Hydrogarnet
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Brucite
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Ettringite(AU)
+  label = default
+  type  = tst
+  rate(25C) = -8.00
+  activation = 15.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Chrysocolla
+  label = default
+  type  = tst
+  rate(25C) = -7.00
+  activation = 0.0  (kcal/mole)
+  dependence :  H+  0.39
++---------------------------------------------------
+CO2(*g)
+  label = default
+  type  = tst
+  rate(25C) = -13.10
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+shillite
+  label = default
+  type  = tst
+  rate(25C) = -14.10
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+shchlorite
+  label = default
+  type  = tst
+  rate(25C) = -12.60
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Goethite
+  label = default
+  type  = tst
+  rate(25C) = -7.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Jarosite
+  label = default
+  type  = tst
+  rate(25C) = -6.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Jurbanite
+  label = default
+  type  = tst
+  rate(25C) = -6.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
+Alunite
+  label = default
+  type  = tst
+  rate(25C) = -7.00
+  activation = 0.0  (kcal/mole)
+  dependence :
++---------------------------------------------------
