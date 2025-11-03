@@ -3,9 +3,10 @@ This file contains the types representing database objects
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import json
 
-from potions.utils import Matrix
+from .utils import Matrix
 
 
 @dataclass(frozen=True)
@@ -95,12 +96,68 @@ class ChemicalDatabase:
         str, dict[str, TstReaction]
     ]  # First key is Mineral name, second key is reaction label
     monod_reactions: dict[str, dict[str, MonodReaction]]
-    surface_complexation_reactions: dict[str, SurfaceComplexationReaction]
 
     @staticmethod
     def load_database() -> ChemicalDatabase:
         """Load the default database with all of the reactions it contains"""
         return NotImplemented
+
+    def to_file(self, file_path: str) -> None:
+        """
+        Save this database object to a file
+        """
+        with open(file_path, "w+") as f:
+            json.dump(self, f, indent=2)
+
+    @staticmethod
+    def from_file(file_path: str) -> ChemicalDatabase:
+        """
+        Load a ChemicalDatabase object from a file
+        """
+        with open(file_path, "r") as f:
+            raw_dict: dict = json.load(f)
+
+        primary_dict: dict = raw_dict["primary_species"]
+        secondary_dict: dict = raw_dict["secondary_species"]
+        mineral_dict: dict = raw_dict["mineral_species"]
+        tst_dict: dict = raw_dict["tst_dict"]
+        monod_dict: dict = raw_dict["monod_dict"]
+        exchange_dict: dict = raw_dict["exchange_reactions"]
+
+        # Construct Python objects from Database
+        primary_species: dict[str, PrimaryAqueousSpecies] = {
+            key: PrimaryAqueousSpecies(**vals) for key, vals in primary_dict.items()
+        }
+        secondary_species: dict[str, SecondarySpecies] = {
+            key: SecondarySpecies(**vals) for key, vals in secondary_dict.items()
+        }
+        mineral_species: dict[str, MineralSpecies] = {
+            key: MineralSpecies(**vals) for key, vals in mineral_dict.items()
+        }
+        exchange_reactions: dict[str, ExchangeReaction] = {
+            key: ExchangeReaction(**vals) for key, vals in exchange_dict.items()
+        }
+
+        tst_reactions: dict[str, dict[str, TstReaction]] = {}
+        for key, val in tst_dict.items():
+            tst_reactions[key] = {
+                label: TstReaction(**params) for label, params in val.items()
+            }
+
+        monod_reactions: dict[str, dict[str, MonodReaction]] = {}
+        for key, val in monod_dict.items():
+            monod_reactions[key] = {
+                label: MonodReaction(**params) for label, params in val.items()
+            }
+
+        return ChemicalDatabase(
+            primary_species=primary_species,
+            secondary_species=secondary_species,
+            mineral_species=mineral_species,
+            tst_reactions=tst_reactions,
+            monod_reactions=monod_reactions,
+            exchange_reactions=exchange_reactions
+        )
 
     def get_primary_species(
         self, species_name: str | list[str]
@@ -112,13 +169,13 @@ class ChemicalDatabase:
         self, species_name: str | list[str]
     ) -> list[PrimaryAqueousSpecies]:
         """Get one or more mineral species from the database"""
-        return NotImplemented
+        return [self.primary_species[name] for name in species_name]
 
     def get_mineral_species(
         self, primary_aq: list[PrimaryAqueousSpecies], species_name: str | list[str]
     ) -> list[MineralSpecies]:
         """Get one or more mineral species from the database"""
-        return NotImplemented
+        return [self.mineral_species[name] for name in species_name]
 
     def get_secondary_species(
         self, primary: list[PrimarySpecies], species_name: str | list[str]
@@ -127,7 +184,7 @@ class ChemicalDatabase:
         If a secondary species contains a primary species not included in `primary`, an error will be thrown to prevent
         the user from defining impossible reaction networks
         """
-        return NotImplemented
+        return [self.secondary_species[name] for name in species_name]
 
     def get_single_mineral_reaction(
         self, primary: list[PrimarySpecies], mineral: str | MineralSpecies, label: str
