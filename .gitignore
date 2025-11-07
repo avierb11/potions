@@ -192,3 +192,6 @@ pip-selfcheck.json
 # End of https://www.toptal.com/developers/gitignore/api/python,vscode,virtualenv
 potions/__pycache__/model.cpython-313.pyc
 potions/__pycache__/zones.cpython-313.pyc
+
+# Other data
+test_data/

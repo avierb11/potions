@@ -5,6 +5,10 @@ This file contains the types representing database objects
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 import json
+import os
+from typing import Literal
+
+from pandas import DataFrame, Series
 
 from .utils import Matrix
 
@@ -46,6 +50,12 @@ class SurfaceComplexationReaction:
     pass
 
 
+@dataclass
+class MineralKineticData:
+    tst_reactions: dict[str, TstReaction]
+    monod_reactions: dict[str, MonodReaction]
+
+
 @dataclass(frozen=True)
 class MineralKineticReaction:
     mineral_name: str
@@ -68,7 +78,7 @@ class MonodReaction(MineralKineticReaction):
 class ExchangeReaction:
     name: str  # Name of the species, like "XDOC", ...
     stoichiometry: dict[str, float]  # Stoichiometry describing this reaction
-    dh_size_param: float  # Debye-Huckel size parameter
+    log10_k_eq: float  # Base-10 log of the equilibrium constant
     charge: float  # Charge of this species
 
 
@@ -98,16 +108,23 @@ class ChemicalDatabase:
     monod_reactions: dict[str, dict[str, MonodReaction]]
 
     @staticmethod
-    def load_database() -> ChemicalDatabase:
-        """Load the default database with all of the reactions it contains"""
-        return NotImplemented
+    def load_default() -> ChemicalDatabase:
+        """
+        """
+        db_file_path: str = os.path.join(
+            os.path.dirname(__file__), "default_database.json"
+        )
+
+        return ChemicalDatabase.from_file(db_file_path)
+
 
     def to_file(self, file_path: str) -> None:
         """
         Save this database object to a file
         """
         with open(file_path, "w+") as f:
-            json.dump(self, f, indent=2)
+            json.dump(asdict(self), f, indent=2)
+
 
     @staticmethod
     def from_file(file_path: str) -> ChemicalDatabase:
@@ -120,8 +137,8 @@ class ChemicalDatabase:
         primary_dict: dict = raw_dict["primary_species"]
         secondary_dict: dict = raw_dict["secondary_species"]
         mineral_dict: dict = raw_dict["mineral_species"]
-        tst_dict: dict = raw_dict["tst_dict"]
-        monod_dict: dict = raw_dict["monod_dict"]
+        tst_dict: dict = raw_dict["tst_reactions"]
+        monod_dict: dict = raw_dict["monod_reactions"]
         exchange_dict: dict = raw_dict["exchange_reactions"]
 
         # Construct Python objects from Database
@@ -159,11 +176,6 @@ class ChemicalDatabase:
             exchange_reactions=exchange_reactions
         )
 
-    def get_primary_species(
-        self, species_name: str | list[str]
-    ) -> list[PrimarySpecies]:
-        """Get one or more primary species from the database, including aqueous or mineral species"""
-        return NotImplemented
 
     def get_primary_aqueous_species(
         self, species_name: str | list[str]
@@ -171,14 +183,16 @@ class ChemicalDatabase:
         """Get one or more mineral species from the database"""
         return [self.primary_species[name] for name in species_name]
 
+
     def get_mineral_species(
-        self, primary_aq: list[PrimaryAqueousSpecies], species_name: str | list[str]
+        self, mineral_name: str | list[str]
     ) -> list[MineralSpecies]:
         """Get one or more mineral species from the database"""
-        return [self.mineral_species[name] for name in species_name]
+        return [self.mineral_species[name] for name in mineral_name]
+
 
     def get_secondary_species(
-        self, primary: list[PrimarySpecies], species_name: str | list[str]
+        self, species_name: str | list[str]
     ) -> list[SecondarySpecies]:
         """Get the secondary species by also providing the primary species to ensure that the reactions are valid.
         If a secondary species contains a primary species not included in `primary`, an error will be thrown to prevent
@@ -186,58 +200,64 @@ class ChemicalDatabase:
         """
         return [self.secondary_species[name] for name in species_name]
 
+
     def get_single_mineral_reaction(
-        self, primary: list[PrimarySpecies], mineral: str | MineralSpecies, label: str
-    ) -> MineralKineticReaction:
+        self, mineral: str | MineralSpecies, label: str
+    ) -> tuple[Literal["tst", "monod"], MineralKineticReaction]:
         """
         Select the mineral reaction parameters produced by the included metrics
         """
-        return NotImplemented
+        mineral_name: str
+        if isinstance(mineral, MineralSpecies):
+            mineral_name = mineral.name
+        elif isinstance(mineral, str):
+            mineral_name = mineral
+        else:
+            raise TypeError(f"Mineral {mineral} is not a string or MineralSpecies")
+
+        if mineral_name in self.tst_reactions:
+            return "tst", self.tst_reactions[mineral_name][label]
+        elif mineral_name in self.monod_reactions:
+            return "monod", self.monod_reactions[mineral_name][label]
+        else:
+            raise ValueError(f"Mineral {mineral_name} not found in either TST or Monod reactions")
+
 
     def get_mineral_reactions(
         self,
-        primary: list[PrimarySpecies],
         mineral: list[str] | list[MineralSpecies],
         labels: list[str],
-    ) -> list[MineralKineticReaction]:
+    ) -> MineralKineticData:
         """
         Select the mineral reaction parameters for multiple reactions
         """
-        return NotImplemented
+        mineral_names: list[str] = [mineral.name if isinstance(mineral, MineralSpecies) else mineral for mineral in mineral]
+
+        mineral_reactions: dict = {
+            "tst": [],
+            "monod": []
+        }
+
+        for mineral, label in zip(mineral_names, labels): # type: ignore
+            reaction_type, reaction = self.get_single_mineral_reaction(mineral, label) # type: ignore
+            mineral_reactions[reaction_type].append(reaction)
+
+        return MineralKineticData(
+            tst_reactions={x.mineral_name: x for x in mineral_reactions["tst"]},
+            monod_reactions={x.mineral_name: x for x in mineral_reactions["monod"]}
+        )
+    
+    def get_exchange_reactions(
+        self,
+        species_name: str | list[str],
+    ) -> list[ExchangeReaction]:
+        """
+        Select the mineral reaction parameters for multiple reactions
+        """
+        if isinstance(species_name, str):
+            species_name = [species_name]
+
+        return [self.exchange_reactions[name] for name in species_name]
+       
 
 
-@dataclass
-class ReactionNetwork:
-    primary_aqueous: list[PrimaryAqueousSpecies]
-    mineral: list[MineralSpecies]
-    secondary: list[SecondarySpecies]
-    mineral_kinetics: list[MineralKineticReaction]
-
-    def species_names(self) -> list[str]:
-        """
-        Return the names of the species, in order, that they are solved
-        """
-        return NotImplemented
-
-    def stoich_matrix(self) -> Matrix:
-        """
-        Return the matrix describing the stoichiometry of each reaction in the network.
-        This has the dimension (number of minerals x number of primary species)
-        """
-        raise NotImplementedError()
-
-    def mass_conservation_matrix(self) -> Matrix:
-        """
-        Return the mass conservation matrix, describing how mass and charge are balanced
-        between reactions.
-        This has the dimension (number of primary species x number of total species)
-        """
-        return NotImplemented
-
-    def equilibrium_matrix(self) -> Matrix:
-        """
-        Construct and return the matrix describing the equilibrium constants of the secondary
-        species
-        This has the shape (number of secondary species x number of chemical species)
-        """
-        return NotImplemented

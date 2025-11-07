@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Final, ClassVar
 from numpy.typing import NDArray
 from dataclasses import dataclass
+import cython as cy
 from scipy.integrate import solve_ivp
 from .utils import HydroForcing
 from .interfaces import Zone, StepResult
@@ -23,6 +24,7 @@ class HydroStep(StepResult[float]):
         lat_flux: The lateral flux out of the zone to adjacent zones.
         vert_flux: The vertical flux out of the zone to the zone below.
     """
+
     state: float
     forc_flux: float
     vap_flux: float
@@ -45,6 +47,7 @@ class HydrologicZone(Zone[float, HydroForcing, HydroStep]):
     etc.), or they can provide a completely custom `step` method for more
     complex or analytical solutions (see `SnowZone` for an example).
     """
+
     name: ClassVar[str] = "unnamed"
 
     def vert_flux(self, s: float, d: HydroForcing) -> float:
@@ -149,6 +152,7 @@ class HydrologicZone(Zone[float, HydroForcing, HydroStep]):
         Returns:
             A `HydroStep` object containing the new state and all calculated fluxes.
         """
+
         def f(t: float, s: float) -> float:
             return self.mass_balance(s, d, q_in)
 
@@ -193,6 +197,7 @@ class SnowZone(HydrologicZone):
         tt: The threshold temperature (°C) below which precipitation is snow.
         fmax: The maximum melt rate factor (mm/day/°C).
     """
+
     tt: float
     fmax: float
     name: ClassVar[str] = "snow"
@@ -274,6 +279,7 @@ class SoilZone(HydrologicZone):
         k0: Rate constant for linear, threshold-based lateral flow (mm/day).
         thr: Storage threshold (mm) for lateral flow to begin.
     """
+
     tt: float
     fc: float
     lp: float
@@ -322,6 +328,7 @@ class GroundZone(HydrologicZone):
         alpha: Exponent for the non-linear lateral flux relationship.
         perc: Maximum rate of deep percolation out of the bottom of the model (mm/day).
     """
+
     k: float
     alpha: float
     perc: float

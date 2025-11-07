@@ -1,6 +1,5 @@
 from __future__ import annotations
 import datetime
-from tabnanny import verbose
 from typing import Final, Iterator, Optional, overload, Any, Generic, TypeVar
 from functools import reduce
 import operator
@@ -11,8 +10,7 @@ from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Series
 
-from potions.database import ReactionNetwork
-from potions.reactive_transport import ReactiveTransportZone, RtForcing
+from .reactive_transport import ReactiveTransportZone
 from .interfaces import Zone, StateType, ForcingType
 from .hydro import HydroForcing, HydrologicZone  # Still needed for run_hydro_model
 
@@ -149,7 +147,10 @@ class Model(Generic[ZoneType]):
     """
 
     def __init__(
-        self, hillslopes: list[Hillslope[ZoneType]], scales: list[list[float]], verbose: bool = False
+        self,
+        hillslopes: list[Hillslope[ZoneType]],
+        scales: list[list[float]],
+        verbose: bool = False,
     ) -> None:
         """Initializes the model engine.
 
@@ -168,9 +169,7 @@ class Model(Generic[ZoneType]):
         self.__size: int = reduce(operator.add, map(len, self.hillslopes), 0)
         self.__lat_matrix: NDArray[f64] = self.get_lat_mat()
         self.__vert_matrix: NDArray[f64] = self.get_vert_mat()
-        flat_scales: list[float] = [
-            item for sublist in scales for item in sublist
-        ]
+        flat_scales: list[float] = [item for sublist in scales for item in sublist]
         self.flat_scales: list[float] = flat_scales
         if verbose:
             print(f"Flattened scales: {flat_scales}")
@@ -737,11 +736,14 @@ def run_hydro_model(
     out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
     return out_df
 
+
 def run_reactive_transport_model(
     model: Model[ReactiveTransportZone],
     init_state: NDArray[f64],
     hydro_results: HydroModelResults,
-    rt_forcing: list[ForcingData],  # Assuming ForcingData contains solute concentrations
+    rt_forcing: list[
+        ForcingData
+    ],  # Assuming ForcingData contains solute concentrations
     dates: Series[datetime.date],
     dt: float,
 ) -> DataFrame:
