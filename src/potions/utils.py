@@ -4,7 +4,6 @@ from typing import Generic, TypeVar
 from dataclasses import dataclass
 import numpy as np
 from numpy import float64 as f64
-from numba.experimental import jitclass
 
 M = TypeVar("M", bound=int)
 N = TypeVar("N", bound=int)
