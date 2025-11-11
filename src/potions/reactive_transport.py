@@ -11,17 +11,33 @@ import scipy.linalg as la
 from scipy.optimize import fsolve
 from numpy import float64 as f64
 
-from .database import ExchangeReaction, MineralKineticData, MineralKineticReaction, MineralSpecies, MonodReaction, PrimaryAqueousSpecies, SecondarySpecies, TstReaction
+from .database import (
+    ExchangeReaction,
+    MineralKineticData,
+    MineralKineticReaction,
+    MineralSpecies,
+    MonodReaction,
+    PrimaryAqueousSpecies,
+    SecondarySpecies,
+    TstReaction,
+)
 
 from .interfaces import Zone, StepResult
 from .hydro import HydroForcing
 from .common_types import ChemicalState, RtForcing, Vector, Matrix, M, N
-from .reaction_network import MonodParameters, TstParameters, EquilibriumParameters, AuxiliaryParameters, MineralParameters
+from .reaction_network import (
+    MonodParameters,
+    TstParameters,
+    EquilibriumParameters,
+    AuxiliaryParameters,
+    MineralParameters,
+)
 
 
 @dataclass(frozen=True)
 class RtStep(StepResult[NDArray]):
     """Holds the results of a single time step for a ReactiveTransportZone."""
+
     state: NDArray
     forc_flux: NDArray
     vap_flux: NDArray
@@ -29,7 +45,7 @@ class RtStep(StepResult[NDArray]):
     vert_flux: NDArray
 
 
-class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
+class ReactiveTransportZone:
     """A zone that solves reactive transport
 
     This class acts as an ODE solver and orchestrator. It is initialized with
@@ -64,9 +80,8 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
         self.monod: MonodParameters = monod
         self.tst: TstParameters = tst
         self.eq: EquilibriumParameters = eq
-        self.aux: AuxiliaryParameters = aux 
+        self.aux: AuxiliaryParameters = aux
         self.min: MineralParameters = min
-      
 
     def mass_balance_ode(self, chms: NDArray, d: RtForcing) -> NDArray:
         """Calculates the net rate of change of concentration (dC/dt).
@@ -75,10 +90,13 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
         dm/dt = (dm/dt)_reaction + (dm/dt)_transport
         It calls the external functions provided during initialization.
         """
-        reaction_rate_vec: NDArray = self.reaction_rate(chms, d) # Rate of production or consumption of each of the mobile primary species (not minerals)
-        transport_rate_vec: NDArray = self.transport_rate(chms, d) # Rate of transport of of each of the mobile primary species 
+        reaction_rate_vec: NDArray = self.reaction_rate(
+            chms, d
+        )  # Rate of production or consumption of each of the mobile primary species (not minerals)
+        transport_rate_vec: NDArray = self.transport_rate(
+            chms, d
+        )  # Rate of transport of of each of the mobile primary species
         return reaction_rate_vec + transport_rate_vec
-
 
     def reaction_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
@@ -88,15 +106,18 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
         tst_rate: NDArray = self.tst.rate(chms)
         aux_rate: NDArray = self.aux.factor(d)
 
-        return self.min.rate_const * self.min.surface_area * aux_rate * (monod_rate + tst_rate)
-    
-    
+        return (
+            self.min.rate_const
+            * self.min.surface_area
+            * aux_rate
+            * (monod_rate + tst_rate)
+        )
+
     def transport_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
         Calculate the rate of transport for this time step for each of the aqueous species, including primary and secondary species
         """
-        return  (d.q_in / d.storage) * (d.conc_in - chms)
-
+        return (d.q_in / d.storage) * (d.conc_in - chms)
 
     def step(self, s_0: NDArray, d: RtForcing, dt: float, q_in: NDArray) -> RtStep:
         """Advances the chemical state by one time step."""
@@ -135,7 +156,6 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
             vert_flux=vert_flux,
         )
 
-
     def columns(self, zone_id: int) -> list[str]:
         """Gets the column names for this zone for the output DataFrame."""
         # This will need to be updated based on the number of species.
@@ -147,5 +167,3 @@ class ReactiveTransportZone(Zone[NDArray, RtForcing, RtStep]):
             f"j_lat_{name}",
             f"j_vert_{name}",
         ]
-
-

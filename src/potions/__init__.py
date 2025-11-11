@@ -34,7 +34,7 @@ from .database import (
     ChemicalDatabase,
 )
 
-from .hydro_models import HbvModel, run_hbv_model
+from .hydro_models import HbvModel, HbvLateralModel
 
 from .common_types import ChemicalState, RtForcing
 

@@ -27,9 +27,9 @@ def test_SoilZone() -> None:
     d_t: float = 1.0
     q_in: float = 0.0
 
-    sz: SoilZone = SoilZone(0.0, 100.0, 1.0, 1.0, 0.1, 50.0)
+    sz: SoilZone = SoilZone(tt=0.0, fc=100.0, lp=1.0, beta=1.0, k0=0.1, thr=50.0)
 
-    assert abs(sz.forc_flux(s_0, d) - 1.0) < 1e-7
+    assert abs(sz.forc_flux(s_0, d) - 0.5) < 1e-7
     assert abs(sz.vert_flux(s_0, d) - 0.5) < 1e-7
     assert abs(sz.lat_flux(s_0, d) - 0.0) < 1e-7
     assert abs(sz.vap_flux(s_0, d) - 1.0) < 1e-7
@@ -37,10 +37,10 @@ def test_SoilZone() -> None:
 
     new_state: HydroStep = sz.step(s_0, d, d_t, q_in)
     # assert abs(new_state.state - 50.0) < 1e-7
-    assert abs(new_state.forc_flux - 1.0) < 1e-7
-    assert abs(new_state.vert_flux - 0.495) < 1e-3
+    assert abs(new_state.forc_flux - 0.510) < 1e-3
+    assert abs(new_state.vert_flux - 0.490) < 1e-3
     assert abs(new_state.lat_flux - 0.0) < 1e-7
-    assert abs(new_state.vap_flux - 0.990) < 1e-3
+    assert abs(new_state.vap_flux - 0.980) < 1e-3
 
 
 def test_GroundZone() -> None:

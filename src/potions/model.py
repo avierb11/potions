@@ -8,7 +8,7 @@ from warnings import deprecated
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
-from pandas import DataFrame, Series
+from pandas import DataFrame, Index, Series
 
 from .reactive_transport import ReactiveTransportZone
 from .interfaces import Zone, StateType, ForcingType
@@ -34,7 +34,7 @@ class ForcingData:
     pet: Series[f64]
 
 
-class Layer(Generic[ZoneType]):
+class Layer:
     """A horizontal collection of computational zones.
 
     A Layer represents a set of zones that are at the same vertical level
@@ -43,33 +43,33 @@ class Layer(Generic[ZoneType]):
     """
 
     @overload
-    def __init__(self, *zones: ZoneType) -> None:
+    def __init__(self, *zones: HydrologicZone) -> None:
         """Initializes a Layer with a variable number of Zone objects."""
         ...
 
     @overload
-    def __init__(self, zones: list[ZoneType]) -> None:
+    def __init__(self, zones: list[HydrologicZone]) -> None:
         """Initializes a Layer with a list of Zone objects."""
         ...
 
     def __init__(self, *args: Any) -> None:  # type: ignore
         if len(args) == 1 and isinstance(args[0], list):
-            self.__zones: list[ZoneType] = args[0]
+            self.__zones: list[HydrologicZone] = args[0]
         else:
             self.__zones = list(args)
 
     @property
-    def zones(self) -> list[ZoneType]:
+    def zones(self) -> list[HydrologicZone]:
         """The list of zones contained within this layer."""
         return self.__zones
 
-    def __iter__(self) -> Iterator[ZoneType]:
+    def __iter__(self) -> Iterator[HydrologicZone]:
         return iter(self.zones)
 
     def __len__(self) -> int:
         return len(self.zones)
 
-    def __getitem__(self, ind: int) -> Optional[ZoneType]:
+    def __getitem__(self, ind: int) -> Optional[HydrologicZone]:
         if 0 <= ind < len(self.zones):
             return self.__zones[ind]
         else:
@@ -77,7 +77,7 @@ class Layer(Generic[ZoneType]):
 
 
 @dataclass(frozen=True)
-class Hillslope(Generic[ZoneType]):
+class Hillslope:
     """A vertical stack of Layers, representing a single landscape unit.
 
     A Hillslope is a fundamental structural component of a model, composed of
@@ -87,21 +87,21 @@ class Hillslope(Generic[ZoneType]):
         layers: A list of Layer objects, ordered from top to bottom.
     """
 
-    layers: list[Layer[ZoneType]]
+    layers: list[Layer]
 
-    def __iter__(self) -> Iterator[Layer[ZoneType]]:
+    def __iter__(self) -> Iterator[Layer]:
         return iter(self.layers)
 
     def __len__(self) -> int:
         return reduce(operator.add, map(len, self.layers), 0)
 
-    def __getitem__(self, ind: int) -> Optional[Layer[ZoneType]]:
+    def __getitem__(self, ind: int) -> Optional[Layer]:
         if 0 <= ind < len(self.layers):
             return self.layers[ind]
         else:
             return None
 
-    def flatten(self) -> list[ZoneType]:
+    def flatten(self) -> list[HydrologicZone]:
         """Flattens the hillslope structure into a single list of zones.
 
         The zones are ordered from top layer to bottom layer, and within each
@@ -148,7 +148,7 @@ class Model(Generic[ZoneType]):
 
     def __init__(
         self,
-        hillslopes: list[Hillslope[ZoneType]],
+        hillslopes: list[Hillslope],
         scales: list[list[float]],
         verbose: bool = False,
     ) -> None:
@@ -160,7 +160,7 @@ class Model(Generic[ZoneType]):
                 and each forcing source within that hillslope.
         """
         self.verbose: bool = verbose
-        self.__hillslopes: list[Hillslope[ZoneType]] = hillslopes
+        self.__hillslopes: list[Hillslope] = hillslopes
         self.__scales: list[list[float]] = scales
         # self.__flat_model: list[AnnotatedZone] = self.flatten(
         #     scales
@@ -204,7 +204,7 @@ class Model(Generic[ZoneType]):
         return self.__forcing_rel_mat
 
     @property
-    def hillslopes(self) -> list[Hillslope[ZoneType]]:
+    def hillslopes(self) -> list[Hillslope]:
         """The list of `Hillslope` objects that define the model structure."""
         return self.__hillslopes
 
@@ -216,7 +216,7 @@ class Model(Generic[ZoneType]):
     def __len__(self) -> int:
         return self.__size
 
-    def __iter__(self) -> Iterator[Hillslope[ZoneType]]:
+    def __iter__(self) -> Iterator[Hillslope]:
         return iter(self.hillslopes)
 
     def flatten_old(self, scales: list[list[float]]) -> list[AnnotatedZone]:
@@ -287,13 +287,16 @@ class Model(Generic[ZoneType]):
             )
             q_in = q_in_lat + q_in_vert
 
-            step_res = zone.step(s_i, d_i, dt, q_in)
+            s_i = float(s_i)  # type: ignore
+            if not isinstance(s_i, float):
+                raise RuntimeError(f"State must be float, not {type(s_i)}")
+            step_res: ModelStep = zone.step(s_i, d_i, dt, q_in)  # type: ignore
 
-            new_states.append(step_res.state)
-            forc_fluxes.append(step_res.forc_flux)
-            vap_fluxes.append(step_res.vap_flux)
-            lat_fluxes.append(step_res.lat_flux)
-            vert_fluxes.append(step_res.vert_flux)
+            new_states.append(step_res.state)  # type: ignore
+            forc_fluxes.append(step_res.forc_flux)  # type: ignore
+            vap_fluxes.append(step_res.vap_flux)  # type: ignore
+            lat_fluxes.append(step_res.lat_flux)  # type: ignore
+            vert_fluxes.append(step_res.vert_flux)  # type: ignore
 
         return ModelStep(
             state=new_states,
@@ -540,7 +543,7 @@ class HydroModelResults:
 
 @deprecated("Uses the older forcing data format.")
 def run_hydro_model_older(
-    model: Model[HydrologicZone],
+    model: Model[HydrologicZone],  # type: ignore
     init_state: NDArray[np.float64],
     forc: list[list[HydroForcing]],
     dates: Series[datetime.date],
@@ -585,7 +588,8 @@ def run_hydro_model_older(
             fluxes[i, :, 3] = np.array(step_res.vert_flux)
             # Convert state back to array for the next iteration
             state = np.array(step_res.state)
-        except ValueError:
+        except ValueError as e:
+            print(e)
             print(f"Failed on step {i}, returning early")
             break
 
@@ -606,10 +610,10 @@ def run_hydro_model_older(
 
 
 def run_hydro_model(
-    model: Model[HydrologicZone],
+    model: Model[HydrologicZone],  # type: ignore
     init_state: NDArray[f64],
     forc: list[ForcingData],
-    dates: Series[datetime.date],
+    dates: Series[datetime.date] | Index[datetime.date],
     dt: float,
 ) -> DataFrame:
     """Runs a complete hydrologic simulation.
@@ -717,9 +721,10 @@ def run_hydro_model(
             fluxes[t_idx, :, 3] = np.array(step_res.vert_flux)
             # Convert state back to array for the next iteration
             state = np.array(step_res.state)
-        except ValueError:
-            print(f"Failed on step {t_idx}, returning early")
-            break
+        except ValueError as e:
+            # print(f"Failed on step {t_idx}, returning early")
+            # break
+            raise e
 
     full_array: NDArray[f64] = np.full(
         (num_steps, 5 * num_zones), fill_value=np.nan, dtype=float
@@ -738,7 +743,7 @@ def run_hydro_model(
 
 
 def run_reactive_transport_model(
-    model: Model[ReactiveTransportZone],
+    model: Model[ReactiveTransportZone],  # type: ignore
     init_state: NDArray[f64],
     hydro_results: HydroModelResults,
     rt_forcing: list[

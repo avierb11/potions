@@ -1,6 +1,5 @@
 from __future__ import annotations
-from abc import ABC, abstractmethod
-from typing import TypeVar, Generic, Protocol
+from typing import TypeVar, Protocol
 
 # 1. DEFINE GENERIC TYPE VARIABLES
 # These act as placeholders for the specific types that each model will use.
@@ -28,16 +27,13 @@ class StepResult(Protocol[StateType]):
 
 
 # 3. DEFINE A GENERIC INTERFACE FOR A COMPUTATIONAL ZONE
-class Zone(ABC, Generic[StateType, ForcingType, StepResultType]):
+class Zone:
     """An abstract base class that defines the generic interface for a single
     computational unit in the model (e.g., a HydrologicZone or a
     ReactiveTransportZone).
     """
 
-    @abstractmethod
-    def step(
-        self, s_0: StateType, d: ForcingType, dt: float, q_in: StateType
-    ) -> StepResultType:
+    def step(self, s_0: object, d: object, dt: float, q_in: object) -> object:
         """Advances the state of the zone by one time step.
 
         Args:
@@ -49,14 +45,12 @@ class Zone(ABC, Generic[StateType, ForcingType, StepResultType]):
         Returns:
             A StepResult object containing the new state and all calculated fluxes.
         """
-        ...
+        raise NotImplementedError
 
-    @abstractmethod
     def param_list(self) -> list[float]:
         """Return a list of the zone's parameter values for analysis."""
-        ...
+        raise NotImplementedError
 
-    @abstractmethod
     def columns(self, zone_id: int) -> list[str]:
         """Gets the column names for this zone for the output DataFrame."""
-        ...
+        raise NotImplementedError
