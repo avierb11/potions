@@ -528,17 +528,17 @@ class AnnotatedZone:
     incoming_fluxes: list[int]
 
 
-@dataclass
-class HydroModelResults:
-    """A container for the results of a hydrologic model run.
+# @dataclass
+# class HydroModelResults:
+#     """A container for the results of a hydrologic model run.
 
-    Attributes:
-        state: A DataFrame containing the time series of states for all zones.
-        fluxes: A DataFrame containing the time series of fluxes for all zones.
-    """
+#     Attributes:
+#         state: A DataFrame containing the time series of states for all zones.
+#         fluxes: A DataFrame containing the time series of fluxes for all zones.
+#     """
 
-    state: DataFrame
-    fluxes: DataFrame
+#     state: DataFrame
+#     fluxes: DataFrame
 
 
 @deprecated("Uses the older forcing data format.")

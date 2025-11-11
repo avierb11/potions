@@ -12,8 +12,7 @@ from .model import (
     Layer,
     Hillslope,
     Model,
-    HydroModelResults,
-    run_hydro_model_older,
+    # HydroModelResults,
     run_hydro_model,
 )
 
@@ -34,7 +33,7 @@ from .database import (
     ChemicalDatabase,
 )
 
-from .hydro_models import HbvModel, HbvLateralModel
+from .hydro_models import HydrologicModel, HbvModel, HbvLateralModel, HydroModelResults
 
 from .common_types import ChemicalState, RtForcing
 
