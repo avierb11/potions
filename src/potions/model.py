@@ -1,18 +1,26 @@
 from __future__ import annotations
+from abc import abstractmethod
 import datetime
 from typing import Final, Iterator, Optional, overload, Any, Generic, TypeVar
 from functools import reduce
 import operator
 from dataclasses import dataclass
 from warnings import deprecated
+import networkx as nx
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
-from pandas import DataFrame, Index, Series
+from pandas import DataFrame, Index, Series, Timestamp
 
 from .reactive_transport import ReactiveTransportZone
-from .interfaces import Zone, StateType, ForcingType
-from .hydro import HydroForcing, HydrologicZone  # Still needed for run_hydro_model
+from .interfaces import Zone, StateType
+from .hydro import (
+    GroundZone,
+    HydroForcing,
+    HydrologicZone,
+    SnowZone,
+    SoilZone,
+)  # Still needed for run_hydro_model
 
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
@@ -136,7 +144,7 @@ class ModelStep(Generic[StateType]):
     vert_flux: list[StateType]
 
 
-class Model(Generic[ZoneType]):
+class Model:
     """The main model engine that orchestrates the simulation.
 
     This is a generic class that can manage and run simulations for any type of
@@ -148,35 +156,34 @@ class Model(Generic[ZoneType]):
 
     def __init__(
         self,
-        hillslopes: list[Hillslope],
-        scales: list[list[float]],
+        layers: list[Layer],
+        scales: list[float],
         verbose: bool = False,
     ) -> None:
         """Initializes the model engine.
 
         Args:
-            hillslopes: A list of `Hillslope` objects that make up the model structure.
+            layers: A list of `Layer` objects that make up the model structure.
             scales: A nested list defining the relative area of each hillslope
                 and each forcing source within that hillslope.
         """
         self.verbose: bool = verbose
-        self.__hillslopes: list[Hillslope] = hillslopes
-        self.__scales: list[list[float]] = scales
-        # self.__flat_model: list[AnnotatedZone] = self.flatten(
-        #     scales
-        # )  # Model in linear order to be evaluated
-        self.__flat_model: list[ZoneType] = self.flatten()
-        self.__size: int = reduce(operator.add, map(len, self.hillslopes), 0)
-        self.__lat_matrix: NDArray[f64] = self.get_lat_mat()
-        self.__vert_matrix: NDArray[f64] = self.get_vert_mat()
-        flat_scales: list[float] = [item for sublist in scales for item in sublist]
-        self.flat_scales: list[float] = flat_scales
-        if verbose:
-            print(f"Flattened scales: {flat_scales}")
-        self.__forcing_mat: NDArray[f64] = self.get_forc_mat(flat_scales)
-        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(
-            flat_scales, relative=True
-        )
+        self.__layers: list[Layer] = layers
+        self.__scales: list[float] = scales
+        self.__flat_model: list[HydrologicZone] = self.flatten()
+        self.__size: int = reduce(operator.add, map(len, self.layers), 0)
+
+        # Calculate the connectivity matrices
+        self.__zone_graph: nx.DiGraph = self.construct_hydrologic_graph()
+        lat, vert, _ = self.get_connection_matrices_with_river_row(self.__zone_graph)
+        self.__lat_matrix: NDArray[f64] = lat
+        self.__vert_matrix: NDArray[f64] = vert
+        self.__forcing_mat: NDArray[f64] = self.get_forc_mat(scales)
+        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(scales, relative=True)
+
+    @property
+    def graph(self) -> nx.DiGraph:
+        return self.__zone_graph
 
     @property
     def lat_mat(self) -> NDArray[f64]:
@@ -204,61 +211,39 @@ class Model(Generic[ZoneType]):
         return self.__forcing_rel_mat
 
     @property
-    def hillslopes(self) -> list[Hillslope]:
-        """The list of `Hillslope` objects that define the model structure."""
-        return self.__hillslopes
+    def layers(self) -> list[Layer]:
+        """The list of `Layer` objects that define the model structure."""
+        return self.__layers
 
     @property
-    def scales(self) -> list[list[float]]:
+    def scales(self) -> list[float]:
         """The nested list of relative areas for hillslopes and forcing sources."""
         return self.__scales
 
     def __len__(self) -> int:
-        return self.__size
+        return len(self.layers)
 
-    def __iter__(self) -> Iterator[Hillslope]:
-        return iter(self.hillslopes)
+    def __iter__(self) -> Iterator[Layer]:
+        return iter(self.layers)
 
-    def flatten_old(self, scales: list[list[float]]) -> list[AnnotatedZone]:
-        """(Deprecated) Flattens the model structure."""
-        positions: list[ZonePosition] = []
-        cur_zone: int = 0
-
-        hillslope_id: int
-        hillslope: Hillslope
-        for hillslope_id, hillslope in enumerate(self.hillslopes):
-            layer_id: int
-            layer: Layer
-            for layer_id, layer in enumerate(hillslope.layers):
-                zone_id: int
-                # _zone: HydrologicZone
-                for zone_id, _zone in enumerate(layer.zones):
-                    positions.append(
-                        ZonePosition(cur_zone, zone_id, layer_id, hillslope_id)
-                    )
-                    cur_zone += 1
-
-        # raise NotImplementedError()
-        return NotImplemented
-
-    def flatten(self) -> list[ZoneType]:
+    def flatten(self) -> list[HydrologicZone]:
         """Flattens the model structure into a single list of zones."""
-        return reduce(operator.add, map(lambda x: x.flatten(), self.hillslopes), [])
+        return reduce(operator.add, map(lambda x: x.zones, self.layers), [])
 
     @property
-    def flat_model(self) -> list[ZoneType]:
+    def flat_model(self) -> list[HydrologicZone]:
         """A 1D list of all zones in the model, in the order of evaluation."""
         return self.__flat_model
 
     def step(
-        self, state: list[StateType], ds: list[ForcingType], dt: float
-    ) -> ModelStep[StateType]:
+        self, state: NDArray[f64], ds: list[HydroForcing], dt: float
+    ) -> ModelStep[float]:
         """Step the model given the current state, forcing, and the time step."""
-        new_states: list[StateType] = []
-        forc_fluxes: list[StateType] = []
-        vap_fluxes: list[StateType] = []
-        lat_fluxes: list[StateType] = []
-        vert_fluxes: list[StateType] = []
+        new_states: list[float] = []
+        forc_fluxes: list[float] = []
+        vap_fluxes: list[float] = []
+        lat_fluxes: list[float] = []
+        vert_fluxes: list[float] = []
 
         # Determine the 'zero' value for fluxes based on the state type
         zero_flux: Any = 0.0
@@ -267,9 +252,9 @@ class Model(Generic[ZoneType]):
             zero_flux = np.zeros_like(state[0])
 
         i: int
-        zone: ZoneType
-        s_i: StateType
-        d_i: ForcingType
+        zone: HydrologicZone
+        s_i: float
+        d_i: HydroForcing
         for i, (zone, (s_i, d_i)) in enumerate(zip(self.flat_model, zip(state, ds))):
             # Calculate incoming flux from previously stepped zones.
             # This works for both floats and numpy arrays.
@@ -306,124 +291,23 @@ class Model(Generic[ZoneType]):
             vert_flux=vert_fluxes,
         )
 
-    def get_hillslope_vert_mat(self, hs: Hillslope) -> NDArray[f64]:
-        """Calculates the vertical connectivity matrix for a single hillslope.
-
-        Args:
-            hs: The hillslope for which to calculate the matrix.
-
-        Returns:
-            A square matrix where `mat[i, j] = 1` if zone `j` flows vertically
-            into zone `i`.
+    def get_river_zone_ids(self) -> list[int]:
         """
-        n: Final[int] = len(hs)
-        mat: NDArray[f64] = np.zeros((n, n), dtype=float)
-        cz: int = 0  # The current zone
-
-        if len(hs) == 0:
-            raise ValueError("Hillslope must have at least one layer")
-
-        rect_domain: NDArray = np.zeros((len(hs.layers), len(hs[0])), dtype=int)  # type: ignore
-        for i, ly in enumerate(hs):
-            if len(ly) == 1:
-                rect_domain[i, :] = cz
-                cz += 1
-            elif len(ly) == rect_domain.shape[1]:
-                for j, _ in enumerate(ly):
-                    rect_domain[i, j] = cz
-                    cz += 1
-            else:
-                raise ValueError("Invalid model structure encountered")
-
-        cz = 0
-        layer: Layer
-        for i, layer in enumerate(hs):
-            match hs[i + 1]:
-                case Layer():
-                    for j, _ in enumerate(layer):
-                        mat[cz, rect_domain[i + 1, j]] = 1.0
-                        cz += 1
-                case None:
-                    cz += len(layer)
-                    continue
-                case _:
-                    raise ValueError("Invalid model structure")
-
-        return mat.T
-
-    def get_vert_mat(self) -> NDArray[f64]:
-        """Assembles the block-diagonal vertical connectivity matrix for the entire model.
-
-        Returns:
-            The full vertical connectivity matrix for the model.
+        Get a list of the indices of the zones (in the flattened model) that laterally flow into the river.
+        These zones are the final zones in a layer.
         """
-        hs_blocks: list[NDArray[f64]] = [self.get_hillslope_vert_mat(hs) for hs in self]
-        model_dim = len(self)
-        mat: NDArray[f64] = np.zeros((model_dim, model_dim))
+        river_zones: list[int] = []
+        current_zone_idx: int = 0
+        for layer in self.layers:
+            # The last zone in each layer of each hillslope is considered to flow into the river
+            # This assumes a rectangular domain for simplicity in this method
+            if len(layer) > 0:
+                river_zones.append(current_zone_idx + len(layer) - 1)
+            current_zone_idx += len(layer)
+        return river_zones
 
-        cur: int = 0
-        for b in hs_blocks:
-            mat[cur : cur + b.shape[0], cur : cur + b.shape[0]] = b
-            cur += b.shape[0]
-
-        return mat
-
-    def get_hillslope_lat_mat(self, hs: Hillslope) -> NDArray[f64]:
-        """Calculates the lateral connectivity matrix for a single hillslope.
-
-        Args:
-            hs: The hillslope for which to calculate the matrix.
-
-        Returns:
-            A square matrix where `mat[i, j] = 1` if zone `j` flows laterally
-            into zone `i`.
-        """
-        n: Final[int] = len(hs)
-        mat: NDArray[f64] = np.zeros((n, n), dtype=float)
-        cz: int = 0  # The current zone
-
-        if len(hs) == 0:
-            raise ValueError("Hillslope must have at least one layer")
-
-        rect_domain: NDArray = np.zeros((len(hs.layers), len(hs[0])), dtype=int)  # type: ignore
-        for i, ly in enumerate(hs):
-            if len(ly) == 1:
-                rect_domain[i, :] = cz
-                cz += 1
-            elif len(ly) == rect_domain.shape[1]:
-                for j, _ in enumerate(ly):
-                    rect_domain[i, j] = cz
-                    cz += 1
-            else:
-                raise ValueError("Invalid model structure encountered")
-
-        cz = 0
-        layer: Layer
-        for i, layer in enumerate(hs):
-            # For each zone in the layer, check if it has a neighbor to the right
-            for j, zone in enumerate(layer):
-                if layer[j + 1] is not None:  # Check for neighbor
-                    mat[cz, rect_domain[i, j + 1]] = 1.0
-                cz += 1
-
-        return mat.T
-
-    def get_lat_mat(self) -> NDArray[f64]:
-        """Assembles the block-diagonal lateral connectivity matrix for the entire model.
-
-        Returns:
-            The full lateral connectivity matrix for the model.
-        """
-        hs_blocks: list[NDArray[f64]] = [self.get_hillslope_lat_mat(hs) for hs in self]
-        model_dim = len(self)
-        mat: NDArray[f64] = np.zeros((model_dim, model_dim))
-
-        cur: int = 0
-        for b in hs_blocks:
-            mat[cur : cur + b.shape[0], cur : cur + b.shape[0]] = b
-            cur += b.shape[0]
-
-        return mat
+    def num_zones(self) -> int:
+        return len(self.flat_model)
 
     def get_size_mat(self) -> NDArray[f64]:
         """Calculates a matrix mapping surface zones to their contributing areas.
@@ -434,7 +318,7 @@ class Model(Generic[ZoneType]):
         Returns:
             A matrix mapping forcing sources to zones.
         """
-        vert: NDArray[f64] = self.get_vert_mat()
+        vert: NDArray[f64] = self.__vert_matrix
         index_rows: list[int] = [
             i for i, row in enumerate(vert) if row.sum() < 1e-12
         ]  # The zone indices of the surface zones. They have no vertical zones above
@@ -493,6 +377,143 @@ class Model(Generic[ZoneType]):
 
         return names
 
+    @property
+    def zone_labels(self) -> list[str]:
+        """A list of zone labels for the final output DataFrame."""
+        return [f"{zone.name}_{i}" for i, zone in enumerate(self.flat_model)]
+
+    # Newer definitions
+    def construct_hydrologic_graph(self: Model):
+        G = nx.DiGraph()
+
+        # Node identifiers will be tuples: (layer_idx, zone_idx)
+
+        # 1. Add all zones as nodes and create lateral connections
+        zone_counter: int = 0
+        for l_idx, layer in enumerate(self.layers):
+            for z_idx, zone in enumerate(layer.zones):
+                node_id = (l_idx, z_idx)
+                G.add_node(
+                    node_id, obj=zone, name=self.zone_labels[zone_counter]
+                )  # Store the actual Zone object if needed
+
+                # Add lateral connections (within the same layer, towards the river)
+                # Assuming zones are ordered from upstream to downstream within a layer
+                if z_idx < len(layer.zones) - 1:
+                    next_zone_node_id = (l_idx, z_idx + 1)
+                    G.add_edge(
+                        node_id,
+                        next_zone_node_id,
+                        type="lateral",
+                    )
+
+                zone_counter += 1
+
+        # 2. Add vertical connections between layers
+        for l_idx in range(len(self.layers) - 1):
+            current_layer = self.layers[l_idx]
+            next_layer = self.layers[l_idx + 1]
+
+            num_zones_current = len(current_layer.zones)
+            num_zones_next = len(next_layer.zones)
+
+            # Rule: Vertical flux flows into a single zone
+            if num_zones_current == num_zones_next:
+                # Case 1: Same number of zones, each flows to the one directly below
+                for z_idx in range(num_zones_current):
+                    from_node = (l_idx, z_idx)
+                    to_node = (l_idx + 1, z_idx)
+                    G.add_edge(from_node, to_node, type="vertical")
+            elif num_zones_next == 1:
+                # Case 2: All zones flow into a single aggregated zone in the layer below
+                for z_idx in range(num_zones_current):
+                    from_node = (l_idx, z_idx)
+                    to_node = (l_idx + 1, 0)  # The single zone in the next layer
+                    G.add_edge(from_node, to_node, type="vertical")
+            else:
+                # Handle invalid layer configurations according to your rules
+                print(
+                    f"Warning: Layer {l_idx} has {num_zones_current} zones, "
+                    f"but Layer {l_idx + 1} has {num_zones_next} zones. "
+                    "No vertical connections added for this layer pair as it violates rules."
+                )
+        return G
+
+    def get_connection_matrices_with_river_row(
+        self: Model, G: nx.DiGraph
+    ) -> tuple[NDArray, NDArray, list[str]]:
+        """
+        Generates lateral and vertical connection matrices, each augmented
+        with an additional row representing outflow to the river.
+
+        Args:
+            G (nx.DiGraph): The full hydrologic graph.
+            model (Model): The model object, used to identify river connection zones.
+
+        Returns:
+            tuple: (lateral_matrix_augmented, vertical_matrix_augmented, all_nodes)
+                - lateral_matrix_augmented (np.array): (n+1) x n matrix for lateral flows + river outflow.
+                - vertical_matrix_augmented (np.array): (n+1) x n matrix for vertical flows + river outflow.
+                - all_nodes (list): Ordered list of nodes corresponding to matrix columns (and first n rows).
+        """
+        # Ensure consistent node ordering across all matrices
+        all_nodes = sorted(list(G.nodes()))
+        num_zones = len(all_nodes)  # This is 'n'
+
+        # Create separate graphs for lateral and vertical connections (n x n part)
+        G_lateral = nx.DiGraph()
+        G_vertical = nx.DiGraph()
+
+        # Add all nodes to ensure the adjacency matrices have the same dimensions and node mapping
+        G_lateral.add_nodes_from(all_nodes)
+        G_vertical.add_nodes_from(all_nodes)
+
+        for u, v, data in G.edges(data=True):
+            if data["type"] == "lateral":
+                G_lateral.add_edge(u, v)
+            elif data["type"] == "vertical":
+                G_vertical.add_edge(u, v)
+
+        # Convert to NumPy adjacency matrices (n x n)
+        lateral_matrix_nn = nx.to_numpy_array(G_lateral, nodelist=all_nodes).T
+        vertical_matrix_nn = nx.to_numpy_array(G_vertical, nodelist=all_nodes).T
+
+        # --- Construct the River Outflow Indicator Row ---
+        river_nodes = self.get_river_zone_ids()
+        river_outflow_indicator_row = np.zeros(num_zones, dtype=int)
+        river_outflow_indicator_row[river_nodes] = 1
+
+        # --- Append the River Outflow Indicator Row to the matrices ---
+        lateral_matrix_augmented = np.vstack(
+            [lateral_matrix_nn, river_outflow_indicator_row]
+        )
+
+        return lateral_matrix_augmented, vertical_matrix_nn, all_nodes
+
+    @abstractmethod
+    def to_array(self) -> NDArray:
+        """
+        Convert the model parameters into an array
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def from_array(cls, arr: NDArray) -> Model:
+        """
+        Create a new object of this type from a numpy array
+        """
+        pass
+
+
+class HbvModel(Model):
+    structure: list[list[HydrologicZone]] = [
+        [SnowZone(name="snow")],
+        [SoilZone(name="soil")],
+        [GroundZone(name="shallow")],
+        [GroundZone(name="deep")],
+    ]
+
 
 @dataclass(frozen=True)
 class ZonePosition:
@@ -528,93 +549,11 @@ class AnnotatedZone:
     incoming_fluxes: list[int]
 
 
-# @dataclass
-# class HydroModelResults:
-#     """A container for the results of a hydrologic model run.
-
-#     Attributes:
-#         state: A DataFrame containing the time series of states for all zones.
-#         fluxes: A DataFrame containing the time series of fluxes for all zones.
-#     """
-
-#     state: DataFrame
-#     fluxes: DataFrame
-
-
-@deprecated("Uses the older forcing data format.")
-def run_hydro_model_older(
-    model: Model[HydrologicZone],  # type: ignore
-    init_state: NDArray[np.float64],
-    forc: list[list[HydroForcing]],
-    dates: Series[datetime.date],
-    dt: float,
-) -> DataFrame:
-    """Runs a complete hydrologic simulation using a legacy forcing format.
-
-    This function iterates through time, calling the model's `step` method at
-    each interval and collecting the results into a pandas DataFrame.
-
-    Args:
-        model: The configured `Model[HydrologicZone]` instance to run.
-        init_state: An array of initial storage values for each zone.
-        forc: A nested list of `HydroForcing` objects. The outer list represents
-            time steps, and the inner list corresponds to each zone.
-        dates: A pandas Series of dates for the output DataFrame index.
-        dt: The time step duration in days.
-
-    Returns:
-        A pandas DataFrame containing the time series of states and fluxes for
-        all zones in the model.
-    """
-    num_steps: Final[int] = len(forc)  # Number of steps
-    num_zones: Final[int] = len(model)
-    storages: NDArray[np.float64] = np.full(
-        (num_steps, num_zones), fill_value=np.nan, dtype=float
-    )
-    fluxes: NDArray[np.float64] = np.full(
-        (num_steps, num_zones, 4), fill_value=np.nan, dtype=float
-    )
-
-    state: NDArray[np.float64] = init_state
-
-    for i, forc_i in enumerate(forc):
-        try:
-            # Convert state array to list for the generic step method
-            step_res: ModelStep = model.step(list(state), forc_i, dt)
-            storages[i] = np.array(step_res.state)
-            fluxes[i, :, 0] = np.array(step_res.forc_flux)
-            fluxes[i, :, 1] = np.array(step_res.vap_flux)
-            fluxes[i, :, 2] = np.array(step_res.lat_flux)
-            fluxes[i, :, 3] = np.array(step_res.vert_flux)
-            # Convert state back to array for the next iteration
-            state = np.array(step_res.state)
-        except ValueError as e:
-            print(e)
-            print(f"Failed on step {i}, returning early")
-            break
-
-    full_array: NDArray[f64] = np.full(
-        (num_steps, 5 * num_zones), fill_value=np.nan, dtype=float
-    )
-    for i in range(num_zones):
-        full_array[:, 5 * i] = storages[:, i]
-        full_array[:, 5 * i + 1] = fluxes[:, i, 0]  # Forcing
-        full_array[:, 5 * i + 2] = fluxes[:, i, 1]  # Vaporization
-        full_array[:, 5 * i + 3] = fluxes[:, i, 2]  # Lateral
-        full_array[:, 5 * i + 4] = fluxes[:, i, 3]  # Vertical
-
-    col_names: list[str] = model.column_names
-
-    out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
-    return out_df
-
-
 def run_hydro_model(
     model: Model[HydrologicZone],  # type: ignore
     init_state: NDArray[f64],
     forc: list[ForcingData],
-    dates: Series[datetime.date] | Index[datetime.date],
-    dt: float,
+    dates: Series[Timestamp] | Index[Timestamp],
 ) -> DataFrame:
     """Runs a complete hydrologic simulation.
 
@@ -641,7 +580,7 @@ def run_hydro_model(
             inconsistent.
     """
     num_steps: Final[int] = len(dates)  # Number of steps
-    num_zones: Final[int] = len(model)
+    num_zones: Final[int] = model.num_zones()
     num_forcing_sources_expected: Final[int] = model.precip_mat.shape[1]
 
     all_precip_sources_matrix: NDArray[f64]
@@ -700,8 +639,14 @@ def run_hydro_model(
 
     state: NDArray[f64] = init_state
 
+    delta_ts: list[float] = [
+        (dates[i] - dates[i - 1]).days for i in range(1, len(dates))
+    ]
+    delta_ts.append(delta_ts[-1])
+
     for t_idx in range(num_steps):
         # Forcings for the current time step, one HydroForcing object per zone
+        dt: float = delta_ts[t_idx]
         ds_for_step: list[HydroForcing] = [
             HydroForcing(
                 precip=zone_precip_series[t_idx, j],
@@ -713,7 +658,7 @@ def run_hydro_model(
 
         try:
             # Convert state array to list for the generic step method
-            step_res: ModelStep = model.step(list(state), ds_for_step, dt)
+            step_res: ModelStep = model.step(list(state), ds_for_step, dt)  # type: ignore
             storages[t_idx] = np.array(step_res.state)
             fluxes[t_idx, :, 0] = np.array(step_res.forc_flux)
             fluxes[t_idx, :, 1] = np.array(step_res.vap_flux)
@@ -745,7 +690,7 @@ def run_hydro_model(
 def run_reactive_transport_model(
     model: Model[ReactiveTransportZone],  # type: ignore
     init_state: NDArray[f64],
-    hydro_results: HydroModelResults,
+    hydro_results,
     rt_forcing: list[
         ForcingData
     ],  # Assuming ForcingData contains solute concentrations

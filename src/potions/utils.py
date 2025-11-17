@@ -18,23 +18,20 @@ NumSpec = TypeVar(
 )  # Number of species in the model - mineral and aqueous
 
 
-# @jitclass
-# class HydroForcing:
-#     """Contains hydrologic forcing data for a single zone at a single time step.
+class HydroForcing:
+    """Contains hydrologic forcing data for a single zone at a single time step.
 
-#     Attributes:
-#         precip: Precipitation rate (e.g., mm/day).
-#         temp: Temperature (e.g., °C).
-#         pet: Potential evapotranspiration rate (e.g., mm/day).
-#     """
+    Attributes:
+        precip: Precipitation rate (e.g., mm/day).
+        temp: Temperature (e.g., °C).
+        pet: Potential evapotranspiration rate (e.g., mm/day).
+    """
 
-#     precip: float
-#     temp: float
-#     pet: float
+    precip: float
+    temp: float
+    pet: float
 
-#     def __init__(self, precip: float, temp: float, pet: float) -> None:
-#         self.precip = precip
-#         self.temp = temp
-#         self.pet = pet
-
-HydroForcing = namedtuple("HydroForcing", ["precip", "temp", "pet"])
+    def __init__(self, precip: float, temp: float, pet: float) -> None:
+        self.precip = precip
+        self.temp = temp
+        self.pet = pet

@@ -33,7 +33,13 @@ from .database import (
     ChemicalDatabase,
 )
 
-from .hydro_models import HydrologicModel, HbvModel, HbvLateralModel, HydroModelResults
+from .hydro_models import (
+    HydrologicModel,
+    HbvModel,
+    HbvLateralModel,
+    HydroModelResults,
+    ThreeLayerModel,
+)
 
 from .common_types import ChemicalState, RtForcing
 

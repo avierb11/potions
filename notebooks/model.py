@@ -22,7 +22,7 @@ hillslope = Hillslope(layers=[soil_layer, ground_layer])
 # The `scales` argument defines the relative area of each hillslope and
 # each forcing source within that hillslope. Here, we have one hillslope
 # that covers 100% of the area, driven by one forcing source.
-model = Model(hillslopes=[hillslope], scales=[[1.0]])
+model = Model(layers=[hillslope], scales=[[1.0]])
 
 # 2. Prepare forcing data and initial conditions
 
@@ -50,7 +50,7 @@ results_df = run_hydro_model(
     init_state=initial_state,
     forc=forcing_data,
     dates=dates,
-    dt=1.0  # Daily time step
+    dt=1.0,  # Daily time step
 )
 
 # 4. Display results

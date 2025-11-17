@@ -2,14 +2,29 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable, Literal
+import networkx as nx
 import numpy as np
+import pandas as pd
 from pandas import DataFrame, Series
 from numpy.typing import NDArray
 import scipy.optimize as opt
 
 from .hydro import GroundZone, SnowZone, SoilZone
 from .objective_functions import kge, nse
-from .model import Layer, Hillslope, Model, ForcingData, run_hydro_model
+from .model import Layer, Model, ForcingData, run_hydro_model
+
+
+"""
+Suggestions and things to add:
+- SWE objective functions
+- Wide parameter ranges during calibration
+- Integrate with Python Sobol sensitivity analysis
+- Markov-Chain Monte Carlo calibration methods
+- Large emphasis of sensitivity analysis
+- Generating parameter sets as CSVs and running the model in that format
+- Absolute reproducibility - control RNG for parameter sets
+- Be able to share the methods, and code defining the models
+"""
 
 
 @dataclass
@@ -68,7 +83,6 @@ class HydrologicModel(ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
     def run(
         self,
         init_state: NDArray,
@@ -79,7 +93,52 @@ class HydrologicModel(ABC):
         """
         Run the model with the given parameters
         """
-        pass
+        """
+        Run the model with the given parameters
+        """
+
+        forcing_data: list[ForcingData]
+        if isinstance(forc, ForcingData):
+            forcing_data = [forc]
+        else:
+            forcing_data = list(forc)  # type: ignore
+
+        dates = forcing_data[0].precip.index
+
+        # Run the model
+
+        model_res: DataFrame = run_hydro_model(
+            model=self.model,
+            init_state=init_state,
+            forc=forcing_data,
+            dates=dates,
+        )
+
+        streamflow_cols: list[str] = [
+            col
+            for col in model_res.columns
+            if "lat" in col and int(col[-1]) in self.model.get_river_zone_ids()
+        ]
+
+        sim_streamflow = model_res[streamflow_cols].sum(axis=1)
+        sim_streamflow.name = "streamflow_mmd"
+        model_res["streamflow_mmd"] = sim_streamflow
+
+        # Calculate objective functions
+        kge_val: float = kge(sim_streamflow, streamflow)
+        nse_val: float = nse(sim_streamflow, streamflow)
+        pbias_val: float = (sim_streamflow - streamflow).mean() / streamflow.mean()
+        r_squared_val: float = streamflow.corr(sim_streamflow) ** 2
+        spearman_rho_val: float = streamflow.corr(sim_streamflow, method="spearman")
+
+        return HydroModelResults(
+            simulation=model_res,
+            kge=kge_val,
+            nse=nse_val,
+            bias=pbias_val,
+            r_squared=r_squared_val,
+            spearman_rho=spearman_rho_val,
+        )
 
     @classmethod
     def default_parameter_range(cls) -> list[tuple[float, float]]:
@@ -147,8 +206,211 @@ class HydrologicModel(ABC):
 
         return opt_params, best_results
 
+    @property
+    def model(self) -> Model:
+        raise NotImplementedError()
 
-@dataclass
+    @property
+    def graph(self) -> nx.DiGraph:
+        return self.model.graph
+
+
+class ThreeLayerModel(HydrologicModel):
+    def __init__(
+        self,
+        tt: float,
+        fmax: float,
+        fc: float,
+        lp: float,
+        beta: float,
+        k0: float,
+        thr: float,
+        k1: float,
+        alpha: float,
+    ) -> None:
+        super().__init__()
+        self.tt: float = tt
+        self.fmax: float = fmax
+        self.fc: float = fc
+        self.lp: float = lp
+        self.beta: float = beta
+        self.k0: float = k0
+        self.thr: float = thr
+        self.k1: float = k1
+        self.alpha: float = alpha
+
+        self.__snow_zone = SnowZone(tt=self.tt, fmax=self.fmax)
+        self.__soil_zone = SoilZone(
+            tt=self.tt, fc=self.fc, lp=self.lp, beta=self.beta, k0=self.k0, thr=self.thr
+        )
+        self.__ground_zone = GroundZone(k=self.k1, alpha=self.alpha, perc=0.0)
+
+        self.__model = Model(
+            [
+                Layer([self.__snow_zone]),
+                Layer([self.__soil_zone]),
+                Layer([self.__ground_zone]),
+            ],
+            scales=[1.0],
+            verbose=False,
+        )
+
+    @property
+    def model(self) -> Model:
+        return self.__model
+
+    @classmethod
+    def default_init_state(cls) -> NDArray:
+        return np.array([0.0, 10.0, 15.0])
+
+    @classmethod
+    def default_parameter_range(cls) -> list[tuple[float, float]]:
+        """
+        Return a list of ranges for each parameter
+        """
+        return [
+            (-1, 1),  # TT
+            (0.1, 5.0),  # FMAX
+            (50, 1000),  # FC
+            (0.1, 0.95),  # LP
+            (0.5, 2.5),  # BETA
+            (0.01, 0.25),  # K0
+            (0, 50),  # Soil threshold
+            (1e-3, 0.1),  # K1
+            (0.5, 2.0),  # Alpha
+        ]
+
+    def to_array(self) -> NDArray:
+        """
+        Convert this set of arrays to a numpy array
+        """
+        return np.array(
+            [
+                # Snow zone
+                self.tt,
+                self.fmax,
+                # Soil parameters
+                self.fc,
+                self.lp,
+                self.beta,
+                self.k0,
+                self.thr,
+                # Groundwater zone
+                self.k1,
+                self.alpha,
+            ],
+            dtype=float,
+        )
+
+    @classmethod
+    def from_array(cls, arr: NDArray) -> HydrologicModel:
+        tt: float = arr[0]
+        fmax: float = arr[1]
+        fc: float = arr[2]
+        lp: float = arr[3]
+        beta: float = arr[4]
+        k0: float = arr[5]
+        thr: float = arr[6]
+        k1: float = arr[7]
+        alpha: float = arr[8]
+
+        return ThreeLayerModel(
+            tt=tt,
+            fmax=fmax,
+            fc=fc,
+            lp=lp,
+            beta=beta,
+            k0=k0,
+            thr=thr,
+            k1=k1,
+            alpha=alpha,
+        )
+
+    @staticmethod
+    def default() -> ThreeLayerModel:
+        """
+        Return the default set of parameters
+        """
+        return ThreeLayerModel(
+            tt=0.0,
+            fmax=1.0,
+            fc=100.0,
+            lp=0.5,
+            beta=1.0,
+            k0=0.1,
+            thr=10.0,
+            k1=0.01,
+            alpha=1.0,
+        )
+
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        """
+        Return the names of the parameters
+        """
+        return [
+            "tt",
+            "fmax",
+            "fc",
+            "lp",
+            "beta",
+            "k0",
+            "thr",
+            "k1",
+            "alpha",
+        ]
+
+    def run(  # type: ignore
+        self,
+        init_state: NDArray,
+        forc: ForcingData,
+        streamflow: Series,
+        verbose: bool = False,
+    ) -> HydroModelResults:
+        """
+        Run the model with the given parameters
+        """
+
+        dates: pd.Index[pd.Timestamp] = forc.precip.index
+
+        model_res: DataFrame = run_hydro_model(
+            model=self.model,
+            init_state=init_state,
+            forc=[forc],
+            dates=dates,
+        )
+
+        streamflow_cols: list[str] = [
+            col
+            for col in model_res.columns
+            if "lat" in col and int(col[-1]) in self.model.get_river_zone_ids()
+        ]
+
+        sim_streamflow = model_res[streamflow_cols].sum(axis=1)
+        sim_streamflow.name = "streamflow_mmd"
+        model_res["streamflow_mmd"] = sim_streamflow
+
+        # Calculate objective functions
+        kge_val: float = kge(sim_streamflow, streamflow)
+        nse_val: float = nse(sim_streamflow, streamflow)
+        bias_val: float = (sim_streamflow - streamflow).mean() / streamflow.mean()
+        r_squared_val: float = streamflow.corr(sim_streamflow) ** 2
+        spearman_rho_val: float = streamflow.corr(sim_streamflow, method="spearman")
+
+        return HydroModelResults(
+            simulation=model_res,
+            kge=kge_val,
+            nse=nse_val,
+            bias=bias_val,
+            r_squared=r_squared_val,
+            spearman_rho=spearman_rho_val,
+        )
+
+    @classmethod
+    def num_parameters(cls) -> int:
+        return 9
+
+
 class HbvModel(HydrologicModel):
     tt: float
     fmax: float
@@ -160,6 +422,53 @@ class HbvModel(HydrologicModel):
     k1: float
     perc: float
     k2: float
+
+    def __init__(
+        self,
+        tt: float,
+        fmax: float,
+        fc: float,
+        lp: float,
+        beta: float,
+        k0: float,
+        thr: float,
+        k1: float,
+        perc: float,
+        k2: float,
+    ) -> None:
+        super().__init__()
+        self.tt: float = tt
+        self.fmax: float = fmax
+        self.fc: float = fc
+        self.lp: float = lp
+        self.beta: float = beta
+        self.k0: float = k0
+        self.thr: float = thr
+        self.k1: float = k1
+        self.perc: float = perc
+        self.k2: float = k2
+
+        self.__snow_zone = SnowZone(tt=self.tt, fmax=self.fmax)
+        self.__soil_zone = SoilZone(
+            tt=self.tt, fc=self.fc, lp=self.lp, beta=self.beta, k0=self.k0, thr=self.thr
+        )
+        self.__shallow_zone = GroundZone(k=self.k1, alpha=1.0, perc=self.perc)
+        self.__deep_zone = GroundZone(k=self.k2, alpha=1.0, perc=0.0)
+
+        self.__model = Model(
+            [
+                Layer([self.__snow_zone]),
+                Layer([self.__soil_zone]),
+                Layer([self.__shallow_zone]),
+                Layer([self.__deep_zone]),
+            ],
+            scales=[1.0],
+            verbose=False,
+        )
+
+    @property
+    def model(self) -> Model:
+        return self.__model
 
     @classmethod
     def default_init_state(cls) -> NDArray:
@@ -269,7 +578,7 @@ class HbvModel(HydrologicModel):
             "k2",
         ]
 
-    def run(  # pyright: ignore[reportIncompatibleMethodOverride]
+    def run_v2(  # type: ignore
         self,
         init_state: NDArray,
         forc: ForcingData,
@@ -288,19 +597,19 @@ class HbvModel(HydrologicModel):
         soil_zone: SoilZone = SoilZone(
             tt=self.tt, fc=self.fc, lp=self.lp, beta=self.beta, k0=self.k0, thr=self.thr
         )
-        shallow_zone: GroundZone = GroundZone(k=self.k1, alpha=0.0, perc=self.perc)
-        deep_zone: GroundZone = GroundZone(k=self.k2, alpha=0.0, perc=0.0)
+        shallow_zone: GroundZone = GroundZone(k=self.k1, alpha=1.0, perc=self.perc)
+        deep_zone: GroundZone = GroundZone(k=self.k2, alpha=1.0, perc=0.0)
 
-        hs: Hillslope = Hillslope(
+        model = Model(
             [
                 Layer([snow_zone]),
                 Layer([soil_zone]),
                 Layer([shallow_zone]),
                 Layer([deep_zone]),
-            ]
-        )  # type: ignore
-
-        model = Model([hs], scales=[[1.0]], verbose=verbose)
+            ],
+            scales=[1.0],
+            verbose=verbose,
+        )
 
         if verbose:
             print(f"Zone lateral connection matrix: \n{model.lat_mat}")
@@ -311,10 +620,14 @@ class HbvModel(HydrologicModel):
             print(f"Model scales: {model.scales}")
 
         model_res: DataFrame = run_hydro_model(
-            model=model, init_state=init_state, forc=[forc], dates=dates, dt=1.0
+            model=model,
+            init_state=init_state,
+            forc=[forc],
+            dates=dates,
         )
 
-        model_res["discharge"] = (
+        # Get the discharge
+        model_res["discharge"] = (  # Ignore
             model_res["q_lat_snow_0"]
             + model_res["q_lat_soil_1"]
             + model_res["q_lat_ground_2"]
@@ -347,31 +660,123 @@ class HbvModel(HydrologicModel):
 @dataclass
 class HbvLateralModel(HydrologicModel):
     # Size parameters
-    riparian_prop: float
+    # riparian_prop: float
 
     # Hillslope parameters
-    tt_hs: float
-    fmax_hs: float
-    fc_hs: float
-    lp_hs: float
-    beta_hs: float
-    k0_hs: float
-    thr_hs: float
-    k1_hs: float
-    perc_hs: float
-    k2_hs: float
+    # tt_hs: float
+    # fmax_hs: float
+    # fc_hs: float
+    # lp_hs: float
+    # beta_hs: float
+    # k0_hs: float
+    # thr_hs: float
+    # k1_hs: float
+    # perc_hs: float
+    # k2_hs: float
 
     # Riparian parameters
-    tt_rp: float
-    fmax_rp: float
-    fc_rp: float
-    lp_rp: float
-    beta_rp: float
-    k0_rp: float
-    thr_rp: float
-    k1_rp: float
-    perc_rp: float
-    k2_rp: float
+    # tt_rp: float
+    # fmax_rp: float
+    # fc_rp: float
+    # lp_rp: float
+    # beta_rp: float
+    # k0_rp: float
+    # thr_rp: float
+    # k1_rp: float
+    # perc_rp: float
+    # k2_rp: float
+
+    def __init__(
+        self,
+        riparian_prop: float,
+        tt_hs: float,
+        fmax_hs: float,
+        fc_hs: float,
+        lp_hs: float,
+        beta_hs: float,
+        k0_hs: float,
+        thr_hs: float,
+        k1_hs: float,
+        perc_hs: float,
+        k2_hs: float,
+        tt_rp: float,
+        fmax_rp: float,
+        fc_rp: float,
+        lp_rp: float,
+        beta_rp: float,
+        k0_rp: float,
+        thr_rp: float,
+        k1_rp: float,
+        perc_rp: float,
+        k2_rp: float,
+    ) -> None:
+        super().__init__()
+        self.riparian_prop = riparian_prop
+        self.tt_hs = tt_hs
+        self.fmax_hs = fmax_hs
+        self.fc_hs = fc_hs
+        self.lp_hs = lp_hs
+        self.beta_hs = beta_hs
+        self.k0_hs = k0_hs
+        self.thr_hs = thr_hs
+        self.k1_hs = k1_hs
+        self.perc_hs = perc_hs
+        self.k2_hs = k2_hs
+        self.tt_rp = tt_rp
+        self.fmax_rp = fmax_rp
+        self.fc_rp = fc_rp
+        self.lp_rp = lp_rp
+        self.beta_rp = beta_rp
+        self.k0_rp = k0_rp
+        self.thr_rp = thr_rp
+        self.k1_rp = k1_rp
+        self.perc_rp = perc_rp
+        self.k2_rp = k2_rp
+
+        self.__snow_hs = SnowZone(tt=self.tt_hs, fmax=self.fmax_hs, name="snow_hs")
+        self.__soil_hs = SoilZone(
+            tt=self.tt_hs,
+            fc=self.fc_hs,
+            lp=self.lp_hs,
+            beta=self.beta_hs,
+            k0=self.k0_hs,
+            thr=self.thr_hs,
+            name="soil_hs",
+        )
+        self.__shallow_hs = GroundZone(
+            k=self.k1_hs, alpha=1.0, perc=self.perc_hs, name="shallow_hs"
+        )
+        self.__deep_hs = GroundZone(k=self.k2_hs, alpha=1.0, perc=0.0, name="deep_hs")
+
+        self.__snow_rp = SnowZone(tt=self.tt_rp, fmax=self.fmax_rp, name="snow_rp")
+        self.__soil_rp = SoilZone(
+            tt=self.tt_rp,
+            fc=self.fc_rp,
+            lp=self.lp_rp,
+            beta=self.beta_rp,
+            k0=self.k0_rp,
+            thr=self.thr_rp,
+            name="soil_rp",
+        )
+        self.__shallow_rp = GroundZone(
+            k=self.k1_rp, alpha=1.0, perc=self.perc_rp, name="shallow_rp"
+        )
+        self.__deep_rp = GroundZone(k=self.k2_rp, alpha=1.0, perc=0.0, name="deep_rp")
+
+        self.__model = Model(
+            [
+                Layer([self.__snow_hs, self.__snow_rp]),
+                Layer([self.__soil_hs, self.__soil_rp]),
+                Layer([self.__shallow_hs, self.__shallow_rp]),
+                Layer([self.__deep_hs, self.__deep_rp]),
+            ],
+            scales=[self.hillslope_prop, self.riparian_prop],
+            verbose=False,
+        )
+
+    @property
+    def model(self) -> Model:
+        return self.__model
 
     @property
     def hillslope_prop(self) -> float:
@@ -567,7 +972,7 @@ class HbvLateralModel(HydrologicModel):
             "k2_rp",
         ]
 
-    def run(
+    def run_v2(
         self,
         init_state: NDArray,
         forc: ForcingData | Iterable[ForcingData],
@@ -595,9 +1000,9 @@ class HbvLateralModel(HydrologicModel):
             thr=self.thr_hs,
         )
         shallow_zone_hs: GroundZone = GroundZone(
-            k=self.k1_hs, alpha=0.0, perc=self.perc_hs
+            k=self.k1_hs, alpha=1.0, perc=self.perc_hs
         )
-        deep_zone_hs: GroundZone = GroundZone(k=self.k2_hs, alpha=0.0, perc=0.0)
+        deep_zone_hs: GroundZone = GroundZone(k=self.k2_hs, alpha=1.0, perc=0.0)
 
         snow_zone_rp: SnowZone = SnowZone(tt=self.tt_rp, fmax=self.fmax_rp)
         soil_zone_rp: SoilZone = SoilZone(
@@ -609,21 +1014,19 @@ class HbvLateralModel(HydrologicModel):
             thr=self.thr_rp,
         )
         shallow_zone_rp: GroundZone = GroundZone(
-            k=self.k1_rp, alpha=0.0, perc=self.perc_rp
+            k=self.k1_rp, alpha=1.0, perc=self.perc_rp
         )
-        deep_zone_rp: GroundZone = GroundZone(k=self.k2_rp, alpha=0.0, perc=0.0)
+        deep_zone_rp: GroundZone = GroundZone(k=self.k2_rp, alpha=1.0, perc=0.0)
 
-        hs: Hillslope = Hillslope(
+        model = Model(
             [
                 Layer([snow_zone_hs, snow_zone_rp]),
                 Layer([soil_zone_hs, soil_zone_rp]),
                 Layer([shallow_zone_hs, shallow_zone_rp]),
                 Layer([deep_zone_hs, deep_zone_rp]),
-            ]
-        )  # type: ignore
-
-        model = Model(
-            [hs], scales=[[self.hillslope_prop, self.riparian_prop]], verbose=verbose
+            ],
+            scales=[self.hillslope_prop, self.riparian_prop],
+            verbose=verbose,
         )
 
         if verbose:
@@ -635,10 +1038,13 @@ class HbvLateralModel(HydrologicModel):
             print(f"Model scales: {model.scales}")
 
         model_res: DataFrame = run_hydro_model(
-            model=model, init_state=init_state, forc=list(forcing), dates=dates, dt=1.0
+            model=model,
+            init_state=init_state,
+            forc=list(forcing),
+            dates=dates,
         )
 
-        model_res["discharge"] = (
+        model_res["discharge"] = (  # ignore - this will be automatic
             model_res["q_lat_snow_1"]
             + model_res["q_lat_soil_3"]
             + model_res["q_lat_ground_5"]
@@ -653,6 +1059,7 @@ class HbvLateralModel(HydrologicModel):
         pbias_val: float = (sim_streamflow - streamflow).mean() / streamflow.mean()
         r_squared_val: float = streamflow.corr(sim_streamflow) ** 2
         spearman_rho_val: float = streamflow.corr(sim_streamflow, method="spearman")
+        # Volume error
 
         return HydroModelResults(
             simulation=model_res,
@@ -666,49 +1073,3 @@ class HbvLateralModel(HydrologicModel):
     @classmethod
     def num_parameters(cls) -> int:
         return 21  # 1 size, 10 for Hillslope HBV zone, 10 for riparian HBV zone
-
-
-def run_hbv_model(
-    params: HbvModel,
-    init_state: NDArray,
-    forc: ForcingData,
-    dates: Series,
-    verbose: bool = False,
-) -> DataFrame:
-    """
-    Run a model simulating the HBV model structure using a daily time step
-    """
-    snow_zone: SnowZone = SnowZone(tt=params.tt, fmax=params.fmax)
-    soil_zone: SoilZone = SoilZone(
-        tt=params.tt,
-        fc=params.fc,
-        lp=params.lp,
-        beta=params.beta,
-        k0=params.k0,
-        thr=params.thr,
-    )
-    shallow_zone: GroundZone = GroundZone(k=params.k1, alpha=0.0, perc=params.perc)
-    deep_zone: GroundZone = GroundZone(k=params.k2, alpha=0.0, perc=0.0)
-
-    hs: Hillslope = Hillslope(
-        [
-            Layer([snow_zone]),
-            Layer([soil_zone]),
-            Layer([shallow_zone]),
-            Layer([deep_zone]),
-        ]
-    )  # type: ignore
-
-    model = Model([hs], scales=[[1.0]], verbose=verbose)
-
-    if verbose:
-        print(f"Zone lateral connection matrix: \n{model.lat_mat}")
-        print(f"Zone vertical connection matrix: \n{model.vert_mat}")
-        print(f"Precipitation matrix: \n{model.precip_mat}")
-        print(f"PET matrix: \n{model.pet_mat}")
-        print(f"Temperature matrix: \n{model.temp_mat}")
-        print(f"Model scales: {model.scales}")
-
-    return run_hydro_model(
-        model=model, init_state=init_state, forc=[forc], dates=dates, dt=1.0
-    )
