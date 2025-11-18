@@ -12,6 +12,7 @@ import scipy.optimize as opt
 from .hydro import GroundZone, SnowZone, SoilZone
 from .objective_functions import kge, nse
 from .model import Layer, Model, ForcingData, run_hydro_model
+from .common_types import HydroModelResults
 
 
 """
@@ -25,16 +26,6 @@ Suggestions and things to add:
 - Absolute reproducibility - control RNG for parameter sets
 - Be able to share the methods, and code defining the models
 """
-
-
-@dataclass
-class HydroModelResults:
-    simulation: DataFrame
-    kge: float
-    nse: float
-    bias: float
-    r_squared: float
-    spearman_rho: float
 
 
 def objective_function(

@@ -1,7 +1,8 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Optional
 from scipy.optimize import root_scalar
+from numpy.typing import NDArray
 
 from .common_types import HydroForcing
 
@@ -68,7 +69,7 @@ class HydrologicZone(ABC):
     def __init__(self, name: str = "unnamed"):
         self.name = name
 
-    def step(self, s_0: float, d: HydroForcing, dt: float, q_in: float) -> HydroStep:
+    def step(self, s_0: float, d: HydroForcing, dt: float) -> HydroStep:
         """Integrates the mass balance equation over a time step."""
 
         # def f(t: float, s: float) -> float:
@@ -79,7 +80,7 @@ class HydrologicZone(ABC):
 
         # Use the implicit midpoint method
         def f(s: float) -> float:
-            return (s_0 - s) + dt * self.mass_balance(0.5 * (s_0 + s), d, q_in)
+            return (s_0 - s) + dt * self.mass_balance(0.5 * (s_0 + s), d)
 
         res = root_scalar(f, x0=s_0, x1=s_0 + 0.1, method="secant", xtol=0.001)
         s_new: float = res.root
@@ -93,9 +94,9 @@ class HydrologicZone(ABC):
             vert_flux=self.vert_flux(s_new, d),
         )
 
-    def mass_balance(self, s: float, d: HydroForcing, q_in: float) -> float:
+    def mass_balance(self, s: float, d: HydroForcing) -> float:
         return (
-            q_in
+            d.q_in
             + self.forc_flux(s, d)
             - self.vap_flux(s, d)
             - self.lat_flux(s, d)
@@ -152,6 +153,28 @@ class HydrologicZone(ABC):
     def base_name(cls) -> str:
         pass
 
+    @classmethod
+    def from_array(cls, arr: NDArray, name: Optional[str] = None) -> HydrologicZone:
+        param_dict: dict[str, str | float] = {}
+        for i, param in enumerate(cls.parameter_names()):
+            param_dict[param] = arr[i]
+        if name is not None:
+            param_dict["name"] = name
+
+        return cls(**param_dict)  # type: ignore
+
+    @classmethod
+    @abstractmethod
+    def parameter_names(cls) -> list[str]:
+        pass
+
+    @classmethod
+    def default_init_state(cls) -> float:
+        """
+        Return the default initial state for this type.
+        """
+        return 0.0
+
 
 class SnowZone(HydrologicZone):
     """A zone representing a snowpack."""
@@ -171,7 +194,7 @@ class SnowZone(HydrologicZone):
     def vert_flux(self, s: float, d: HydroForcing) -> float:
         """Calculates snowmelt accumulation rate"""
         if d.temp > self.tt:
-            melt: float = self.fmax * (d.temp - self.tt)
+            melt: float = self.fmax * (d.temp - self.tt) + d.precip
             return min(s, melt)
         else:
             return 0.0
@@ -182,6 +205,10 @@ class SnowZone(HydrologicZone):
     @classmethod
     def default(cls) -> SnowZone:
         return SnowZone(tt=0.0, fmax=1.0)
+
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["tt", "fmax"]
 
     @classmethod
     def num_parameters(cls) -> int:
@@ -201,7 +228,6 @@ class SoilZone(HydrologicZone):
 
     def __init__(
         self,
-        tt: float = 0.0,
         fc: float = 100.0,
         lp: float = 0.5,
         beta: float = 1.0,
@@ -215,12 +241,10 @@ class SoilZone(HydrologicZone):
         self.k0: float = k0
         self.lp: float = lp
         self.thr: float = thr
-        self.tt: float = tt
 
     @classmethod
     def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         return {
-            "tt": (-1, 1),
             "fc": (50, 1_000),
             "beta": (0.5, 5.0),
             "k0": (0, 1.0),
@@ -230,17 +254,15 @@ class SoilZone(HydrologicZone):
 
     def forc_flux(self, s: float, d: HydroForcing) -> float:
         """Calculates soil accumulation"""
-        if d.temp >= self.tt:
-            return d.precip * (1 - (s / self.fc) ** self.beta)
-        else:
-            return 0.0
+        # if d.temp >= self.tt:
+        #     return d.precip * (1 - (s / self.fc) ** self.beta)
+        # else:
+        #     return 0.0
+        return d.precip * (1 - (s / self.fc) ** self.beta)
 
     def vert_flux(self, s: float, d: HydroForcing) -> float:
         """Calculates vertical percolation from the soil."""
-        if d.temp >= self.tt:
-            return d.precip * (s / self.fc) ** self.beta
-        else:
-            return 0.0
+        return d.q_in * (s / self.fc) ** self.beta
 
     def vap_flux(self, s: float, d: HydroForcing) -> float:
         """Calculates actual evapotranspiration."""
@@ -251,11 +273,15 @@ class SoilZone(HydrologicZone):
         return max(0.0, self.k0 * (s - self.thr))
 
     def param_list(self) -> list[float]:
-        return [self.tt, self.fc, self.lp, self.beta, self.k0, self.thr]
+        return [self.fc, self.lp, self.beta, self.k0, self.thr]
+
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["fc", "lp", "beta", "k0", "thr"]
 
     @classmethod
     def default(cls) -> SoilZone:
-        return SoilZone(tt=0.0, fc=100.0, lp=0.5, beta=1.0, k0=0.1, thr=10.0)
+        return SoilZone(fc=100.0, lp=0.5, beta=1.0, k0=0.1, thr=10.0)
 
     @classmethod
     def base_name(cls) -> str:
@@ -263,7 +289,11 @@ class SoilZone(HydrologicZone):
 
     @classmethod
     def num_parameters(cls) -> int:
-        return 6
+        return 5
+
+    @classmethod
+    def default_init_state(cls) -> float:
+        return 25.0
 
 
 class GroundZone(HydrologicZone):
@@ -308,21 +338,29 @@ class GroundZone(HydrologicZone):
     def base_name(cls) -> str:
         return "ground"
 
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["k", "alpha", "perc"]
+
+    @classmethod
+    def default_init_state(cls) -> float:
+        return 10.0
+
 
 class GroundZoneLinear(GroundZone):
     """
     A groundwater zone representing with a linear storage function for the lateral flux
     """
 
-    def __init__(self, k: float, alpha: float, name="ground_linear"):
-        super().__init__(k=k, alpha=alpha, perc=0.0, name=name)
+    def __init__(self, k: float = 1e-3, perc: float = 1.0, name="ground_linear"):
+        super().__init__(k=k, alpha=1.0, perc=perc, name=name)
 
     @classmethod
     def num_parameters(cls) -> int:
         return 2
 
     def param_list(self) -> list[float]:
-        return [self.k, self.alpha]
+        return [self.k, self.perc]
 
     @classmethod
     def base_name(cls) -> str:
@@ -335,14 +373,18 @@ class GroundZoneLinear(GroundZone):
 
         return default_range
 
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["k", "perc"]
+
 
 class GroundZoneB(GroundZone):
     """
     A groundwater zone representing the bottom zone with a nonlinear storage function
     """
 
-    def __init__(self, k: float, alpha: float, name="bottom_ground_nl"):
-        super().__init__(k=k, alpha=alpha, perc=0.0, name=name)
+    def __init__(self, k: float = 1e-3, alpha: float = 1.0, name="bottom_ground_nl"):
+        super(GroundZoneB, self).__init__(k=k, alpha=alpha, perc=0.0, name=name)
 
     @classmethod
     def num_parameters(cls) -> int:
@@ -362,14 +404,18 @@ class GroundZoneB(GroundZone):
 
         return default_range
 
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["k", "alpha"]
+
 
 class GroundZoneLinearB(GroundZone):
     """
     A groundwater zone representing the bottom zone with a linear storage function
     """
 
-    def __init__(self, k: float, name="bottom_ground_l"):
-        super().__init__(k=k, alpha=0.0, perc=0.0, name=name)
+    def __init__(self, k: float = 1e-3, name="bottom_ground_l"):
+        super().__init__(k=k, alpha=1.0, perc=0.0, name=name)
 
     @classmethod
     def num_parameters(cls) -> int:
@@ -389,3 +435,7 @@ class GroundZoneLinearB(GroundZone):
         del default_range["alpha"]
 
         return default_range
+
+    @classmethod
+    def parameter_names(cls) -> list[str]:
+        return ["k"]

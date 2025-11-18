@@ -1,9 +1,13 @@
-from abc import abstractmethod
-from collections import namedtuple
-from typing import Generic, TypeVar
 from dataclasses import dataclass
+from typing import TypeVar
 import numpy as np
 from numpy import float64 as f64
+from numpy.typing import NDArray
+from pandas import Series
+
+from .common_types import HydroModelResults
+
+# ==== Types ==== #
 
 M = TypeVar("M", bound=int)
 N = TypeVar("N", bound=int)
@@ -18,20 +22,32 @@ NumSpec = TypeVar(
 )  # Number of species in the model - mineral and aqueous
 
 
-class HydroForcing:
-    """Contains hydrologic forcing data for a single zone at a single time step.
+def objective_function(
+    x: NDArray,
+    cls,
+    forc,
+    meas_streamflow,
+    metric,
+    print_value: bool,
+) -> float:
+    model = cls.from_array(x)
+    results: HydroModelResults = model.run(
+        init_state=cls.default_init_state(),
+        forc=forc,
+        streamflow=meas_streamflow,
+        verbose=False,
+    )
 
-    Attributes:
-        precip: Precipitation rate (e.g., mm/day).
-        temp: Temperature (e.g., °C).
-        pet: Potential evapotranspiration rate (e.g., mm/day).
-    """
+    obj_val: float
 
-    precip: float
-    temp: float
-    pet: float
+    if metric == "kge":
+        obj_val = -results.kge  # type: ignore
+    elif metric == "nse":
+        obj_val = -results.nse  # type: ignore
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
 
-    def __init__(self, precip: float, temp: float, pet: float) -> None:
-        self.precip = precip
-        self.temp = temp
-        self.pet = pet
+    if print_value:
+        print(f"{metric.upper()}: {-round(obj_val, 2)}")
+
+    return obj_val

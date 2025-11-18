@@ -1,16 +1,90 @@
-from typing import TypeVar
+from typing import Optional, TypeVar
 from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 from numpy import float64 as f64
+from pandas import DataFrame, Series
 
-from .utils import HydroForcing
 
 # ==== Types ==== #
 M = TypeVar("M", bound=int)
 N = TypeVar("N", bound=int)
 Vector = np.ndarray[tuple[N], np.dtype[f64]]
 Matrix = np.ndarray[tuple[M, N], np.dtype[f64]]
+
+
+@dataclass
+class HydroModelResults:
+    simulation: DataFrame
+    kge: Optional[float]
+    nse: Optional[float]
+    bias: Optional[float]
+    r_squared: Optional[float]
+    spearman_rho: Optional[float]
+
+
+@dataclass(frozen=True)
+class HydroForcing:
+    """Contains hydrologic forcing data for a single zone at a single time step.
+
+    Attributes:
+        precip: Precipitation rate (e.g., mm/day).
+        temp: Temperature (e.g., °C).
+        pet: Potential evapotranspiration rate (e.g., mm/day).
+        q_in: Water input from an external zone
+    """
+
+    precip: float
+    temp: float
+    pet: float
+    q_in: float
+
+
+@dataclass(frozen=True)
+class ForcingData:
+    """Represents the time series of meteorological forcing data for a single location.
+
+    Attributes:
+        precip: Time series of precipitation (e.g., mm/day).
+        temp: Time series of temperature (e.g., °C).
+        pet: Time series of potential evapotranspiration (e.g., mm/day).
+    """
+
+    precip: Series
+    temp: Series
+    pet: Series
+
+
+@dataclass
+class LapseRateParameters:
+    temp_factor: float  # The slope of the temperature line
+    precip_factor: float  # The slope of the precipitation line
+
+    def scale_temperature(
+        self, gauge_elevation: float, elev: float, temp_series: Series
+    ) -> Series:
+        """Scale the temperature time series according to the elevation"""
+        return temp_series + self.temp_factor * (elev - gauge_elevation)
+
+    def scale_precipitation(
+        self, gauge_elevation: float, elev: float, precip_series: Series
+    ) -> Series:
+        """Scale the precipitation according to elevation zones"""
+        return precip_series + self.precip_factor * (elev - gauge_elevation)
+
+    def scale_forcing_data(
+        self, gauge_elevation: float, elev: float, forcing_data: ForcingData
+    ) -> ForcingData:
+        """Scale the forcing data according to elevation zones"""
+        return ForcingData(
+            precip=self.scale_precipitation(gauge_elevation, elev, forcing_data.precip),
+            temp=self.scale_temperature(gauge_elevation, elev, forcing_data.temp),
+            pet=forcing_data.pet,
+        )
+
+    @classmethod
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
+        return {"temp_factor": (-1, 0), "precip_factor": (0, 10)}
 
 
 @dataclass(frozen=True)
