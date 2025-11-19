@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Literal, TypeVar
+from typing import Callable, Literal, TypeVar
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
@@ -34,7 +33,7 @@ def objective_function(
     results: HydroModelResults = model.run(
         init_state=cls.default_init_state(),
         forc=forc,
-        streamflow=meas_streamflow,
+        meas_streamflow=meas_streamflow,
         verbose=False,
     )
 
@@ -51,3 +50,29 @@ def objective_function(
         print(f"{metric.upper()}: {-round(obj_val, 2)}")
 
     return obj_val
+
+
+def find_root(f: Callable[[float], float], x_0: float, tol: float = 1e-5) -> float:
+    x_1: float = x_0 + 0.1
+
+    err = abs(f(x_1))
+
+    counter = 0
+    max_iter = 50
+
+    while err > tol:
+        fx_0 = f(x_0)
+        fx_1 = f(x_1)
+        if abs(fx_1 - fx_0) < 1e-12:
+            break  # Avoid division by zero if points are too close
+        x_n = (x_0 * fx_1 - x_1 * fx_0) / (fx_1 - fx_0)
+        x_0, x_1 = x_1, x_n
+        err = abs(f(x_n))
+        counter += 1
+
+        if counter >= max_iter:
+            raise RuntimeError(
+                f"Root finding failed to converge after {max_iter} iterations"
+            )
+
+    return x_1

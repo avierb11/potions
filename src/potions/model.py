@@ -28,11 +28,10 @@ from .reactive_transport import ReactiveTransportZone
 from .utils import objective_function
 from .interfaces import Zone, StateType
 from .hydro import (
-    GroundZone,
-    GroundZoneB,
     GroundZoneLinear,
     GroundZoneLinearB,
     HydroForcing,
+    HydroStep,
     HydrologicZone,
     SnowZone,
     SoilZone,
@@ -244,11 +243,8 @@ class Model(ABC):
         return zone_names
 
     @property
-    def zones_dict(self) -> dict[str, HydrologicZone]:
-        """
-        The dictionary of each of the hydrologic zones in the model
-        """
-        raise NotImplementedError()
+    def num_surface_zones(self) -> int:
+        return len(self.structure[0])
 
     @property
     def graph(self) -> nx.DiGraph:
@@ -325,30 +321,21 @@ class Model(ABC):
         s_i: float
         d_i: HydroForcing
         for i, (zone, (s_i, d_i)) in enumerate(zip(self.flat_model, zip(state, ds))):
-            # Calculate incoming flux from previously stepped zones.
-            # This works for both floats and numpy arrays.
-            q_in_lat = (
-                sum(self.lat_mat[i, j] * flux_j for j, flux_j in enumerate(lat_fluxes))
-                if lat_fluxes
-                else zero_flux
-            )
-            q_in_vert = (
-                sum(
-                    self.vert_mat[i, j] * flux_j for j, flux_j in enumerate(vert_fluxes)
-                )
-                if vert_fluxes
-                else zero_flux
-            )
+            # Calculate incoming flux using faster NumPy dot products
+            num_fluxes = len(lat_fluxes)
+            if num_fluxes > 0:
+                q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], np.array(lat_fluxes))
+                q_in_vert = np.dot(self.vert_mat[i, :num_fluxes], np.array(vert_fluxes))
+            else:
+                q_in_lat, q_in_vert = zero_flux, zero_flux
+
             q_in = q_in_lat + q_in_vert
 
             s_i = float(s_i)  # type: ignore
-            if not isinstance(s_i, float):
-                raise RuntimeError(f"State must be float, not {type(s_i)}")
             d_i_zone = HydroForcing(
                 precip=d_i.precip, temp=d_i.temp, pet=d_i.pet, q_in=q_in
             )
-            # step_res: ModelStep = zone.step(s_i, d_i, dt, q_in)  # type: ignore
-            step_res: ModelStep = zone.step(s_i, d_i_zone, dt)  # type: ignore
+            step_res: HydroStep = zone.step(s_i, d_i_zone, dt)
 
             new_states.append(step_res.state)  # type: ignore
             forc_fluxes.append(step_res.forc_flux)  # type: ignore
@@ -616,7 +603,7 @@ class Model(ABC):
         zone_params: NDArray = arr[:num_zone_params]
         size_params: list[float] = arr[
             num_zone_params : num_zone_params + num_size_params
-        ].tolist()[:-1]
+        ].tolist()
 
         if latent:
             fractions: list[float] = []
@@ -626,10 +613,10 @@ class Model(ABC):
                 fractions.append(fraction)
                 remainder -= size
 
-            size_params = fractions[:-1]
+            size_params = fractions
 
-        if len(size_params) == 0:
-            size_params = [1.0]
+        size_params.append(1 - sum(size_params))
+        # print(f"Size params: {size_params}")
 
         lapse_rate_params: NDArray = arr[num_zone_params + num_size_params :]
 
@@ -686,7 +673,7 @@ class Model(ABC):
         self,
         forc: ForcingData | list[ForcingData],
         init_state: Optional[NDArray[f64]] = None,
-        streamflow: Optional[Series] = None,
+        meas_streamflow: Optional[Series] = None,
         average_elevation: Optional[float] = None,
         elevations: Optional[list[float]] = None,
         bounds: Optional[dict[str, tuple[float, float]]] = None,
@@ -695,6 +682,9 @@ class Model(ABC):
         """
         Run the hydrologic simulation forward and calculate the objective functions
         """
+        # Check the model structure
+        self._validate_model_structure()
+
         # Check if need initial state
         if init_state is None:
             init_state = self.default_init_state()
@@ -702,9 +692,14 @@ class Model(ABC):
         # Construct the forcing data
         forcing_data: list[ForcingData]
         if isinstance(forc, ForcingData):
-            forcing_data = [forc]
+            forcing_data = [forc] * self.num_surface_zones
         else:
             forcing_data = list(forc)  # type: ignore
+            if len(forcing_data) != 1:
+                if len(forcing_data) != self.num_surface_zones:
+                    raise ValueError(
+                        f"The number of forcing data series must be either 1 or {self.num_surface_zones}, not {len(forcing_data)}"
+                    )
 
         # Scale the forcing data based on the lapse rates
         if len(self.lapse_rates) > 0:
@@ -747,12 +742,14 @@ class Model(ABC):
         r_squared_val: Optional[float] = None
         spearman_rho_val: Optional[float] = None
 
-        if streamflow is not None:
-            kge_val = kge(sim_streamflow, streamflow)
-            nse_val = nse(sim_streamflow, streamflow)
-            bias_val = (sim_streamflow - streamflow).mean() / streamflow.mean()
-            r_squared_val = streamflow.corr(sim_streamflow) ** 2
-            spearman_rho_val = streamflow.corr(sim_streamflow, method="spearman")
+        if meas_streamflow is not None:
+            kge_val = kge(sim_streamflow, meas_streamflow)
+            nse_val = nse(sim_streamflow, meas_streamflow)
+            bias_val = (
+                sim_streamflow - meas_streamflow
+            ).mean() / meas_streamflow.mean()
+            r_squared_val = meas_streamflow.corr(sim_streamflow) ** 2
+            spearman_rho_val = meas_streamflow.corr(sim_streamflow, method="spearman")
 
         return HydroModelResults(
             simulation=model_res,
@@ -809,8 +806,6 @@ class Model(ABC):
             include_lapse_rates=use_lapse_rates
         )
 
-        print(bounds)
-
         bounds_list: list[tuple[float, float]] = list(bounds.values())
 
         args = (cls, forc, meas_streamflow, metric, print_values)
@@ -832,7 +827,7 @@ class Model(ABC):
         best_results = model.run(
             forc=forc,  # type: ignore
             init_state=cls.default_init_state(),
-            streamflow=meas_streamflow,
+            meas_streamflow=meas_streamflow,
             verbose=False,
         )
 
@@ -841,6 +836,50 @@ class Model(ABC):
         }
 
         return opt_params, best_results, opt_res
+
+    def _validate_model_structure(self) -> None:
+        """
+        Validate whether the model structure is valid or not. The model
+        checks are:
+        - Ensure all types are correct in the structure
+        - Ensure structure is not empty
+        - Ensure all zones are properly connected
+        - Scales all add up to 1
+        """
+        # Check if all types are correct in the structure
+        for i, layer in enumerate(self.structure):
+            if not isinstance(layer, (list, tuple, np.ndarray, Series)):
+                raise TypeError(
+                    f"Layer {i} in structure has an incorrect type: {type(layer)}, ensure that all layers are of type list, tuple, or other ordered iterable"
+                )
+            for j, zone in enumerate(layer):
+                if not isinstance(zone, HydrologicZone):
+                    raise TypeError(
+                        f"Zone {j} in layer {i} has an incorrect type: {type(zone)}, ensure that all zones are of type HydrologicZone"
+                    )
+
+        # Check if model is empty
+        if self.structure == []:
+            raise ValueError(
+                "Model structure is empty, make sure you define a model structure class property describing your model"
+            )
+
+        # Check if model geometry is correct
+        layer_lengths: list[int] = [len(layer) for layer in self.structure]
+        prev_zones: int = len(self.structure[0])
+
+        for layer_size in layer_lengths:
+            if layer_size not in (1, prev_zones):
+                raise ValueError(
+                    f"Invalid model structure: The next layer can only have either 1 zone or the same number as the zone above, but your model has the structure {layer_lengths}"
+                )
+            prev_zones = layer_size
+
+        # Check if all model scales add up to 1
+        if abs(sum(self.scales) - 1) > 1e-3:
+            raise ValueError(
+                f"Model scales do not add up to 1: {self.scales}. Ensure that the scales equal 1 to maintain water balance"
+            )
 
 
 class HbvModel(Model):

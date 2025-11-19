@@ -1,8 +1,10 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Optional
 from scipy.optimize import root_scalar
 from numpy.typing import NDArray
+
+from .utils import find_root
 
 from .common_types import HydroForcing
 
@@ -12,27 +14,6 @@ Things to add in
 - Elevation zones: precipitation gradients with elevation - lapse rates
 - Routing
 """
-
-
-def find_root(f: Callable[[float], float], x_0: float, tol: float = 1e-5) -> float:
-    x_1: float = x_0 + 0.1
-
-    err = abs(f(x_1))
-
-    counter: int = 0
-
-    while err > x_0:
-        fx_0 = f(x_0)
-        fx_1 = f(x_1)
-        x_n = (x_0 * fx_1 - x_1 * fx_0) / (fx_1 - fx_0)
-        x_0, x_1 = x_1, x_n
-        err = abs(f(x_n))
-        counter += 1
-
-        if counter >= 25:
-            print("Failed to find error")
-
-    return x_1
 
 
 class HydroStep:
@@ -82,9 +63,11 @@ class HydrologicZone(ABC):
         def f(s: float) -> float:
             return (s_0 - s) + dt * self.mass_balance(0.5 * (s_0 + s), d)
 
-        res = root_scalar(f, x0=s_0, x1=s_0 + 0.1, method="secant", xtol=0.001)
-        s_new: float = res.root
-        # s_new = find_root(f, s_0)
+        # res = root_scalar(
+        #     f, args=(d,), x0=s_0, x1=s_0 + 0.1, method="secant", xtol=0.001
+        # )
+        # s_new: float = res.root
+        s_new = find_root(f, s_0)
 
         return HydroStep(
             state=s_new,
