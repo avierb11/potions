@@ -42,9 +42,9 @@ def objective_function(
     obj_val: float
 
     if metric == "kge":
-        obj_val = -results.kge
+        obj_val = -results.kge  # type: ignore
     elif metric == "nse":
-        obj_val = -results.nse
+        obj_val = -results.nse  # type: ignore
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -175,7 +175,7 @@ class HydrologicModel(ABC):
 
         opt_res = opt.differential_evolution(
             func=objective_function,
-            bounds=cls.default_parameter_range(),
+            bounds=cls.default_parameter_range(),  # type: ignore
             maxiter=maxiter,
             tol=0.1,
             rng=0,
@@ -195,7 +195,7 @@ class HydrologicModel(ABC):
 
         opt_params = dict(zip(cls.parameter_names(), opt_res.x))
 
-        return opt_params, best_results
+        return opt_params, best_results, opt_res
 
     @property
     def model(self) -> Model:

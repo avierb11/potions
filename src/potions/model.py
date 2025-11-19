@@ -159,9 +159,9 @@ class Model(ABC):
 
     def __init__(
         self,
-        zones: dict[str, HydrologicZone],
-        scales: list[float],
-        lapse_rates: list[LapseRateParameters] = [],
+        zones: Optional[dict[str, HydrologicZone]] = None,
+        scales: Optional[list[float]] = None,
+        lapse_rates: Optional[list[LapseRateParameters]] = None,
         verbose: bool = False,
     ) -> None:
         """Initializes the model engine.
@@ -172,6 +172,16 @@ class Model(ABC):
                 and each forcing source within that hillslope.
             lapse_rates: A list of `LapseRateParameters` objects for each of the zones
         """
+        # Check for empty values
+        if scales is None:
+            # Get the default
+            num_zones: int = len(self.structure[0])
+            scales = [1 / num_zones for _ in range(num_zones)]
+        if lapse_rates is None:
+            lapse_rates = []
+        if zones is None:
+            zones = {}
+
         # Construct the zone dictionary with the zones
         self.__zones: dict[str, HydrologicZone] = {}
         for layer in self.structure:
@@ -564,7 +574,7 @@ class Model(ABC):
 
         # Get the size parameters
         if len(self.scales) > 1:
-            param_list += self.scales
+            param_list += self.scales[:-1]
 
         # Get the lapse rate parameters
         for lp in self.lapse_rates:
@@ -599,13 +609,14 @@ class Model(ABC):
         `latent` specifies that the size parameters may be encoded in a latent
         space and need to be
         """
+
         num_zone_params: int = cls.get_num_zone_parameters()
         num_size_params: int = cls.get_num_size_parameters()
 
         zone_params: NDArray = arr[:num_zone_params]
         size_params: list[float] = arr[
             num_zone_params : num_zone_params + num_size_params
-        ].tolist()
+        ].tolist()[:-1]
 
         if latent:
             fractions: list[float] = []
@@ -616,6 +627,9 @@ class Model(ABC):
                 remainder -= size
 
             size_params = fractions[:-1]
+
+        if len(size_params) == 0:
+            size_params = [1.0]
 
         lapse_rate_params: NDArray = arr[num_zone_params + num_size_params :]
 
@@ -671,8 +685,8 @@ class Model(ABC):
     def run(
         self,
         forc: ForcingData | list[ForcingData],
-        init_state: Optional[NDArray[f64]],
-        streamflow: Optional[Series],
+        init_state: Optional[NDArray[f64]] = None,
+        streamflow: Optional[Series] = None,
         average_elevation: Optional[float] = None,
         elevations: Optional[list[float]] = None,
         bounds: Optional[dict[str, tuple[float, float]]] = None,
@@ -822,7 +836,9 @@ class Model(ABC):
             verbose=False,
         )
 
-        opt_params = {key: val for key, val in enumerate(zip(bounds.keys(), opt_res.x))}
+        opt_params: dict[str, float] = {
+            key: val for key, val in zip(bounds.keys(), opt_res.x)
+        }
 
         return opt_params, best_results, opt_res
 

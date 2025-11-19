@@ -377,6 +377,10 @@ class GroundZoneLinear(GroundZone):
     def parameter_names(cls) -> list[str]:
         return ["k", "perc"]
 
+    @classmethod
+    def default(cls) -> GroundZone:
+        return GroundZoneLinear(k=0.01, perc=1.0)
+
 
 class GroundZoneB(GroundZone):
     """
@@ -407,6 +411,10 @@ class GroundZoneB(GroundZone):
     @classmethod
     def parameter_names(cls) -> list[str]:
         return ["k", "alpha"]
+
+    @classmethod
+    def default(cls) -> GroundZone:
+        return GroundZoneB(k=0.01, alpha=1.0)
 
 
 class GroundZoneLinearB(GroundZone):
@@ -439,3 +447,7 @@ class GroundZoneLinearB(GroundZone):
     @classmethod
     def parameter_names(cls) -> list[str]:
         return ["k"]
+
+    @classmethod
+    def default(cls) -> GroundZone:
+        return GroundZoneLinearB(k=0.01)

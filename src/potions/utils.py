@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Literal, TypeVar
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import Series
 
-from .common_types import HydroModelResults
+from .common_types import ForcingData, HydroModelResults
 
 # ==== Types ==== #
 
@@ -25,12 +25,12 @@ NumSpec = TypeVar(
 def objective_function(
     x: NDArray,
     cls,
-    forc,
-    meas_streamflow,
-    metric,
+    forc: ForcingData,
+    meas_streamflow: Series,
+    metric: Literal["kge", "nse"],
     print_value: bool,
 ) -> float:
-    model = cls.from_array(x)
+    model = cls.from_array(x, latent=True)
     results: HydroModelResults = model.run(
         init_state=cls.default_init_state(),
         forc=forc,
