@@ -86,6 +86,15 @@ class LapseRateParameters:
     def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         return {"temp_factor": (-1, 0), "precip_factor": (0, 10)}
 
+    @classmethod
+    def from_dict(cls, params: dict) -> "LapseRateParameters":
+        try:
+            return cls(**params)
+        except TypeError:
+            raise TypeError(
+                f"Invalid parameters for lapse rate: {params}, expected {list(cls.default_parameter_range().keys())}"
+            )
+
 
 @dataclass(frozen=True)
 class ChemicalState:

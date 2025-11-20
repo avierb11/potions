@@ -18,6 +18,13 @@ from .model import (
     # HydroModelResults,
     run_hydro_model,
     HbvModel,
+    HbvLateralModel,
+    ThreeLayerModel,
+    HbvNonlinearModel,
+)
+
+from .utils import (
+    objective_function,
 )
 
 from .calibrate import calibrate
@@ -45,7 +52,7 @@ from .database import (
 #     ThreeLayerModel,
 # )
 
-from .common_types import ChemicalState, RtForcing
+from .common_types import ChemicalState, RtForcing, LapseRateParameters
 
 from .reaction_network import (
     ReactionNetwork,

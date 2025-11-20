@@ -158,6 +158,15 @@ class HydrologicZone(ABC):
         """
         return 0.0
 
+    @classmethod
+    def from_dict(cls, params: dict[str, float]) -> HydrologicZone:
+        try:
+            return cls(**params)  # type: ignore
+        except TypeError as e:
+            raise TypeError(
+                f"Failed to construct Hydrologic zone with type {type(cls)} and params {params}, expected parameters named {cls.parameter_names()}"
+            )
+
 
 class SnowZone(HydrologicZone):
     """A zone representing a snowpack."""

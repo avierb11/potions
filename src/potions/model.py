@@ -1,6 +1,7 @@
 from __future__ import annotations
 from abc import ABC
 import datetime
+import itertools
 from typing import (
     Final,
     Iterable,
@@ -28,6 +29,8 @@ from .reactive_transport import ReactiveTransportZone
 from .utils import objective_function
 from .interfaces import Zone, StateType
 from .hydro import (
+    GroundZone,
+    GroundZoneB,
     GroundZoneLinear,
     GroundZoneLinearB,
     HydroForcing,
@@ -188,9 +191,9 @@ class Model(ABC):
                 self.__zones[zone.name] = zone.default()
 
         for zone_name, zone in zones.items():
-            if zone_name not in self.zone_names:
+            if zone_name not in self.get_zone_names():
                 raise ValueError(
-                    f"Unknown zone name: {zone_name}. The zone name must be one of {self.zone_names}"
+                    f"Unknown zone name: {zone_name}. The zone name must be one of {self.get_zone_names()}"
                 )
             else:
                 self.__zones[zone_name] = zone
@@ -223,21 +226,21 @@ class Model(ABC):
         """
         Access a hydrologic zone with a given name.
         """
-        if zone_name in self.zone_names:
+        if zone_name in self.get_zone_names():
             return self.__zones[zone_name]
         else:
             raise ValueError(
-                f"Unknown zone name: {zone_name}, must be one of {self.zone_names}"
+                f"Unknown zone name: {zone_name}, must be one of {self.get_zone_names()}"
             )
 
-    @property
-    def zone_names(self) -> list[str]:
+    @classmethod
+    def get_zone_names(cls) -> list[str]:
         """
         The names of each of the hydrologic zones in the model
         """
 
         zone_names: list[str] = []
-        for layer in self.structure:
+        for layer in cls.structure:
             for zone in layer:
                 zone_names.append(zone.name)
         return zone_names
@@ -556,7 +559,7 @@ class Model(ABC):
         """
         param_list: list[float] = []
         # Get the zone parameters
-        for zone_name in self.zone_names:
+        for zone_name in self.get_zone_names():
             param_list += self[zone_name].param_list()
 
         # Get the size parameters
@@ -645,19 +648,116 @@ class Model(ABC):
             lapse_rates=new_lapse_rates,
         )
 
-    @classmethod
-    def parameter_names(cls) -> list[str]:
+    def parameter_names(self) -> list[str]:
         """
         Get all of the parameter names for the model
         """
         param_names: list[str] = []
+        for layer in self.structure:
+            for zone in layer:
+                for param in zone.parameter_names():
+                    param_names += [f"{zone.name}.{param}"]
+        for i, _ in enumerate(self.structure[0][:-1]):
+            param_names.append(f"proportion.{i + 1}")
+
+        for i, _ in enumerate(self.lapse_rates):
+            param_names += [
+                f"lapse_rate.{i + 1}.precip_factor",
+                f"lapse_rate.{i + 1}.temp_factor",
+            ]
+
+        return param_names
+
+    @classmethod
+    def from_dict(cls, params: dict) -> Model:
+        """
+        Create a new object of this type from a dictionary of parameters
+        """
+        params_list: list[tuple[str, float]] = [
+            (key, val) for key, val in params.items()
+        ]
+
+        zone_params_list: list[tuple[str, float]] = [
+            x for x in params_list if x[0].split(".")[0] in cls.get_zone_names()
+        ]
+        proportion_params_list: list[tuple[str, float]] = [
+            x for x in params_list if x[0].split(".")[0] == "proportion"
+        ]
+        lapse_rate_params_list: list[tuple[str, float]] = [
+            x for x in params_list if x[0].split(".")[0] == "lapse_rate"
+        ]
+
+        decomposed_vals: list[tuple[str, str, float]] = [
+            (key.split(".")[0], key.split(".")[1], val) for key, val in zone_params_list
+        ]
+
+        # Check the zone names
+        zone_names: list[str] = list(set(map(lambda x: x[0], decomposed_vals)))
+
+        for zone_name in zone_names:
+            if zone_name not in cls.get_zone_names():
+                raise ValueError(f"Unknown zone name: {zone_name}")
+
+        # Now, group the parameters into their zones
+        zone_params: dict[str, dict[str, float]] = {}
+        for key, group in itertools.groupby(decomposed_vals, lambda x: x[0]):
+            zps: list[tuple[str, str, float]] = list(group)
+            zone_param_dict: dict[str, float] = {x[1]: x[2] for x in zps}
+
+            zone_params[key] = zone_param_dict
+
+        # Now, construct the zones
+        zones: dict[str, HydrologicZone] = {}
+        for zone_name in zone_names:
+            zone_param_dict: dict[str, float] = zone_params[zone_name]
+            zone_type = cls.get_zone_type(zone_name)
+
+            new_zone = zone_type.from_dict(zone_param_dict)
+            zones[zone_name] = new_zone
+
+        # Get the sizes (if applicable)
+        scales_ordered: list[tuple[int, float]] = [
+            (int(key.split(".")[1]), val) for key, val in proportion_params_list
+        ]
+        scales_ordered.sort(key=lambda x: x[0])
+        scales: list[float] | None = [float(val) for _, val in scales_ordered]
+        if len(scales) == 0:
+            scales = None
+
+        if scales is not None:
+            scales.append(1 - sum(scales))
+
+        # Get the lapse rate parameters (if applicable)
+        lapse_rates: list[LapseRateParameters] = []
+        lapse_rates_grouped: list[tuple[int, str, float]] = [
+            (int(key.split(".")[1]), key.split(".")[2], val)
+            for key, val in lapse_rate_params_list
+        ]
+        lapse_rates_grouped.sort(key=lambda x: x[0])
+
+        lapse_rate_groups: dict[int, list[tuple[int, str, float]]] = {
+            k: list(v)
+            for k, v in itertools.groupby(lapse_rates_grouped, lambda x: x[0])
+        }
+
+        for k, v in lapse_rate_groups.items():
+            param_dict = {}
+            for _, key, val in v:
+                param_dict[key] = val
+            lapse_rates.append(LapseRateParameters.from_dict(param_dict))
+
+        return cls(zones=zones, scales=scales, lapse_rates=lapse_rates)
+
+    @classmethod
+    def get_zone_type(cls, name: str) -> type:
+        """
+        Return the type of the zone with the given name
+        """
         for layer in cls.structure:
             for zone in layer:
-                param_names += zone.parameter_names()
-        for i, _ in enumerate(cls.structure[0][:-1]):
-            param_names.append(f"proportion_{i + 1}")
-
-        raise NotImplementedError()
+                if zone.name == name:
+                    return type(zone)
+        raise ValueError(f"Unknown zone name: {name}")
 
     @classmethod
     def default_init_state(cls) -> NDArray:
@@ -881,36 +981,24 @@ class Model(ABC):
                 f"Model scales do not add up to 1: {self.scales}. Ensure that the scales equal 1 to maintain water balance"
             )
 
+    def to_dict(self) -> dict[str, float]:
+        """
+        Convert this object to a dictionary
+        """
+        return {key: val for key, val in zip(self.parameter_names(), self.to_array())}
 
-class HbvModel(Model):
-    structure: list[list[HydrologicZone]] = [
-        [SnowZone(name="snow")],
-        [SoilZone(name="soil")],
-        [GroundZoneLinear(name="shallow")],
-        [GroundZoneLinearB(name="deep")],
-    ]  # type: ignore
+    def to_series(self) -> Series:
+        """
+        Convert this object to a pandas Series
+        """
+        return Series(self.to_array(), index=self.parameter_names())
 
-    def __init__(
-        self,
-        zones: Optional[dict[str, HydrologicZone]] = None,
-        lapse_rate: Optional[LapseRateParameters] = None,
-        verbose: bool = False,
-        **kwargs,
-    ) -> None:
-        if zones is None:
-            zones = {}
-
-        lapse_rates: list[LapseRateParameters] = []
-        if lapse_rate is not None:
-            lapse_rate = lapse_rate
-
-        # Check if scale is in kwargs
-        if "scale" in kwargs:
-            del kwargs["scale"]
-
-        super().__init__(
-            zones=zones, lapse_rates=lapse_rates, scales=[1.0], verbose=verbose
-        )
+    @classmethod
+    def from_series(cls, series: Series) -> Model:
+        """
+        Create a new object of this type from a pandas Series
+        """
+        return cls.from_dict(series.to_dict())
 
 
 @dataclass(frozen=True)
@@ -1160,3 +1248,42 @@ def run_reactive_transport_model(
     #    - Return the DataFrame.
 
     raise NotImplementedError("Outline complete. Implementation pending.")
+
+
+# ==== Defined hydrologic models ==== #
+class HbvModel(Model):
+    structure = [
+        [SnowZone(name="snow")],
+        [SoilZone(name="soil")],
+        [GroundZoneLinear(name="shallow")],
+        [GroundZoneLinearB(name="deep")],
+    ]
+
+
+class HbvLateralModel(Model):
+    structure = [
+        [SnowZone(name="snow_hs"), SnowZone(name="snow_ls")],
+        [SoilZone(name="soil_hs"), SoilZone(name="soil_ls")],
+        [GroundZoneLinear(name="shallow_hs"), GroundZoneLinear(name="shallow_ls")],
+        [GroundZoneLinearB(name="deep_hs"), GroundZoneLinearB(name="deep_ls")],
+    ]
+
+
+class HbvNonlinearModel(Model):
+    structure = [
+        [SnowZone(name="snow")],
+        [SoilZone(name="soil")],
+        [GroundZone(name="shallow")],
+        [GroundZoneB(name="deep")],
+    ]
+
+
+class ThreeLayerModel(Model):
+    structure = [
+        [SnowZone(name="snow")],
+        [SoilZone(name="soil")],
+        [GroundZoneB(name="ground")],
+    ]
+
+
+# =================================== #
