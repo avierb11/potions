@@ -1,9 +1,9 @@
-from typing import Optional, TypeVar
+from typing import TypeVar
 from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 from numpy import float64 as f64
-from pandas import DataFrame, Series
+from pandas import Series
 
 
 # ==== Types ==== #
@@ -11,25 +11,6 @@ M = TypeVar("M", bound=int)
 N = TypeVar("N", bound=int)
 Vector = np.ndarray[tuple[N], np.dtype[f64]]
 Matrix = np.ndarray[tuple[M, N], np.dtype[f64]]
-
-
-@dataclass
-class HydroModelResults:
-    simulation: DataFrame
-    kge: Optional[float]
-    nse: Optional[float]
-    bias: Optional[float]
-    r_squared: Optional[float]
-    spearman_rho: Optional[float]
-
-    def to_results_dict(self) -> dict:
-        return {
-            "kge": self.kge,
-            "nse": self.nse,
-            "bias": self.bias,
-            "r_squared": self.r_squared,
-            "spearman_rho": self.spearman_rho,
-        }
 
 
 @dataclass(frozen=True)

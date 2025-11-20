@@ -4,7 +4,6 @@ import datetime
 import itertools
 from multiprocessing import Pool
 import os
-import threading
 from typing import (
     Callable,
     Final,
@@ -28,9 +27,8 @@ from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Index, Series, Timestamp
 import scipy.optimize as opt
-import xarray as xr
 
-from .common_types import ForcingData, LapseRateParameters, HydroModelResults
+from .common_types import ForcingData, LapseRateParameters
 from .objective_functions import kge, nse
 from .reactive_transport import ReactiveTransportZone
 from .utils import objective_function
@@ -50,12 +48,11 @@ from .hydro import (
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
-NETCDF_LOCK = threading.Lock()
 
 
 class BatchParams(TypedDict):
     output_dir: Optional[str]
-    threshold_function: Optional[Callable[[HydroModelResults], bool]]
+    threshold_function: Optional[Callable[[dict[str, float | DataFrame]], bool]]
     return_results: bool
     save_results: bool
 
@@ -68,9 +65,9 @@ def run_model(
     init_state: Optional[NDArray[f64]],
     meas_streamflow: Optional[Series],
     batch_params: BatchParams,
-) -> tuple[int, Optional[HydroModelResults], dict]:
+) -> tuple[int, Optional[dict[str, float | DataFrame]], dict]:
     model = cls.from_series(params)
-    run_res = model.run(
+    run_res: dict[str, float | DataFrame] = model.run(
         forc=forc,
         init_state=init_state,
         meas_streamflow=meas_streamflow,
@@ -86,14 +83,18 @@ def run_model(
             raise ValueError("Output directory must be specified")
 
         if save_model:
-            run_res.simulation.to_csv(
+            run_res["simulation"].to_csv(  # type: ignore
                 os.path.join(batch_params["output_dir"], f"{i}.csv")
             )
 
+    res_dict: dict[str, float | DataFrame] = {
+        key: val for key, val in run_res.items() if key != "simulation"
+    }
+
     if batch_params["return_results"]:
-        return i, run_res, run_res.to_results_dict()
+        return i, run_res, res_dict
     else:
-        return i, None, run_res.to_results_dict()
+        return i, None, res_dict
 
 
 class Layer:
@@ -196,6 +197,15 @@ class ModelStep(Generic[StateType]):
     vap_flux: list[StateType]
     lat_flux: list[StateType]
     vert_flux: list[StateType]
+
+
+class HydroModelResults(TypedDict):
+    simulation: DataFrame
+    kge: Optional[float]
+    nse: Optional[float]
+    bias: Optional[float]
+    r_squared: Optional[float]
+    spearman_rho: Optional[float]
 
 
 class Model(ABC):
@@ -829,7 +839,7 @@ class Model(ABC):
         elevations: Optional[list[float]] = None,
         bounds: Optional[dict[str, tuple[float, float]]] = None,
         verbose: bool = False,
-    ) -> HydroModelResults:
+    ) -> dict[str, float | DataFrame]:
         """
         Run the hydrologic simulation forward and calculate the objective functions
         """
@@ -883,8 +893,10 @@ class Model(ABC):
         ]
 
         sim_streamflow = model_res[streamflow_cols].sum(axis=1)
-        sim_streamflow.name = "streamflow_mmd"
-        model_res["streamflow_mmd"] = sim_streamflow
+        sim_streamflow.name = "sim_streamflow_mmd"
+        model_res["sim_streamflow_mmd"] = sim_streamflow
+        if meas_streamflow is not None:
+            model_res["meas_streamflow_mmd"] = meas_streamflow
 
         # Calculate objective functions
         kge_val: Optional[float] = None
@@ -902,14 +914,40 @@ class Model(ABC):
             r_squared_val = meas_streamflow.corr(sim_streamflow) ** 2
             spearman_rho_val = meas_streamflow.corr(sim_streamflow, method="spearman")
 
-        return HydroModelResults(
-            simulation=model_res,
-            kge=kge_val,
-            nse=nse_val,
-            bias=bias_val,
-            r_squared=r_squared_val,
-            spearman_rho=spearman_rho_val,
-        )
+        # Calculate some other metrics
+        streamflow_ids = self.get_river_zone_ids()
+        zone_names: list[str] = self.zone_labels
+
+        props: dict[str, float] = {}
+        for col_id, zone_name in zip(streamflow_ids, zone_names):
+            col_name = f"q_{zone_name}_lat_{col_id}"
+            prop_name: str = f"prop_q_{zone_name}_{col_id}"
+            model_res[prop_name] = model_res[col_name] / model_res["sim_streamflow_mmd"]
+            props[prop_name] = model_res[prop_name].mean()
+
+        log_kge: Optional[float] = None
+        log_nse: Optional[float] = None
+        if meas_streamflow is not None:
+            log_sim_streamflow = sim_streamflow.map(np.log10)
+            log_meas_streamflow = meas_streamflow.map(np.log10)
+            log_kge = kge(log_sim_streamflow, log_meas_streamflow)
+            log_nse = nse(log_sim_streamflow, log_meas_streamflow)
+
+        # Create the object and save
+        res = {
+            "simulation": model_res,
+            "kge": kge_val,
+            "nse": nse_val,
+            "bias": bias_val,
+            "r_squared": r_squared_val,
+            "spearman_rho": spearman_rho_val,
+            "log_kge": log_kge,
+            "log_nse": log_nse,
+        }
+
+        res.update(props)  # type: ignore
+
+        return res
 
     @classmethod
     def run_batch(
@@ -920,7 +958,9 @@ class Model(ABC):
         meas_streamflow: Optional[Series] = None,
         num_threads: int = -1,
         write_time_series_results: bool = False,
-        threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
+        threshold_function: Optional[
+            Callable[[dict[str, float | DataFrame]], bool]
+        ] = None,
         output_dir: str = "batch_results",
         return_results: bool = True,
     ) -> tuple[DataFrame, list[tuple[Model, HydroModelResults]]]:
@@ -1026,7 +1066,7 @@ class Model(ABC):
         polish: bool = False,
         maxiter=10,
         print_values: bool = False,
-    ) -> tuple[dict[str, float], HydroModelResults, opt.OptimizeResult]:
+    ) -> tuple[dict[str, float], dict[str, float | DataFrame], opt.OptimizeResult]:
         bounds: dict[str, tuple[float, float]] = cls.default_parameter_ranges(
             include_lapse_rates=use_lapse_rates
         )

@@ -15,8 +15,7 @@ from .model import (
     Layer,
     Hillslope,
     Model,
-    # HydroModelResults,
-    run_hydro_model,
+    HydroModelResults,
     HbvModel,
     HbvLateralModel,
     ThreeLayerModel,
@@ -44,19 +43,11 @@ from .database import (
     ChemicalDatabase,
 )
 
-# from .hydro_models import (
-#     HydrologicModel,
-#     HbvModel,
-#     HbvLateralModel,
-#     HydroModelResults,
-#     ThreeLayerModel,
-# )
 
 from .common_types import (
     ChemicalState,
     RtForcing,
     LapseRateParameters,
-    HydroModelResults,
 )
 
 from .reaction_network import (

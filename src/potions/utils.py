@@ -2,9 +2,9 @@ from typing import Callable, Literal, TypeVar
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
-from pandas import Series
+from pandas import DataFrame, Series
 
-from .common_types import ForcingData, HydroModelResults
+from .common_types import ForcingData
 
 # ==== Types ==== #
 
@@ -30,7 +30,7 @@ def objective_function(
     print_value: bool,
 ) -> float:
     model = cls.from_array(x, latent=True)
-    results: HydroModelResults = model.run(
+    results: dict[str, float | DataFrame] = model.run(
         init_state=cls.default_init_state(),
         forc=forc,
         meas_streamflow=meas_streamflow,
@@ -40,9 +40,9 @@ def objective_function(
     obj_val: float
 
     if metric == "kge":
-        obj_val = -results.kge  # type: ignore
+        obj_val = -results["kge"]  # type: ignore
     elif metric == "nse":
-        obj_val = -results.nse  # type: ignore
+        obj_val = -results["nse"]  # type: ignore
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
