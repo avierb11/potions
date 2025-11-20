@@ -22,6 +22,15 @@ class HydroModelResults:
     r_squared: Optional[float]
     spearman_rho: Optional[float]
 
+    def to_results_dict(self) -> dict:
+        return {
+            "kge": self.kge,
+            "nse": self.nse,
+            "bias": self.bias,
+            "r_squared": self.r_squared,
+            "spearman_rho": self.spearman_rho,
+        }
+
 
 @dataclass(frozen=True)
 class HydroForcing:

@@ -2,12 +2,17 @@ from __future__ import annotations
 from abc import ABC
 import datetime
 import itertools
+from multiprocessing import Pool
+import os
+import threading
 from typing import (
+    Callable,
     Final,
     Iterable,
     Iterator,
     Literal,
     Optional,
+    TypedDict,
     overload,
     Any,
     Generic,
@@ -16,12 +21,14 @@ from typing import (
 from functools import reduce
 import operator
 from dataclasses import dataclass
+import warnings
 import networkx as nx
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Index, Series, Timestamp
 import scipy.optimize as opt
+import xarray as xr
 
 from .common_types import ForcingData, LapseRateParameters, HydroModelResults
 from .objective_functions import kge, nse
@@ -43,6 +50,50 @@ from .hydro import (
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
+NETCDF_LOCK = threading.Lock()
+
+
+class BatchParams(TypedDict):
+    output_dir: Optional[str]
+    threshold_function: Optional[Callable[[HydroModelResults], bool]]
+    return_results: bool
+    save_results: bool
+
+
+def run_model(
+    cls: type[Model],
+    i: int,
+    params: Series,
+    forc: ForcingData | list[ForcingData],
+    init_state: Optional[NDArray[f64]],
+    meas_streamflow: Optional[Series],
+    batch_params: BatchParams,
+) -> tuple[int, Optional[HydroModelResults], dict]:
+    model = cls.from_series(params)
+    run_res = model.run(
+        forc=forc,
+        init_state=init_state,
+        meas_streamflow=meas_streamflow,
+        verbose=False,
+    )
+
+    if batch_params["save_results"]:
+        save_model = True
+        if batch_params["threshold_function"] is not None:
+            save_model = batch_params["threshold_function"](run_res)
+
+        if batch_params["output_dir"] is None:
+            raise ValueError("Output directory must be specified")
+
+        if save_model:
+            run_res.simulation.to_csv(
+                os.path.join(batch_params["output_dir"], f"{i}.csv")
+            )
+
+    if batch_params["return_results"]:
+        return i, run_res, run_res.to_results_dict()
+    else:
+        return i, None, run_res.to_results_dict()
 
 
 class Layer:
@@ -861,8 +912,82 @@ class Model(ABC):
         )
 
     @classmethod
+    def run_batch(
+        cls,
+        params: DataFrame,
+        forc: ForcingData | list[ForcingData],
+        init_state: Optional[NDArray[f64]] = None,
+        meas_streamflow: Optional[Series] = None,
+        num_threads: int = -1,
+        write_time_series_results: bool = False,
+        threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
+        output_dir: str = "batch_results",
+        return_results: bool = True,
+    ) -> tuple[DataFrame, list[tuple[Model, HydroModelResults]]]:
+        """
+        Run a series of model runs and return the results
+        """
+        results: list[tuple[int, Model, HydroModelResults]] = []
+        batch_params: Optional[BatchParams] = None
+
+        if write_time_series_results:
+            if os.path.exists(output_dir):
+                cur_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                new_output_dir: str = f"{output_dir}.{cur_time}"
+                print(
+                    f"Specified directory at {output_dir} exists, saving to {new_output_dir}"
+                )
+                output_dir = new_output_dir
+
+            if threshold_function is None and write_time_series_results:
+                print("No threshold function specified, saving all model results")
+            os.makedirs(output_dir, exist_ok=True)
+
+        bps: BatchParams = {
+            "output_dir": output_dir,
+            "threshold_function": threshold_function,
+            "return_results": return_results,
+            "save_results": write_time_series_results,
+        }
+
+        batch_params = bps
+
+        args: list[
+            tuple[
+                type[Model],
+                int,
+                Series,
+                ForcingData | list[ForcingData],
+                Optional[NDArray[f64]],
+                Optional[Series],
+                BatchParams,
+            ],
+        ] = [
+            (cls, i, row, forc, init_state, meas_streamflow, batch_params)
+            for i, row in params.iterrows()  # type: ignore
+        ]
+
+        if num_threads < 1:
+            num_threads = os.cpu_count()  # type: ignore
+        if num_threads is None:
+            num_threads = 1
+            warnings.warn("Failed to get number of threads, defaulting to 1")
+
+        with Pool(num_threads) as pool:
+            results = pool.starmap(run_model, args)  # type: ignore
+
+        # Now construct the dataframe of the resulting values
+        res_df: DataFrame = DataFrame(
+            [x for _, _, x in results], index=[x[0] for x in results]
+        ).sort_index()
+
+        results.sort(key=lambda x: x[0])
+
+        return res_df, [results[i][1:] for i in range(len(results))]
+
+    @classmethod
     def default_parameter_ranges(
-        cls, include_lapse_rates: bool = True
+        cls, include_lapse_rates: bool = False
     ) -> dict[str, tuple[float, float]]:
         """
         Get the default parameter ranges for each of the zones in the model
@@ -873,20 +998,20 @@ class Model(ABC):
             for zone in layer:
                 zone_range = zone.default_parameter_range()
                 for param_name, param_range in zone_range.items():
-                    param_ranges[f"{zone.name}_{param_name}"] = param_range
+                    param_ranges[f"{zone.name}.{param_name}"] = param_range
 
         # Add the size parameters
         for i, _ in enumerate(cls.structure[0][:-1]):
-            param_ranges[f"proportion_{i + 1}"] = (0.1, 0.9)
+            param_ranges[f"proportion.{i + 1}"] = (0.1, 0.9)
 
         # Add the lapse rate parameters
         if include_lapse_rates:
-            for _ in cls.structure[0]:
+            for i, _ in enumerate(cls.structure[0]):
                 params: dict[str, tuple[float, float]] = (
                     LapseRateParameters.default_parameter_range()
                 )
-                for i, (param_name, param_range) in enumerate(params.items()):
-                    param_ranges[f"lapse_rate_{i + 1}_{param_name}"] = param_range
+                for param_name, param_range in params.items():
+                    param_ranges[f"lapse_rate.{i + 1}.{param_name}"] = param_range
 
         return param_ranges
 
@@ -999,6 +1124,13 @@ class Model(ABC):
         Create a new object of this type from a pandas Series
         """
         return cls.from_dict(series.to_dict())
+
+    @property
+    def num_parameters(self) -> int:
+        """
+        Return the number of parameters in the model
+        """
+        return len(self.to_array())
 
 
 @dataclass(frozen=True)

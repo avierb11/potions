@@ -52,7 +52,12 @@ from .database import (
 #     ThreeLayerModel,
 # )
 
-from .common_types import ChemicalState, RtForcing, LapseRateParameters
+from .common_types import (
+    ChemicalState,
+    RtForcing,
+    LapseRateParameters,
+    HydroModelResults,
+)
 
 from .reaction_network import (
     ReactionNetwork,
