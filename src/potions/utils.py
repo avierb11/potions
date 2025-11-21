@@ -4,7 +4,7 @@ from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from .common_types import ForcingData
+from .common_types import ForcingData, HydroForcing
 
 # ==== Types ==== #
 
@@ -76,3 +76,55 @@ def find_root(f: Callable[[float], float], x_0: float, tol: float = 1e-5) -> flo
             )
 
     return x_1
+
+
+# ==== MCMC functions ==== #
+def log_prior(params: np.ndarray, bounds: dict[str, tuple[float, float]]) -> float:
+    """
+    Computes the log prior probability for a given set of parameters.
+    """
+    for param, (min_val, max_val) in zip(params, bounds.values()):
+        if param < min_val or param > max_val:
+            return -np.inf
+    return 0.0
+
+def log_probability(
+    theta: np.ndarray, 
+    model_type: type, 
+    forc: ForcingData | list[ForcingData],
+    meas_streamflow: Series,
+    bounds: dict[str, tuple[float, float]], 
+    metric: Callable[[dict], float] | Literal["kge", "nse"],
+    elevation: float | list[float] | None = None
+) -> tuple[float, list[float]]:
+    """
+    Computes the log probability for a given set of parameters.
+    """
+    lp = log_prior(theta, bounds)
+    if not np.isfinite(lp):
+        return -np.inf, [np.nan, np.nan, np.nan]
+    
+    model_res = model_type.from_array(theta, latent=True).run(
+        forc=forc,
+        meas_streamflow=meas_streamflow,
+        elevations=elevation
+    )
+
+    aux_values: list[float] = [
+        model_res["kge"],
+        model_res["nse"],
+        model_res["bias"],
+    ]
+
+    if isinstance(metric, str):
+        if metric == "kge":
+            return lp + model_res["kge"], aux_values
+        elif metric == "nse":
+            return lp + model_res["nse"], aux_values
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+    else:
+        return lp + metric(model_res), aux_values
+
+
+# ======================== #

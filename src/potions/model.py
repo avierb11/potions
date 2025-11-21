@@ -21,6 +21,7 @@ from functools import reduce
 import operator
 from dataclasses import dataclass
 import warnings
+import emcee
 import networkx as nx
 import numpy as np
 from numpy import float64 as f64
@@ -31,7 +32,7 @@ import scipy.optimize as opt
 from .common_types import ForcingData, LapseRateParameters
 from .objective_functions import kge, nse
 from .reactive_transport import ReactiveTransportZone
-from .utils import objective_function
+from .utils import objective_function, log_probability
 from .interfaces import Zone, StateType
 from .hydro import (
     GroundZone,
@@ -51,13 +52,27 @@ ZoneType = TypeVar("ZoneType", bound=Zone)
 
 
 class BatchParams(TypedDict):
+    """A dictionary specifying parameters for a batch model run.
+
+    This is used internally by `Model.run_batch` to pass configuration
+    to the worker processes.
+
+    Attributes:
+        output_dir: The directory path to save simulation results.
+        threshold_function: A callable that takes the results dictionary of a
+            single run and returns True if the results should be saved.
+        return_results: If True, the full simulation results are returned
+            from the worker process.
+        save_results: If True, worker processes will save results to disk.
+    """
+
     output_dir: Optional[str]
-    threshold_function: Optional[Callable[[dict[str, float | DataFrame]], bool]]
+    threshold_function: Optional[Callable[[HydroModelResults], bool]]
     return_results: bool
     save_results: bool
 
 
-def run_model(
+def _run_model(
     cls: type[Model],
     i: int,
     params: Series,
@@ -65,9 +80,30 @@ def run_model(
     init_state: Optional[NDArray[f64]],
     meas_streamflow: Optional[Series],
     batch_params: BatchParams,
-) -> tuple[int, Optional[dict[str, float | DataFrame]], dict]:
+) -> tuple[int, Optional[HydroModelResults], dict]:
+    """Worker function to run a single model instance in a parallel batch.
+
+    This function is designed to be called by `multiprocessing.Pool` in the
+    `Model.run_batch` method. It instantiates a model from a parameter series,
+    runs it, and optionally saves the results.
+
+    Args:
+        cls (type[Model]): The model class to instantiate (e.g., `HbvModel`).
+        i (int): The index of the run, used for tracking and saving files.
+        params (Series): A pandas Series of parameters for this model run.
+        forc (ForcingData | list[ForcingData]): The forcing data for the simulation.
+        init_state (Optional[NDArray[f64]]): The initial state of the model.
+        meas_streamflow (Optional[Series]): Observed streamflow for metric calculation.
+        batch_params (BatchParams): A dictionary of parameters controlling the batch execution.
+
+    Returns:
+        tuple[int, Optional[HydroModelResults], dict]: A tuple containing:
+            - The run index `i`.
+            - The full results dictionary (if `return_results` is True), else None.
+            - A dictionary of scalar metrics from the run.
+    """
     model = cls.from_series(params)
-    run_res: dict[str, float | DataFrame] = model.run(
+    run_res: HydroModelResults = model.run(
         forc=forc,
         init_state=init_state,
         meas_streamflow=meas_streamflow,
@@ -87,7 +123,7 @@ def run_model(
                 os.path.join(batch_params["output_dir"], f"{i}.csv")
             )
 
-    res_dict: dict[str, float | DataFrame] = {
+    res_dict: HydroModelResults = {
         key: val for key, val in run_res.items() if key != "simulation"
     }
 
@@ -98,11 +134,21 @@ def run_model(
 
 
 class Layer:
-    """A horizontal collection of computational zones.
+    """A horizontal collection of one or more computational zones.
 
-    A Layer represents a set of zones that are at the same vertical level
-    within a hillslope. It can be initialized with a variable number of Zone
-    objects or a list of them.
+    A `Layer` represents a set of zones that exist at the same vertical level
+    within the model structure. It acts as a container for zones that are
+    laterally connected or are part of the same conceptual stratum (e.g., a
+    soil layer composed of multiple hillslope positions).
+
+    Example:
+        >>> # A layer with two snow zones
+        >>> snow_layer = Layer(SnowZone(name="snow_hs"), SnowZone(name="snow_rp"))
+        >>> len(snow_layer)
+        2
+
+    Attributes:
+        zones (list[HydrologicZone]): The list of zone objects within the layer.
     """
 
     @overload
@@ -116,6 +162,12 @@ class Layer:
         ...
 
     def __init__(self, *args: Any) -> None:  # type: ignore
+        """Initializes a Layer.
+
+        Args:
+            *args: Either a variable number of `HydrologicZone` objects or a
+                single list of `HydrologicZone` objects.
+        """
         if len(args) == 1 and isinstance(args[0], list):
             self.__zones: list[HydrologicZone] = args[0]
         else:
@@ -127,12 +179,23 @@ class Layer:
         return self.__zones
 
     def __iter__(self) -> Iterator[HydrologicZone]:
+        """Returns an iterator over the zones in the layer."""
         return iter(self.zones)
 
     def __len__(self) -> int:
+        """Returns the number of zones in the layer."""
         return len(self.zones)
 
     def __getitem__(self, ind: int) -> Optional[HydrologicZone]:
+        """Retrieves a zone by its index within the layer.
+
+        Args:
+            ind (int): The index of the zone to retrieve.
+
+        Returns:
+            Optional[HydrologicZone]: The zone at the specified index, or `None`
+                if the index is out of bounds.
+        """
         if 0 <= ind < len(self.zones):
             return self.__zones[ind]
         else:
@@ -141,10 +204,10 @@ class Layer:
 
 @dataclass(frozen=True)
 class Hillslope:
-    """A vertical stack of Layers, representing a single landscape unit.
+    """A vertical stack of Layers. (Deprecated)
 
-    A Hillslope is a fundamental structural component of a model, composed of
-    one or more layers.
+    This class is deprecated and will be removed in a future version. The model
+    structure is now defined directly as a list of lists of zones.
 
     Attributes:
         layers: A list of Layer objects, ordered from top to bottom.
@@ -153,12 +216,22 @@ class Hillslope:
     layers: list[Layer]
 
     def __iter__(self) -> Iterator[Layer]:
+        """Returns an iterator over the layers in the hillslope."""
         return iter(self.layers)
 
     def __len__(self) -> int:
+        """Returns the number of zones in the hillslope."""
         return reduce(operator.add, map(len, self.layers), 0)
 
     def __getitem__(self, ind: int) -> Optional[Layer]:
+        """Retrieves a layer by its index.
+
+        Args:
+            ind (int): The index of the layer.
+
+        Returns:
+            Optional[Layer]: The layer at the index, or `None` if out of bounds.
+        """
         if 0 <= ind < len(self.layers):
             return self.layers[ind]
         else:
@@ -182,9 +255,9 @@ class ModelStep(Generic[StateType]):
     """Holds the results of a single time step for the entire model.
 
     This is an immutable data structure that contains the new states and the
-    calculated fluxes for all zones in the model over a single time step (`dt`).
+    calculated fluxes for all zones in the model for a single time step.
 
-    Attributes:
+    Attributes (list order corresponds to the flattened model zones):
         state: A list of the updated states for each zone.
         forc_flux: A list of the forcing fluxes for each zone.
         vap_flux: A list of the vaporization fluxes for each zone.
@@ -199,7 +272,22 @@ class ModelStep(Generic[StateType]):
     vert_flux: list[StateType]
 
 
-class HydroModelResults(TypedDict):
+HydroModelResults = dict[str, float | DataFrame | None]
+
+
+class HydroModelResultsBackup(TypedDict):
+    """A dictionary containing the results of a hydrologic model run.
+
+    Attributes:
+        simulation (DataFrame): A DataFrame with time series of states and
+            fluxes for all zones, plus simulated and measured streamflow.
+        kge (Optional[float]): The Kling-Gupta Efficiency score.
+        nse (Optional[float]): The Nash-Sutcliffe Efficiency score.
+        bias (Optional[float]): The fractional bias of the simulation.
+        r_squared (Optional[float]): The coefficient of determination (R²).
+        spearman_rho (Optional[float]): The Spearman rank correlation coefficient.
+    """
+
     simulation: DataFrame
     kge: Optional[float]
     nse: Optional[float]
@@ -209,13 +297,20 @@ class HydroModelResults(TypedDict):
 
 
 class Model(ABC):
-    """The main model engine that runs the simulation.
+    """An abstract base class for defining and running hydrologic models.
 
-    This is a generic class that can manage and run simulations for any type of
-    computational zone (`ZoneType`) that adheres to the `Zone` interface. It
-    constructs a model from a collection of hillslopes, calculates the
-    connectivity between all zones, and provides a `step` method to advance
-    the simulation in time.
+    The `Model` class serves as the engine for simulations. It takes a defined
+    `structure` (a list of lists of `HydrologicZone` objects), builds a
+    connectivity graph, and provides methods to run simulations, calibrate
+    parameters, and manage model state.
+
+    To create a new model, subclass `Model` and define the `structure` class
+    attribute.
+
+    Example:
+        >>> class MySimpleModel(Model):
+        ...     structure = [[SnowZone()], [SoilZone()]]
+        >>> model = MySimpleModel()
     """
 
     structure: list[list[HydrologicZone]] = []
@@ -230,10 +325,16 @@ class Model(ABC):
         """Initializes the model engine.
 
         Args:
-            layers: A list of `Layer` objects that make up the model structure.
-            scales: A nested list defining the relative area of each hillslope
-                and each forcing source within that hillslope.
-            lapse_rates: A list of `LapseRateParameters` objects for each of the zones
+            zones (Optional[dict[str, HydrologicZone]]): A dictionary to
+                override the default zones in the structure with custom-
+                parameterized ones. Keys are zone names. Defaults to None.
+            scales (Optional[list[float]]): A list of fractional areas for each
+                surface zone, defining their contribution to the total catchment.
+                Must sum to 1. Defaults to equal scaling.
+            lapse_rates (Optional[list[LapseRateParameters]]): A list of lapse
+                rate parameters, one for each surface zone. Defaults to None.
+            verbose (bool): If True, prints additional information during
+                initialization. Defaults to False.
         """
         # Check for empty values
         if scales is None:
@@ -284,8 +385,16 @@ class Model(ABC):
         self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(scales, relative=True)
 
     def __getitem__(self, zone_name: str) -> HydrologicZone:
-        """
-        Access a hydrologic zone with a given name.
+        """Access a hydrologic zone within the model by its name.
+
+        Args:
+            zone_name (str): The name of the zone to retrieve.
+
+        Returns:
+            HydrologicZone: The zone object.
+
+        Raises:
+            ValueError: If no zone with the given name exists in the model.
         """
         if zone_name in self.get_zone_names():
             return self.__zones[zone_name]
@@ -296,10 +405,11 @@ class Model(ABC):
 
     @classmethod
     def get_zone_names(cls) -> list[str]:
-        """
-        The names of each of the hydrologic zones in the model
-        """
+        """Get the names of all hydrologic zones in the model structure.
 
+        Returns:
+            list[str]: A list of all zone names.
+        """
         zone_names: list[str] = []
         for layer in cls.structure:
             for zone in layer:
@@ -308,10 +418,12 @@ class Model(ABC):
 
     @property
     def num_surface_zones(self) -> int:
+        """The number of zones in the top layer of the model."""
         return len(self.structure[0])
 
     @property
     def graph(self) -> nx.DiGraph:
+        """The NetworkX graph representing the model's hydrologic connectivity."""
         return self.__zone_graph
 
     @property
@@ -346,17 +458,23 @@ class Model(ABC):
 
     @property
     def scales(self) -> list[float]:
-        """The nested list of relative areas for hillslopes and forcing sources."""
+        """The list of relative areas for each surface zone."""
         return self.__scales
 
     def __len__(self) -> int:
+        """Returns the number of layers in the model."""
         return len(self.layers)
 
     def __iter__(self) -> Iterator[Layer]:
+        """Returns an iterator over the layers in the model."""
         return iter(self.layers)
 
     def flatten(self) -> list[HydrologicZone]:
-        """Flattens the model structure into a single list of zones."""
+        """Flattens the nested model structure into a single list of zones.
+
+        Returns:
+            list[HydrologicZone]: A 1D list of all zones.
+        """
         return reduce(operator.add, map(lambda x: x.zones, self.layers), [])
 
     @property
@@ -367,7 +485,23 @@ class Model(ABC):
     def step(
         self, state: NDArray[f64], ds: list[HydroForcing], dt: float
     ) -> ModelStep[float]:
-        """Step the model given the current state, forcing, and the time step."""
+        """Advances all zones in the model by a single time step.
+
+        This method orchestrates the computation for one step by:
+        1. Calculating incoming fluxes to each zone from its neighbors.
+        2. Calling the `step` method of each individual zone.
+        3. Collecting the results.
+
+        Args:
+            state (NDArray[f64]): The current state (storage) of all zones.
+            ds (list[HydroForcing]): A list of forcing data objects, one for
+                each zone for the current time step.
+            dt (float): The time step duration in days.
+
+        Returns:
+            ModelStep[float]: An object containing the new states and all
+                calculated fluxes for every zone.
+        """
         new_states: list[float] = []
         forc_fluxes: list[float] = []
         vap_fluxes: list[float] = []
@@ -416,9 +550,12 @@ class Model(ABC):
         )
 
     def get_river_zone_ids(self) -> list[int]:
-        """
-        Get a list of the indices of the zones (in the flattened model) that laterally flow into the river.
-        These zones are the final zones in a layer.
+        """Gets the indices of zones that discharge laterally to the river.
+
+        By convention, these are the last zones in each layer.
+
+        Returns:
+            list[int]: A list of indices for river-contributing zones.
         """
         river_zones: list[int] = []
         current_zone_idx: int = 0
@@ -431,6 +568,7 @@ class Model(ABC):
         return river_zones
 
     def num_zones(self) -> int:
+        """Returns the total number of zones in the model."""
         return len(self.flat_model)
 
     def get_size_mat(self) -> NDArray[f64]:
@@ -440,7 +578,8 @@ class Model(ABC):
         zone (or forcing source) is distributed to all zones beneath it.
 
         Returns:
-            A matrix mapping forcing sources to zones.
+            NDArray[f64]: A matrix where `mat[i, j]` is 1 if surface zone `j`
+                contributes to zone `i`, and 0 otherwise.
         """
         vert: NDArray[f64] = self.__vert_matrix
         index_rows: list[int] = [
@@ -468,8 +607,10 @@ class Model(ABC):
 
         Args:
             sizes: An array-like object with the relative area of each forcing source.
-            relative: If True, normalizes the matrix rows to sum to 1. This is
-                used for intensive variables like temperature.
+            relative (bool): If True, normalizes the matrix rows to sum to 1.
+                This is used for intensive variables like temperature where an
+                area-weighted average is desired. If False, the matrix contains
+                the fractional contribution of each source. Defaults to False.
         """
         conn_mat: NDArray[f64] = self.get_size_mat()
         s_arr: NDArray[f64] = np.array(sizes)
@@ -491,15 +632,22 @@ class Model(ABC):
             return relative_mat
         else:
             return mat
+    
+    @classmethod 
+    def get_column_names(cls) -> list[str]:
+        """A class method to get column names for the final output DataFrame."""
+        zone_names: list[str] = cls.get_zone_names()
+        col_names: list[str] = []
+        for i, zone_name in enumerate(zone_names):
+            col_names += [
+                f"s_{zone_name}_{i}",
+                f"q_forc_{zone_name}_{i}",
+                f"q_vap_{zone_name}_{i}",
+                f"q_lat_{zone_name}_{i}",
+                f"q_vert_{zone_name}_{i}",
+            ]
+        return col_names
 
-    @property
-    def column_names(self) -> list[str]:
-        """A list of column names for the final output DataFrame."""
-        names: list[str] = []
-        for i, zone in enumerate(self.flat_model):
-            names += zone.columns(i)
-
-        return names
 
     @property
     def zone_labels(self) -> list[str]:
@@ -508,6 +656,15 @@ class Model(ABC):
 
     # Newer definitions
     def construct_hydrologic_graph(self: Model):
+        """Constructs a directed graph representing hydrologic connectivity.
+
+        This method builds a `networkx.DiGraph` where nodes are zones and
+        edges represent the flow of water (laterally or vertically). The graph
+        is built based on the model's `structure`.
+
+        Returns:
+            nx.DiGraph: The connectivity graph of the model.
+        """
         G: nx.DiGraph = nx.DiGraph()
 
         # Node identifiers will be tuples: (layer_idx, zone_idx)
@@ -566,16 +723,16 @@ class Model(ABC):
     def get_connection_matrices_with_river_row(
         self: Model, G: nx.DiGraph
     ) -> tuple[NDArray, NDArray, list[str]]:
-        """
-        Generates lateral and vertical connection matrices, each augmented
-        with an additional row representing outflow to the river.
+        """Generates lateral and vertical connection matrices from the graph.
+
+        The lateral matrix is augmented with an additional row representing
+        outflow to the river.
 
         Args:
             G (nx.DiGraph): The full hydrologic graph.
-            model (Model): The model object, used to identify river connection zones.
 
         Returns:
-            tuple: (lateral_matrix_augmented, vertical_matrix_augmented, all_nodes)
+            tuple[NDArray, NDArray, list[str]]: A tuple containing:
                 - lateral_matrix_augmented (np.array): (n+1) x n matrix for lateral flows + river outflow.
                 - vertical_matrix_augmented (np.array): (n+1) x n matrix for vertical flows + river outflow.
                 - all_nodes (list): Ordered list of nodes corresponding to matrix columns (and first n rows).
@@ -615,8 +772,10 @@ class Model(ABC):
         return lateral_matrix_augmented, vertical_matrix_nn, all_nodes
 
     def to_array(self) -> NDArray:
-        """
-        Convert the model parameters into an array
+        """Serializes all model parameters into a single 1D NumPy array.
+
+        Returns:
+            NDArray: A flat array of all model parameters.
         """
         param_list: list[float] = []
         # Get the zone parameters
@@ -635,8 +794,10 @@ class Model(ABC):
 
     @classmethod
     def get_num_zone_parameters(cls) -> int:
-        """
-        Return the number of parameters in the zones only, excluding the meteorology and sizes
+        """Gets the total number of tunable parameters across all zones.
+
+        Returns:
+            int: The count of zone-specific parameters.
         """
         num_zone_params: int = 0
         for layer in cls.structure:
@@ -647,18 +808,27 @@ class Model(ABC):
 
     @classmethod
     def get_num_size_parameters(cls) -> int:
-        """
-        Return the number of parameters in the sizes only. This will be
-        equal to 1 less than the number of surface zones.
+        """Gets the number of tunable size (area) parameters.
+
+        This is equal to one less than the number of surface zones, as the
+        last one is determined by the constraint that they sum to 1.
+
+        Returns:
+            int: The number of size parameters.
         """
         return len(cls.structure[0]) - 1
 
     @classmethod
     def from_array(cls, arr: NDArray, latent: bool = False) -> Model:
-        """
-        Create a new object of this type from a numpy array
-        `latent` specifies that the size parameters may be encoded in a latent
-        space and need to be
+        """Creates a new model instance from a 1D NumPy array of parameters.
+
+        Args:
+            arr (NDArray): A flat array of parameter values.
+            latent (bool): If True, treats size parameters as being in a latent
+                space, requiring transformation. Defaults to False.
+
+        Returns:
+            Model: A new, parameterized model instance.
         """
 
         num_zone_params: int = cls.get_num_zone_parameters()
@@ -710,8 +880,10 @@ class Model(ABC):
         )
 
     def parameter_names(self) -> list[str]:
-        """
-        Get all of the parameter names for the model
+        """Gets an ordered list of all parameter names in the model.
+
+        Returns:
+            list[str]: A list of parameter names (e.g., "soil.fc").
         """
         param_names: list[str] = []
         for layer in self.structure:
@@ -731,8 +903,14 @@ class Model(ABC):
 
     @classmethod
     def from_dict(cls, params: dict) -> Model:
-        """
-        Create a new object of this type from a dictionary of parameters
+        """Creates a new model instance from a dictionary of parameters.
+
+        Args:
+            params (dict): A dictionary mapping parameter names (e.g., "soil.fc")
+                to their values.
+
+        Returns:
+            Model: A new, parameterized model instance.
         """
         params_list: list[tuple[str, float]] = [
             (key, val) for key, val in params.items()
@@ -761,17 +939,18 @@ class Model(ABC):
 
         # Now, group the parameters into their zones
         zone_params: dict[str, dict[str, float]] = {}
+        zone_param_dict: dict[str, float]
         for key, group in itertools.groupby(decomposed_vals, lambda x: x[0]):
             zps: list[tuple[str, str, float]] = list(group)
-            zone_param_dict: dict[str, float] = {x[1]: x[2] for x in zps}
+            zone_param_dict = {x[1]: x[2] for x in zps}
 
             zone_params[key] = zone_param_dict
 
         # Now, construct the zones
         zones: dict[str, HydrologicZone] = {}
         for zone_name in zone_names:
-            zone_param_dict: dict[str, float] = zone_params[zone_name]
-            zone_type = cls.get_zone_type(zone_name)
+            zone_param_dict = zone_params[zone_name]
+            zone_type: type[HydrologicZone] = cls.get_zone_type(zone_name)
 
             new_zone = zone_type.from_dict(zone_param_dict)
             zones[zone_name] = new_zone
@@ -782,7 +961,7 @@ class Model(ABC):
         ]
         scales_ordered.sort(key=lambda x: x[0])
         scales: list[float] | None = [float(val) for _, val in scales_ordered]
-        if len(scales) == 0:
+        if len(scales) == 0:  # type: ignore
             scales = None
 
         if scales is not None:
@@ -811,8 +990,13 @@ class Model(ABC):
 
     @classmethod
     def get_zone_type(cls, name: str) -> type:
-        """
-        Return the type of the zone with the given name
+        """Gets the class type of a zone by its name.
+
+        Args:
+            name (str): The name of the zone.
+
+        Returns:
+            type: The class of the specified zone (e.g., `SoilZone`).
         """
         for layer in cls.structure:
             for zone in layer:
@@ -822,9 +1006,10 @@ class Model(ABC):
 
     @classmethod
     def default_init_state(cls) -> NDArray:
-        """
-        Get the default initial state for the model based on the default
-        initial state for each zone in the model
+        """Gets the default initial state for the model.
+
+        Returns:
+            NDArray: An array of default initial storage values for all zones.
         """
         return np.array(
             [zone.default_init_state() for layer in cls.structure for zone in layer]
@@ -837,11 +1022,26 @@ class Model(ABC):
         meas_streamflow: Optional[Series] = None,
         average_elevation: Optional[float] = None,
         elevations: Optional[list[float]] = None,
-        bounds: Optional[dict[str, tuple[float, float]]] = None,
         verbose: bool = False,
-    ) -> dict[str, float | DataFrame]:
-        """
-        Run the hydrologic simulation forward and calculate the objective functions
+    ) -> HydroModelResults:
+        """Runs a forward simulation of the hydrologic model.
+
+        Args:
+            forc (ForcingData | list[ForcingData]): A single `ForcingData` object
+                or a list of them (one for each surface zone).
+            init_state (Optional[NDArray[f64]]): The initial storage for each
+                zone. If None, uses `default_init_state()`. Defaults to None.
+            meas_streamflow (Optional[Series]): A time series of observed
+                streamflow for calculating performance metrics. Defaults to None.
+            average_elevation (Optional[float]): The average elevation of the
+                meteorological gauge (required for lapse rates). Defaults to None.
+            elevations (Optional[list[float]]): A list of mean elevations for
+                each surface zone (required for lapse rates). Defaults to None.
+            bounds (Optional[dict[str, tuple[float, float]]]): Not currently used.
+            verbose (bool): Not currently used.
+
+        Returns:
+            HydroModelResults: A `HydroModelResults` dictionary.
         """
         # Check the model structure
         self._validate_model_structure()
@@ -889,7 +1089,7 @@ class Model(ABC):
         streamflow_cols: list[str] = [
             col
             for col in model_res.columns
-            if "lat" in col and int(col[-1]) in self.get_river_zone_ids()
+            if "lat" in col and int(col.split("_")[-1]) in self.get_river_zone_ids()
         ]
 
         sim_streamflow = model_res[streamflow_cols].sum(axis=1)
@@ -916,11 +1116,12 @@ class Model(ABC):
 
         # Calculate some other metrics
         streamflow_ids = self.get_river_zone_ids()
-        zone_names: list[str] = self.zone_labels
+        zone_names: list[str] = self.get_zone_names()
 
         props: dict[str, float] = {}
-        for col_id, zone_name in zip(streamflow_ids, zone_names):
-            col_name = f"q_{zone_name}_lat_{col_id}"
+        for col_id in streamflow_ids:
+            zone_name: str = zone_names[col_id]
+            col_name: str = f"q_lat_{zone_name}_{col_id}"
             prop_name: str = f"prop_q_{zone_name}_{col_id}"
             model_res[prop_name] = model_res[col_name] / model_res["sim_streamflow_mmd"]
             props[prop_name] = model_res[prop_name].mean()
@@ -928,8 +1129,8 @@ class Model(ABC):
         log_kge: Optional[float] = None
         log_nse: Optional[float] = None
         if meas_streamflow is not None:
-            log_sim_streamflow = sim_streamflow.map(np.log10)
-            log_meas_streamflow = meas_streamflow.map(np.log10)
+            log_sim_streamflow: Series = sim_streamflow.map(np.log10)
+            log_meas_streamflow: Series = meas_streamflow.map(np.log10)
             log_kge = kge(log_sim_streamflow, log_meas_streamflow)
             log_nse = nse(log_sim_streamflow, log_meas_streamflow)
 
@@ -958,14 +1159,34 @@ class Model(ABC):
         meas_streamflow: Optional[Series] = None,
         num_threads: int = -1,
         write_time_series_results: bool = False,
-        threshold_function: Optional[
-            Callable[[dict[str, float | DataFrame]], bool]
-        ] = None,
+        threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
         output_dir: str = "batch_results",
         return_results: bool = True,
     ) -> tuple[DataFrame, list[tuple[Model, HydroModelResults]]]:
-        """
-        Run a series of model runs and return the results
+        """Runs a batch of model simulations in parallel.
+
+        Args:
+            params (DataFrame): A DataFrame where each row is a parameter set
+                and columns are parameter names.
+            forc (ForcingData | list[ForcingData]): The forcing data for the simulations.
+            init_state (Optional[NDArray[f64]]): The initial state for all runs.
+                Defaults to None.
+            meas_streamflow (Optional[Series]): Observed streamflow for all runs.
+                Defaults to None.
+            num_threads (int): The number of parallel processes to use. If -1,
+                uses all available CPU cores. Defaults to -1.
+            write_time_series_results (bool): If True, saves the full time
+                series output of selected runs to CSV files. Defaults to False.
+            threshold_function (Optional[Callable]): A function that returns True
+                if a run's results should be saved. Defaults to None (save all).
+            output_dir (str): Directory to save results. Defaults to "batch_results".
+            return_results (bool): If True, returns the full results objects.
+                Defaults to True.
+
+        Returns:
+            tuple[DataFrame, list[tuple[Model, HydroModelResults]]]: A tuple containing:
+                - A DataFrame of scalar metrics for all runs.
+                - A list of tuples, each with a `Model` instance and its results.
         """
         results: list[tuple[int, Model, HydroModelResults]] = []
         batch_params: Optional[BatchParams] = None
@@ -1003,8 +1224,8 @@ class Model(ABC):
                 BatchParams,
             ],
         ] = [
-            (cls, i, row, forc, init_state, meas_streamflow, batch_params)
-            for i, row in params.iterrows()  # type: ignore
+            (cls, i, row, forc, init_state, meas_streamflow, batch_params)  # type: ignore
+            for i, row in params.iterrows()
         ]
 
         if num_threads < 1:
@@ -1014,7 +1235,7 @@ class Model(ABC):
             warnings.warn("Failed to get number of threads, defaulting to 1")
 
         with Pool(num_threads) as pool:
-            results = pool.starmap(run_model, args)  # type: ignore
+            results = pool.starmap(_run_model, args)  # type: ignore
 
         # Now construct the dataframe of the resulting values
         res_df: DataFrame = DataFrame(
@@ -1029,8 +1250,15 @@ class Model(ABC):
     def default_parameter_ranges(
         cls, include_lapse_rates: bool = False
     ) -> dict[str, tuple[float, float]]:
-        """
-        Get the default parameter ranges for each of the zones in the model
+        """Gets the default parameter ranges for calibration.
+
+        Args:
+            include_lapse_rates (bool): If True, includes default ranges for
+                lapse rate parameters. Defaults to False.
+
+        Returns:
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
+                names to their (min, max) bounds.
         """
         param_ranges: dict[str, tuple[float, float]] = {}
         # Add the hydrologic zone parameters
@@ -1066,7 +1294,31 @@ class Model(ABC):
         polish: bool = False,
         maxiter=10,
         print_values: bool = False,
-    ) -> tuple[dict[str, float], dict[str, float | DataFrame], opt.OptimizeResult]:
+    ) -> tuple[dict[str, float], HydroModelResults, opt.OptimizeResult]:
+        """Performs a simple calibration using differential evolution.
+
+        Args:
+            forc (ForcingData | Iterable[ForcingData]): The forcing data.
+            meas_streamflow (Series): The observed streamflow for optimization.
+            metric (Literal["nse", "kge"]): The objective function to optimize
+                ("nse" or "kge").
+            use_lapse_rates (bool): Whether to include lapse rates in the
+                calibration. Defaults to False.
+            num_threads (int): Number of parallel workers for the optimizer.
+                Defaults to -1 (all cores).
+            polish (bool): If True, refines the result with a local optimizer.
+                Defaults to False.
+            maxiter (int): Maximum number of generations for the optimizer.
+                Defaults to 10.
+            print_values (bool): If True, prints metric values during
+                optimization. Defaults to False.
+
+        Returns:
+            tuple[dict, dict, OptimizeResult]: A tuple containing:
+                - The dictionary of the best-fit parameters.
+                - The results dictionary from the best-fit model run.
+                - The full `OptimizeResult` object from SciPy.
+        """
         bounds: dict[str, tuple[float, float]] = cls.default_parameter_ranges(
             include_lapse_rates=use_lapse_rates
         )
@@ -1102,14 +1354,139 @@ class Model(ABC):
 
         return opt_params, best_results, opt_res
 
-    def _validate_model_structure(self) -> None:
+    def gradient(
+        self, 
+        obj_func: Callable[[dict], float] | Literal["kge", "nse"], 
+        forc: ForcingData | list[ForcingData],
+        meas_streamflow: Series,
+        rel_step: float = 0.01,
+        mean_elev: Optional[list[float]] = None,
+        include_lapse_rates: bool = False
+    ) -> np.ndarray:
         """
-        Validate whether the model structure is valid or not. The model
-        checks are:
-        - Ensure all types are correct in the structure
-        - Ensure structure is not empty
-        - Ensure all zones are properly connected
-        - Scales all add up to 1
+        Compute the gradient of some objective function that takes the `HydroModelResults` as an argument
+        and returns a float representing the gradient
+        """
+        # Get the objective function
+        if obj_func == "kge":
+            def operational_obj_func(res: dict) -> float:
+                return res["kge"]
+        elif obj_func == "nse":
+            def operational_obj_func(res: dict) -> float:
+                return res["nse"]
+        else:
+            operational_obj_func = obj_func # type: ignore
+
+        params = self.to_array()
+
+        grad_vals: list[float] = []
+        bounds: dict = self.default_parameter_ranges(include_lapse_rates=include_lapse_rates)
+        for i, (x_i, (min_val, max_val)) in enumerate(zip(params, bounds.values())):
+            # Compute the gradient at x_i using centered finite differences
+            state_left = params.copy()
+            state_right = params.copy()
+
+            dx: float = abs(state_left[i] * rel_step)
+
+            # Make sure that the steps are nonzero
+            if abs(dx) < 1e-6:
+                dx = abs(0.5 * (max_val - min_val))
+
+            x_i_left = max(min_val, x_i - dx)
+            x_i_right = min(max_val, x_i + dx)
+
+            state_left[i] = x_i_left
+            state_right[i] = x_i_right
+
+
+                                 
+            left_model = self.from_array(state_left)
+            right_model = self.from_array(state_right)
+
+            left_res = left_model.run(forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow)
+            right_res = right_model.run(forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow)
+
+            grad_vals.append((operational_obj_func(right_res) - operational_obj_func(left_res)) / (x_i_right - x_i_left))
+
+        return np.array(grad_vals)
+    
+    @classmethod
+    def mcmc(
+        cls: type[Model],
+        forc: ForcingData | list[ForcingData],
+        meas_streamflow: Series,
+        include_lapse_rates: bool = False,
+        elevations: Optional[list[float]]=None,
+        bounds: dict[str, tuple[float, float]] | None = None,
+        num_threads: int = -1,
+        num_walkers: Optional[int] = None,
+        num_samples: int = 1_000,
+        metric: Callable[[dict], float] | Literal["kge", "nse"] = "kge",
+        initial_state: Optional[NDArray[f64]] = None,
+    ) -> tuple[DataFrame, DataFrame, emcee.EnsembleSampler, emcee.State]:
+        """Runs a Markov Chain Monte Carlo simulation."""
+        if num_threads < 1:
+            num_threads = os.cpu_count()  # type: ignore
+        
+        if bounds is None:
+            bounds = cls.default_parameter_ranges(include_lapse_rates=include_lapse_rates)
+
+        if initial_state is None:
+            initial_state = np.array([0.5 * (x[0] + x[1]) for x in bounds.values()]) # Have the initial guess be in the middle of the parameter ranges
+        param_ranges = np.array([x[1] - x[0] for x in bounds.values()])
+        ndim = initial_state.size 
+
+        if num_walkers is None:
+            num_walkers = 2 * ndim
+
+        initial_walker_states = [initial_state + 0.25 * param_ranges * np.random.randn(ndim) for _ in range(num_walkers)]
+
+        args = (
+            cls,
+            forc,
+            meas_streamflow,
+            bounds,
+            metric,
+            elevations,
+        )
+
+
+        with Pool(num_threads) as pool:
+            sampler = emcee.EnsembleSampler(
+                num_walkers,
+                ndim,
+                log_prob_fn=log_probability,
+                pool=pool,  
+                args=args     
+            )
+
+            mc_result = sampler.run_mcmc(
+                initial_walker_states,
+                num_samples,
+                progress=True
+            )
+
+        # Now, examine the outputs
+        blob_arr: np.ndarray = sampler.get_blobs() # type: ignore
+        blob_arr = blob_arr.reshape((blob_arr.shape[0] * blob_arr.shape[1], blob_arr.shape[2]))
+        obj_func_df = DataFrame(blob_arr, columns=["kge", "nse", "bias"])
+
+        sample_arr: np.ndarray = sampler.get_chain() # type: ignore
+        sample_arr: np.ndarray = sample_arr.reshape((sample_arr.shape[0] * sample_arr.shape[1], sample_arr.shape[2]))
+        sample_df = DataFrame(sample_arr, columns=list(bounds.keys()))
+
+        return sample_df, obj_func_df, sampler, mc_result # type: ignore
+
+
+    def _validate_model_structure(self) -> None:
+        """Validates the model's structure and configuration.
+
+        Checks for:
+        - Correct types in the `structure` attribute.
+        - Non-empty structure.
+        - Valid layer connectivity (each layer must have 1 zone or the same
+          number of zones as the layer above it).
+        - `scales` that sum to 1.
         """
         # Check if all types are correct in the structure
         for i, layer in enumerate(self.structure):
@@ -1147,29 +1524,36 @@ class Model(ABC):
             )
 
     def to_dict(self) -> dict[str, float]:
-        """
-        Convert this object to a dictionary
+        """Converts the model's parameters to a dictionary.
+
+        Returns:
+            dict[str, float]: A dictionary mapping parameter names to values.
         """
         return {key: val for key, val in zip(self.parameter_names(), self.to_array())}
 
     def to_series(self) -> Series:
-        """
-        Convert this object to a pandas Series
+        """Converts the model's parameters to a pandas Series.
+
+        Returns:
+            Series: A Series with parameter names as the index.
         """
         return Series(self.to_array(), index=self.parameter_names())
 
     @classmethod
     def from_series(cls, series: Series) -> Model:
-        """
-        Create a new object of this type from a pandas Series
+        """Creates a new model instance from a pandas Series of parameters.
+
+        Args:
+            series (Series): A Series of parameters with names as the index.
+
+        Returns:
+            Model: A new, parameterized model instance.
         """
         return cls.from_dict(series.to_dict())
 
     @property
     def num_parameters(self) -> int:
-        """
-        Return the number of parameters in the model
-        """
+        """The total number of tunable parameters in the model."""
         return len(self.to_array())
 
 
@@ -1218,7 +1602,7 @@ def run_hydro_model(
     This function prepares the forcing data by distributing it from sources to
     individual zones based on the model's connectivity matrices. It then
     iterates through time, calling the model's `step` method at each interval
-    and collecting the results into a pandas DataFrame.
+    and collecting the results into a pandas `DataFrame`.
 
     Args:
         model: The configured `Model[HydrologicZone]` instance to run.
@@ -1226,7 +1610,6 @@ def run_hydro_model(
         forc: A list of `ForcingData` objects, one for each forcing source
             defined in the model's scale parameters.
         dates: A pandas Series of dates for the output DataFrame index.
-        dt: The time step duration in days.
 
     Returns:
         A pandas DataFrame containing the time series of states and fluxes for
@@ -1334,7 +1717,7 @@ def run_hydro_model(
         full_array[:, 5 * i + 3] = fluxes[:, i, 2]  # Lateral
         full_array[:, 5 * i + 4] = fluxes[:, i, 3]  # Vertical
 
-    col_names: list[str] = model.column_names
+    col_names: list[str] = model.get_column_names()
 
     out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
     return out_df
@@ -1424,6 +1807,8 @@ def run_reactive_transport_model(
 
 # ==== Defined hydrologic models ==== #
 class HbvModel(Model):
+    """A standard, single-column HBV-like model structure."""
+
     structure = [
         [SnowZone(name="snow")],
         [SoilZone(name="soil")],
@@ -1433,15 +1818,19 @@ class HbvModel(Model):
 
 
 class HbvLateralModel(Model):
+    """An HBV-like model with two lateral columns (e.g., hillslope/riparian)."""
+
     structure = [
-        [SnowZone(name="snow_hs"), SnowZone(name="snow_ls")],
-        [SoilZone(name="soil_hs"), SoilZone(name="soil_ls")],
-        [GroundZoneLinear(name="shallow_hs"), GroundZoneLinear(name="shallow_ls")],
-        [GroundZoneLinearB(name="deep_hs"), GroundZoneLinearB(name="deep_ls")],
+        [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
+        [SoilZone(name="soil_hs"), SoilZone(name="soil_rp")],
+        [GroundZoneLinear(name="shallow_hs"), GroundZoneLinear(name="shallow_rp")],
+        [GroundZoneLinearB(name="deep_hs"), GroundZoneLinearB(name="deep_rp")],
     ]
 
 
 class HbvNonlinearModel(Model):
+    """A single-column HBV-like model with non-linear groundwater reservoirs."""
+
     structure = [
         [SnowZone(name="snow")],
         [SoilZone(name="soil")],
@@ -1451,6 +1840,8 @@ class HbvNonlinearModel(Model):
 
 
 class ThreeLayerModel(Model):
+    """A simple three-layer model: Snow, Soil, and a single Groundwater zone."""
+
     structure = [
         [SnowZone(name="snow")],
         [SoilZone(name="soil")],
