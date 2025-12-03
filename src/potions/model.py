@@ -355,7 +355,9 @@ class Model(ABC):
         for zone_name, zone in zones.items():
             if zone_name not in self.get_zone_names():
                 raise ValueError(
-                    f"Unknown zone name: {zone_name}. The zone name must be one of {self.get_zone_names()}"
+                    f"Unknown zone name: {zone_name}. The zone name must be one of {
+                        self.get_zone_names()
+                    }"
                 )
             else:
                 self.__zones[zone_name] = zone
@@ -378,11 +380,13 @@ class Model(ABC):
 
         # Calculate the connectivity matrices
         self.__zone_graph: nx.DiGraph = self.construct_hydrologic_graph()
-        lat, vert, _ = self.get_connection_matrices_with_river_row(self.__zone_graph)
+        lat, vert, _ = self.get_connection_matrices_with_river_row(
+            self.__zone_graph)
         self.__lat_matrix: NDArray[f64] = lat
         self.__vert_matrix: NDArray[f64] = vert
         self.__forcing_mat: NDArray[f64] = self.get_forc_mat(scales)
-        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(scales, relative=True)
+        self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(
+            scales, relative=True)
 
     def __getitem__(self, zone_name: str) -> HydrologicZone:
         """Access a hydrologic zone within the model by its name.
@@ -400,7 +404,9 @@ class Model(ABC):
             return self.__zones[zone_name]
         else:
             raise ValueError(
-                f"Unknown zone name: {zone_name}, must be one of {self.get_zone_names()}"
+                f"Unknown zone name: {zone_name}, must be one of {
+                    self.get_zone_names()
+                }"
             )
 
     @classmethod
@@ -522,8 +528,10 @@ class Model(ABC):
             # Calculate incoming flux using faster NumPy dot products
             num_fluxes = len(lat_fluxes)
             if num_fluxes > 0:
-                q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], np.array(lat_fluxes))
-                q_in_vert = np.dot(self.vert_mat[i, :num_fluxes], np.array(vert_fluxes))
+                q_in_lat = np.dot(
+                    self.lat_mat[i, :num_fluxes], np.array(lat_fluxes))
+                q_in_vert = np.dot(
+                    self.vert_mat[i, :num_fluxes], np.array(vert_fluxes))
             else:
                 q_in_lat, q_in_vert = zero_flux, zero_flux
 
@@ -589,12 +597,14 @@ class Model(ABC):
             set((i for i in range(vert.shape[0]))).difference(index_rows)
         )
 
-        mat: NDArray[f64] = np.zeros((vert.shape[0], len(index_rows)), dtype=float)
+        mat: NDArray[f64] = np.zeros(
+            (vert.shape[0], len(index_rows)), dtype=float)
         for i, x_i in enumerate(index_rows):
             mat[x_i, i] = 1
 
         for c_i in composite_rows:
-            mat[c_i] = sum([mat[i] for i, row_i in enumerate(vert[c_i]) if row_i != 0])
+            mat[c_i] = sum([mat[i]
+                           for i, row_i in enumerate(vert[c_i]) if row_i != 0])
 
         return mat
 
@@ -627,13 +637,14 @@ class Model(ABC):
             non_zero_sum_rows = row_sums != 0
             # Perform division only for rows with non-zero sum
             relative_mat[non_zero_sum_rows] = (
-                mat[non_zero_sum_rows] / row_sums[non_zero_sum_rows, np.newaxis]
+                mat[non_zero_sum_rows] /
+                row_sums[non_zero_sum_rows, np.newaxis]
             )
             return relative_mat
         else:
             return mat
-    
-    @classmethod 
+
+    @classmethod
     def get_column_names(cls) -> list[str]:
         """A class method to get column names for the final output DataFrame."""
         zone_names: list[str] = cls.get_zone_names()
@@ -647,7 +658,6 @@ class Model(ABC):
                 f"q_vert_{zone_name}_{i}",
             ]
         return col_names
-
 
     @property
     def zone_labels(self) -> list[str]:
@@ -709,7 +719,8 @@ class Model(ABC):
                 # Case 2: All zones flow into a single aggregated zone in the layer below
                 for z_idx in range(num_zones_current):
                     from_node = (l_idx, z_idx)
-                    to_node = (l_idx + 1, 0)  # The single zone in the next layer
+                    # The single zone in the next layer
+                    to_node = (l_idx + 1, 0)
                     G.add_edge(from_node, to_node, type="vertical")
             else:
                 # Handle invalid layer configurations according to your rules
@@ -757,7 +768,8 @@ class Model(ABC):
 
         # Convert to NumPy adjacency matrices (n x n)
         lateral_matrix_nn = nx.to_numpy_array(G_lateral, nodelist=all_nodes).T
-        vertical_matrix_nn = nx.to_numpy_array(G_vertical, nodelist=all_nodes).T
+        vertical_matrix_nn = nx.to_numpy_array(
+            G_vertical, nodelist=all_nodes).T
 
         # --- Construct the River Outflow Indicator Row ---
         river_nodes = self.get_river_zone_ids()
@@ -836,7 +848,7 @@ class Model(ABC):
 
         zone_params: NDArray = arr[:num_zone_params]
         size_params: list[float] = arr[
-            num_zone_params : num_zone_params + num_size_params
+            num_zone_params: num_zone_params + num_size_params
         ].tolist()
 
         if latent:
@@ -852,14 +864,14 @@ class Model(ABC):
         size_params.append(1 - sum(size_params))
         # print(f"Size params: {size_params}")
 
-        lapse_rate_params: NDArray = arr[num_zone_params + num_size_params :]
+        lapse_rate_params: NDArray = arr[num_zone_params + num_size_params:]
 
         new_zones: dict[str, HydrologicZone] = dict()
         for layer in cls.structure:
             for zone in layer:
                 ps, zone_params = (
                     zone_params[: zone.num_parameters()],
-                    zone_params[zone.num_parameters() :],
+                    zone_params[zone.num_parameters():],
                 )
                 new_zones[zone.name] = zone.from_array(ps)
 
@@ -1012,7 +1024,8 @@ class Model(ABC):
             NDArray: An array of default initial storage values for all zones.
         """
         return np.array(
-            [zone.default_init_state() for layer in cls.structure for zone in layer]
+            [zone.default_init_state()
+             for layer in cls.structure for zone in layer]
         )
 
     def run(
@@ -1059,7 +1072,9 @@ class Model(ABC):
             if len(forcing_data) != 1:
                 if len(forcing_data) != self.num_surface_zones:
                     raise ValueError(
-                        f"The number of forcing data series must be either 1 or {self.num_surface_zones}, not {len(forcing_data)}"
+                        f"The number of forcing data series must be either 1 or {
+                            self.num_surface_zones
+                        }, not {len(forcing_data)}"
                     )
 
         # Scale the forcing data based on the lapse rates
@@ -1112,7 +1127,8 @@ class Model(ABC):
                 sim_streamflow - meas_streamflow
             ).mean() / meas_streamflow.mean()
             r_squared_val = meas_streamflow.corr(sim_streamflow) ** 2
-            spearman_rho_val = meas_streamflow.corr(sim_streamflow, method="spearman")
+            spearman_rho_val = meas_streamflow.corr(
+                sim_streamflow, method="spearman")
 
         # Calculate some other metrics
         streamflow_ids = self.get_river_zone_ids()
@@ -1123,7 +1139,8 @@ class Model(ABC):
             zone_name: str = zone_names[col_id]
             col_name: str = f"q_lat_{zone_name}_{col_id}"
             prop_name: str = f"prop_q_{zone_name}_{col_id}"
-            model_res[prop_name] = model_res[col_name] / model_res["sim_streamflow_mmd"]
+            model_res[prop_name] = model_res[col_name] / \
+                model_res["sim_streamflow_mmd"]
             props[prop_name] = model_res[prop_name].mean()
 
         log_kge: Optional[float] = None
@@ -1159,7 +1176,8 @@ class Model(ABC):
         meas_streamflow: Optional[Series] = None,
         num_threads: int = -1,
         write_time_series_results: bool = False,
-        threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
+        threshold_function: Optional[Callable[[
+            HydroModelResults], bool]] = None,
         output_dir: str = "batch_results",
         return_results: bool = True,
     ) -> tuple[DataFrame, list[tuple[Model, HydroModelResults]]]:
@@ -1196,7 +1214,9 @@ class Model(ABC):
                 cur_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 new_output_dir: str = f"{output_dir}.{cur_time}"
                 print(
-                    f"Specified directory at {output_dir} exists, saving to {new_output_dir}"
+                    f"Specified directory at {output_dir} exists, saving to {
+                        new_output_dir
+                    }"
                 )
                 output_dir = new_output_dir
 
@@ -1224,7 +1244,8 @@ class Model(ABC):
                 BatchParams,
             ],
         ] = [
-            (cls, i, row, forc, init_state, meas_streamflow, batch_params)  # type: ignore
+            (cls, i, row, forc, init_state,
+             meas_streamflow, batch_params)  # type: ignore
             for i, row in params.iterrows()
         ]
 
@@ -1279,7 +1300,8 @@ class Model(ABC):
                     LapseRateParameters.default_parameter_range()
                 )
                 for param_name, param_range in params.items():
-                    param_ranges[f"lapse_rate.{i + 1}.{param_name}"] = param_range
+                    param_ranges[f"lapse_rate.{
+                        i + 1}.{param_name}"] = param_range
 
         return param_ranges
 
@@ -1288,7 +1310,7 @@ class Model(ABC):
         cls,
         forc: ForcingData | Iterable[ForcingData],
         meas_streamflow: Series,
-        metric: Literal["nse", "kge"],
+        metric: Literal["nse", "kge", "combined"],
         use_lapse_rates: bool = False,
         num_threads: int = -1,
         polish: bool = False,
@@ -1300,8 +1322,8 @@ class Model(ABC):
         Args:
             forc (ForcingData | Iterable[ForcingData]): The forcing data.
             meas_streamflow (Series): The observed streamflow for optimization.
-            metric (Literal["nse", "kge"]): The objective function to optimize
-                ("nse" or "kge").
+            metric (Literal["nse", "kge", "combined"]): The objective function to optimize
+                ("nse", "kge", "metric").
             use_lapse_rates (bool): Whether to include lapse rates in the
                 calibration. Defaults to False.
             num_threads (int): Number of parallel workers for the optimizer.
@@ -1355,13 +1377,13 @@ class Model(ABC):
         return opt_params, best_results, opt_res
 
     def gradient(
-        self, 
-        obj_func: Callable[[dict], float] | Literal["kge", "nse"], 
+        self,
+        obj_func: Callable[[dict], float] | Literal["kge", "nse"],
         forc: ForcingData | list[ForcingData],
         meas_streamflow: Series,
         rel_step: float = 0.01,
         mean_elev: Optional[list[float]] = None,
-        include_lapse_rates: bool = False
+        include_lapse_rates: bool = False,
     ) -> np.ndarray:
         """
         Compute the gradient of some objective function that takes the `HydroModelResults` as an argument
@@ -1369,18 +1391,22 @@ class Model(ABC):
         """
         # Get the objective function
         if obj_func == "kge":
+
             def operational_obj_func(res: dict) -> float:
                 return res["kge"]
         elif obj_func == "nse":
+
             def operational_obj_func(res: dict) -> float:
                 return res["nse"]
         else:
-            operational_obj_func = obj_func # type: ignore
+            operational_obj_func = obj_func  # type: ignore
 
         params = self.to_array()
 
         grad_vals: list[float] = []
-        bounds: dict = self.default_parameter_ranges(include_lapse_rates=include_lapse_rates)
+        bounds: dict = self.default_parameter_ranges(
+            include_lapse_rates=include_lapse_rates
+        )
         for i, (x_i, (min_val, max_val)) in enumerate(zip(params, bounds.values())):
             # Compute the gradient at x_i using centered finite differences
             state_left = params.copy()
@@ -1398,25 +1424,30 @@ class Model(ABC):
             state_left[i] = x_i_left
             state_right[i] = x_i_right
 
-
-                                 
             left_model = self.from_array(state_left)
             right_model = self.from_array(state_right)
 
-            left_res = left_model.run(forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow)
-            right_res = right_model.run(forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow)
+            left_res = left_model.run(
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+            )
+            right_res = right_model.run(
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+            )
 
-            grad_vals.append((operational_obj_func(right_res) - operational_obj_func(left_res)) / (x_i_right - x_i_left))
+            grad_vals.append(
+                (operational_obj_func(right_res) - operational_obj_func(left_res))
+                / (x_i_right - x_i_left)
+            )
 
         return np.array(grad_vals)
-    
+
     @classmethod
     def mcmc(
         cls: type[Model],
         forc: ForcingData | list[ForcingData],
         meas_streamflow: Series,
         include_lapse_rates: bool = False,
-        elevations: Optional[list[float]]=None,
+        elevations: Optional[list[float]] = None,
         bounds: dict[str, tuple[float, float]] | None = None,
         num_threads: int = -1,
         num_walkers: Optional[int] = None,
@@ -1427,19 +1458,26 @@ class Model(ABC):
         """Runs a Markov Chain Monte Carlo simulation."""
         if num_threads < 1:
             num_threads = os.cpu_count()  # type: ignore
-        
+
         if bounds is None:
-            bounds = cls.default_parameter_ranges(include_lapse_rates=include_lapse_rates)
+            bounds = cls.default_parameter_ranges(
+                include_lapse_rates=include_lapse_rates
+            )
 
         if initial_state is None:
-            initial_state = np.array([0.5 * (x[0] + x[1]) for x in bounds.values()]) # Have the initial guess be in the middle of the parameter ranges
+            initial_state = np.array(
+                [0.5 * (x[0] + x[1]) for x in bounds.values()]
+            )  # Have the initial guess be in the middle of the parameter ranges
         param_ranges = np.array([x[1] - x[0] for x in bounds.values()])
-        ndim = initial_state.size 
+        ndim = initial_state.size
 
         if num_walkers is None:
             num_walkers = 2 * ndim
 
-        initial_walker_states = [initial_state + 0.25 * param_ranges * np.random.randn(ndim) for _ in range(num_walkers)]
+        initial_walker_states = [
+            initial_state + 0.25 * param_ranges * np.random.randn(ndim)
+            for _ in range(num_walkers)
+        ]
 
         args = (
             cls,
@@ -1450,33 +1488,29 @@ class Model(ABC):
             elevations,
         )
 
-
         with Pool(num_threads) as pool:
             sampler = emcee.EnsembleSampler(
-                num_walkers,
-                ndim,
-                log_prob_fn=log_probability,
-                pool=pool,  
-                args=args     
+                num_walkers, ndim, log_prob_fn=log_probability, pool=pool, args=args
             )
 
             mc_result = sampler.run_mcmc(
-                initial_walker_states,
-                num_samples,
-                progress=True
+                initial_walker_states, num_samples, progress=True
             )
 
         # Now, examine the outputs
-        blob_arr: np.ndarray = sampler.get_blobs() # type: ignore
-        blob_arr = blob_arr.reshape((blob_arr.shape[0] * blob_arr.shape[1], blob_arr.shape[2]))
+        blob_arr: np.ndarray = sampler.get_blobs()  # type: ignore
+        blob_arr = blob_arr.reshape(
+            (blob_arr.shape[0] * blob_arr.shape[1], blob_arr.shape[2])
+        )
         obj_func_df = DataFrame(blob_arr, columns=["kge", "nse", "bias"])
 
-        sample_arr: np.ndarray = sampler.get_chain() # type: ignore
-        sample_arr: np.ndarray = sample_arr.reshape((sample_arr.shape[0] * sample_arr.shape[1], sample_arr.shape[2]))
+        sample_arr: np.ndarray = sampler.get_chain()  # type: ignore
+        sample_arr: np.ndarray = sample_arr.reshape(
+            (sample_arr.shape[0] * sample_arr.shape[1], sample_arr.shape[2])
+        )
         sample_df = DataFrame(sample_arr, columns=list(bounds.keys()))
 
-        return sample_df, obj_func_df, sampler, mc_result # type: ignore
-
+        return sample_df, obj_func_df, sampler, mc_result  # type: ignore
 
     def _validate_model_structure(self) -> None:
         """Validates the model's structure and configuration.
@@ -1492,12 +1526,16 @@ class Model(ABC):
         for i, layer in enumerate(self.structure):
             if not isinstance(layer, (list, tuple, np.ndarray, Series)):
                 raise TypeError(
-                    f"Layer {i} in structure has an incorrect type: {type(layer)}, ensure that all layers are of type list, tuple, or other ordered iterable"
+                    f"Layer {i} in structure has an incorrect type: {
+                        type(layer)
+                    }, ensure that all layers are of type list, tuple, or other ordered iterable"
                 )
             for j, zone in enumerate(layer):
                 if not isinstance(zone, HydrologicZone):
                     raise TypeError(
-                        f"Zone {j} in layer {i} has an incorrect type: {type(zone)}, ensure that all zones are of type HydrologicZone"
+                        f"Zone {j} in layer {i} has an incorrect type: {
+                            type(zone)
+                        }, ensure that all zones are of type HydrologicZone"
                     )
 
         # Check if model is empty
@@ -1513,14 +1551,18 @@ class Model(ABC):
         for layer_size in layer_lengths:
             if layer_size not in (1, prev_zones):
                 raise ValueError(
-                    f"Invalid model structure: The next layer can only have either 1 zone or the same number as the zone above, but your model has the structure {layer_lengths}"
+                    f"Invalid model structure: The next layer can only have either 1 zone or the same number as the zone above, but your model has the structure {
+                        layer_lengths
+                    }"
                 )
             prev_zones = layer_size
 
         # Check if all model scales add up to 1
         if abs(sum(self.scales) - 1) > 1e-3:
             raise ValueError(
-                f"Model scales do not add up to 1: {self.scales}. Ensure that the scales equal 1 to maintain water balance"
+                f"Model scales do not add up to 1: {
+                    self.scales
+                }. Ensure that the scales equal 1 to maintain water balance"
             )
 
     def to_dict(self) -> dict[str, float]:
@@ -1632,7 +1674,8 @@ def run_hydro_model(
     if forc:
         if len(forc) != num_forcing_sources_expected:
             raise ValueError(
-                f"Model expects {num_forcing_sources_expected} ForcingData objects, "
+                f"Model expects {
+                    num_forcing_sources_expected} ForcingData objects, "
                 f"but {len(forc)} were provided in the 'forc' list."
             )
         fd: ForcingData
@@ -1643,16 +1686,25 @@ def run_hydro_model(
                 and len(fd.pet) == num_steps
             ):
                 raise ValueError(
-                    f"ForcingData at index {i} has series lengths inconsistent with num_steps ({num_steps}). "
-                    f"P length: {len(fd.precip)}, T length: {len(fd.temp)}, PET length: {len(fd.pet)}"
+                    f"ForcingData at index {
+                        i
+                    } has series lengths inconsistent with num_steps ({num_steps}). "
+                    f"P length: {len(fd.precip)}, T length: {
+                        len(fd.temp)
+                    }, PET length: {len(fd.pet)}"
                 )
-        all_precip_sources_matrix = np.vstack([fd.precip.to_numpy() for fd in forc]).T  # type: ignore
-        all_temp_sources_matrix = np.vstack([fd.temp.to_numpy() for fd in forc]).T  # type: ignore
-        all_pet_sources_matrix = np.vstack([fd.pet.to_numpy() for fd in forc]).T  # type: ignore
+        all_precip_sources_matrix = np.vstack(
+            [fd.precip.to_numpy() for fd in forc]).T  # type: ignore
+        all_temp_sources_matrix = np.vstack(
+            [fd.temp.to_numpy() for fd in forc]).T  # type: ignore
+        all_pet_sources_matrix = np.vstack(
+            [fd.pet.to_numpy() for fd in forc]).T  # type: ignore
     else:  # forc is empty
         if num_forcing_sources_expected > 0:
             raise ValueError(
-                f"Model expects {num_forcing_sources_expected} forcing inputs, but 'forc' list is empty."
+                f"Model expects {
+                    num_forcing_sources_expected
+                } forcing inputs, but 'forc' list is empty."
             )
         # If no forcing sources are expected, create empty (0-column) matrices
         all_precip_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
@@ -1694,7 +1746,8 @@ def run_hydro_model(
 
         try:
             # Convert state array to list for the generic step method
-            step_res: ModelStep = model.step(list(state), ds_for_step, dt)  # type: ignore
+            step_res: ModelStep = model.step(
+                list(state), ds_for_step, dt)  # type: ignore
             storages[t_idx] = np.array(step_res.state)
             fluxes[t_idx, :, 0] = np.array(step_res.forc_flux)
             fluxes[t_idx, :, 1] = np.array(step_res.vap_flux)
@@ -1719,7 +1772,8 @@ def run_hydro_model(
 
     col_names: list[str] = model.get_column_names()
 
-    out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
+    out_df: DataFrame = DataFrame(
+        data=full_array, index=dates, columns=col_names)
     return out_df
 
 
@@ -1823,7 +1877,8 @@ class HbvLateralModel(Model):
     structure = [
         [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
         [SoilZone(name="soil_hs"), SoilZone(name="soil_rp")],
-        [GroundZoneLinear(name="shallow_hs"), GroundZoneLinear(name="shallow_rp")],
+        [GroundZoneLinear(name="shallow_hs"),
+         GroundZoneLinear(name="shallow_rp")],
         [GroundZoneLinearB(name="deep_hs"), GroundZoneLinearB(name="deep_rp")],
     ]
 

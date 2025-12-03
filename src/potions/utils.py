@@ -26,7 +26,7 @@ def objective_function(
     cls,
     forc: ForcingData,
     meas_streamflow: Series,
-    metric: Literal["kge", "nse"],
+    metric: Literal["kge", "nse", "combined"],
     print_value: bool,
 ) -> float:
     model = cls.from_array(x, latent=True)
@@ -43,6 +43,8 @@ def objective_function(
         obj_val = -results["kge"]  # type: ignore
     elif metric == "nse":
         obj_val = -results["nse"]  # type: ignore
+    elif metric == "combined":
+        obj_val = -results["kge"] - results["nse"]  # type: ignore
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -88,14 +90,15 @@ def log_prior(params: np.ndarray, bounds: dict[str, tuple[float, float]]) -> flo
             return -np.inf
     return 0.0
 
+
 def log_probability(
-    theta: np.ndarray, 
-    model_type: type, 
+    theta: np.ndarray,
+    model_type: type,
     forc: ForcingData | list[ForcingData],
     meas_streamflow: Series,
-    bounds: dict[str, tuple[float, float]], 
+    bounds: dict[str, tuple[float, float]],
     metric: Callable[[dict], float] | Literal["kge", "nse"],
-    elevation: float | list[float] | None = None
+    elevation: float | list[float] | None = None,
 ) -> tuple[float, list[float]]:
     """
     Computes the log probability for a given set of parameters.
@@ -103,11 +106,9 @@ def log_probability(
     lp = log_prior(theta, bounds)
     if not np.isfinite(lp):
         return -np.inf, [np.nan, np.nan, np.nan]
-    
+
     model_res = model_type.from_array(theta, latent=True).run(
-        forc=forc,
-        meas_streamflow=meas_streamflow,
-        elevations=elevation
+        forc=forc, meas_streamflow=meas_streamflow, elevations=elevation
     )
 
     aux_values: list[float] = [
@@ -128,3 +129,4 @@ def log_probability(
 
 
 # ======================== #
+
