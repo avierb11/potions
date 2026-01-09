@@ -67,4 +67,4 @@ from .reactive_transport import (
     MineralKineticData,
 )
 
-from .objective_functions import kge, nse
+from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
