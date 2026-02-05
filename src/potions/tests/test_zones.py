@@ -1,4 +1,4 @@
-from ..hydro import GroundZone, HydroForcing, HydroStep, SnowZone, SoilZone
+from ..hydro_compiled import GroundZone, HydroForcing, HydroStep, SnowZone, SurfaceZone
 
 # CONST_FORCING: HydroForcing
 
@@ -20,13 +20,13 @@ def test_SnowZone() -> None:
     assert abs(new_state.state) < 1e-7
 
 
-def test_SoilZone() -> None:
+def test_SurfaceZone() -> None:
     # Set q_in to 1.0 to simulate incoming flux
     d: HydroForcing = HydroForcing(precip=1.0, temp=5.0, pet=2.0, q_in=1.0)
     s_0: float = 50.0
     d_t: float = 1.0
 
-    sz: SoilZone = SoilZone(fc=100.0, lp=1.0, beta=1.0, k0=0.1, thr=50.0)
+    sz: SurfaceZone = SurfaceZone(fc=100.0, lp=1.0, beta=1.0, k0=0.1, thr=50.0)
 
     assert abs(sz.forc_flux(s_0, d) - 0.5) < 1e-7
     assert abs(sz.vert_flux(s_0, d) - 0.5) < 1e-7  # vert_flux = q_in * (s/fc)**beta

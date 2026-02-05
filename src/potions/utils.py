@@ -1,4 +1,4 @@
-from typing import Callable, Literal, TypeVar
+from typing import Callable, Literal, TypeVar, TypedDict
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
@@ -21,12 +21,25 @@ NumSpec = TypeVar(
 )  # Number of species in the model - mineral and aqueous
 
 
+class HydroModelResults(TypedDict):
+    """A dictionary containing the results of a hydrologic model run.
+
+    Attributes:
+        simulation (DataFrame): A DataFrame with time series of states and
+            fluxes for all zones, plus simulated and measured streamflow.
+        objective_functions (Series): A Series with the values of each of the objective functions as keys
+    """
+
+    simulation: DataFrame
+    objective_functions: Series
+
+
 def objective_function(
     x: NDArray,
     cls,
     forc: ForcingData,
     meas_streamflow: Series,
-    metric: Literal["kge", "nse", "combined"],
+    metric: Literal["kge", "nse", "combined"] | Callable[[dict], float],
     print_value: bool,
 ) -> float:
     model = cls.from_array(x, latent=True)
@@ -46,7 +59,7 @@ def objective_function(
     elif metric == "combined":
         obj_val = -results["kge"] - results["nse"]  # type: ignore
     else:
-        raise ValueError(f"Unknown metric: {metric}")
+        obj_val = metric(results)
 
     if print_value:
         print(f"{metric.upper()}: {-round(obj_val, 2)}")
@@ -97,36 +110,42 @@ def log_probability(
     forc: ForcingData | list[ForcingData],
     meas_streamflow: Series,
     bounds: dict[str, tuple[float, float]],
-    metric: Callable[[dict], float] | Literal["kge", "nse"],
+    metric: Callable[[HydroModelResults], float] | Literal["kge", "nse"],
     elevation: float | list[float] | None = None,
 ) -> tuple[float, list[float]]:
     """
     Computes the log probability for a given set of parameters.
     """
-    lp = log_prior(theta, bounds)
-    if not np.isfinite(lp):
-        return -np.inf, [np.nan, np.nan, np.nan]
+    try:
+        lp = log_prior(theta, bounds)
+        if not np.isfinite(lp):
+            return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan]
 
-    model_res = model_type.from_array(theta, latent=True).run(
-        forc=forc, meas_streamflow=meas_streamflow, elevations=elevation
-    )
+        model_res: HydroModelResults = model_type.from_array(theta, latent=True).run(  # type: ignore
+            forc=forc, meas_streamflow=meas_streamflow, elevations=elevation
+        )  # type: ignore
 
-    aux_values: list[float] = [
-        model_res["kge"],
-        model_res["nse"],
-        model_res["bias"],
-    ]
+        obj = model_res["objective_functions"].to_dict()
 
-    if isinstance(metric, str):
-        if metric == "kge":
-            return lp + model_res["kge"], aux_values
-        elif metric == "nse":
-            return lp + model_res["nse"], aux_values
+        aux_values = [
+            obj["kge"] if "kge" in obj else np.nan,
+            obj["nse"] if "nse" in obj else np.nan,
+            obj["log_kge"] if "log_kge" in obj else np.nan,
+            obj["log_nse"] if "log_nse" in obj else np.nan,
+            obj["bias"] if "bias" in obj else np.nan,
+        ]
+
+        if isinstance(metric, str):
+            if metric == "kge":
+                return lp + model_res["objective_functions"]["kge"], aux_values
+            elif metric == "nse":
+                return lp + model_res["objective_functions"]["nse"], aux_values
+            else:
+                raise ValueError(f"Unknown metric: {metric}")
         else:
-            raise ValueError(f"Unknown metric: {metric}")
-    else:
-        return lp + metric(model_res), aux_values
+            return lp + metric(model_res), aux_values
+    except Exception:
+        return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan]
 
 
 # ======================== #
-

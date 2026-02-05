@@ -1,3 +1,6 @@
+# cython: language_level=3
+# cython: profile=True
+# cython: linetrace=True
 from __future__ import annotations
 from abc import ABC
 import datetime
@@ -24,21 +27,20 @@ import warnings
 import emcee  # type: ignore
 import networkx as nx
 import numpy as np
-import random
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Index, Series, Timestamp
-import pandas as pd
 import scipy.optimize as opt
+import cython  # type: ignore
 
-from potions.common_types import ForcingData, LapseRateParameters
-from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from potions.reactive_transport import ReactiveTransportZone
-from potions.utils import objective_function, log_probability, HydroModelResults
-from potions.interfaces import Zone, StateType
+from .common_types import ForcingData, LapseRateParameters
+from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
+from .reactive_transport import ReactiveTransportZone
+from .utils import objective_function, log_probability, HydroModelResults
+from .interfaces import Zone, StateType
 
 # from .hydro import (
-from potions.hydro_compiled import (
+from .hydro_compiled import (
     GroundZone,
     GroundZoneB,
     GroundZoneLinear,
@@ -53,11 +55,6 @@ from potions.hydro_compiled import (
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
-
-
-class BatchResults(TypedDict):
-    simulations: dict[int, DataFrame]
-    objective_functions: DataFrame
 
 
 class BatchParams(TypedDict):
@@ -110,32 +107,28 @@ def _run_model(
             - The full results dictionary (if `return_results` is True), else None.
             - A dictionary of scalar metrics from the run.
     """
-    try:
-        model = cls.from_series(params)
-        run_res: HydroModelResults = model.run(
-            forc=forc,
-            init_state=init_state,
-            meas_streamflow=meas_streamflow,
-            verbose=False,
-        )
+    model = cls.from_series(params)
+    run_res: HydroModelResults = model.run(
+        forc=forc,
+        init_state=init_state,
+        meas_streamflow=meas_streamflow,
+        verbose=False,
+    )
 
-        if batch_params["save_results"]:
-            save_model = True
-            if batch_params["threshold_function"] is not None:
-                save_model = batch_params["threshold_function"](run_res)
+    if batch_params["save_results"]:
+        save_model = True
+        if batch_params["threshold_function"] is not None:
+            save_model = batch_params["threshold_function"](run_res)
 
-            if batch_params["output_dir"] is None:
-                raise ValueError("Output directory must be specified")
+        if batch_params["output_dir"] is None:
+            raise ValueError("Output directory must be specified")
 
-            if save_model:
-                run_res["simulation"].to_csv(  # type: ignore
-                    os.path.join(batch_params["output_dir"], f"{i}.csv")
-                )
+        if save_model:
+            run_res["simulation"].to_csv(  # type: ignore
+                os.path.join(batch_params["output_dir"], f"{i}.csv")
+            )
 
-        return i, run_res
-    except Exception as e:
-        print(f"Failed on run {i} with error: {e}")
-        return i, None  # type: ignore
+    return i, run_res
 
 
 class Layer:
@@ -255,8 +248,9 @@ class Hillslope:
         return reduce(operator.add, map(lambda x: x.zones, self.layers), [])
 
 
-@dataclass(frozen=True)
-class ModelStep(Generic[StateType]):
+@cython.final
+@cython.cclass
+class ModelStep:
     """Holds the results of a single time step for the entire model.
 
     This is an immutable data structure that contains the new states and the
@@ -270,11 +264,25 @@ class ModelStep(Generic[StateType]):
         vert_flux: A list of the vertical fluxes for each zone.
     """
 
-    state: list[StateType]
-    forc_flux: list[StateType]
-    vap_flux: list[StateType]
-    lat_flux: list[StateType]
-    vert_flux: list[StateType]
+    state: list[cython.double]
+    forc_flux: list[cython.double]
+    vap_flux: list[cython.double]
+    lat_flux: list[cython.double]
+    vert_flux: list[cython.double]
+
+    def __init__(
+        self,
+        state: list[cython.double],
+        forc_flux: list[cython.double],
+        vap_flux: list[cython.double],
+        lat_flux: list[cython.double],
+        vert_flux: list[cython.double],
+    ) -> None:
+        self.state = state
+        self.forc_flux = forc_flux
+        self.lat_flux = lat_flux
+        self.vap_flux = vap_flux
+        self.vert_flux = vert_flux
 
 
 class Model:
@@ -467,9 +475,7 @@ class Model:
         """A 1D list of all zones in the model, in the order of evaluation."""
         return self.__flat_model
 
-    def step(
-        self, state: NDArray[f64], ds: list[HydroForcing], dt: float
-    ) -> ModelStep[float]:
+    def step(self, state: NDArray[f64], ds: list[HydroForcing], dt: float) -> ModelStep:
         """Advances all zones in the model by a single time step.
 
         This method orchestrates the computation for one step by:
@@ -487,7 +493,6 @@ class Model:
             ModelStep[float]: An object containing the new states and all
                 calculated fluxes for every zone.
         """
-
         new_states: list[float] = []
         forc_fluxes: list[float] = []
         vap_fluxes: list[float] = []
@@ -495,7 +500,10 @@ class Model:
         vert_fluxes: list[float] = []
 
         # Determine the 'zero' value for fluxes based on the state type
-        zero_flux: float = 0.0
+        zero_flux: Any = 0.0
+        if state and not isinstance(state[0], float):
+            # If state is a list of arrays, create a zero-array template
+            zero_flux = np.zeros_like(state[0])
 
         i: int
         zone: HydrologicZone
@@ -512,16 +520,11 @@ class Model:
 
             q_in = q_in_lat + q_in_vert
 
+            s_i = float(s_i)  # type: ignore
             d_i_zone = HydroForcing(
                 precip=d_i.precip, temp=d_i.temp, pet=d_i.pet, q_in=q_in
             )
-
-            try:
-                step_res: HydroStep = zone.step(max(0.0, s_i), d_i_zone, dt)
-            except ValueError as e:
-                print(f"Failed on zone {i} for zone {zone.name}, storages are {state=}")
-                print(f"Zone: {zone}")
-                raise e
+            step_res: HydroStep = zone.step(s_i, d_i_zone, dt)
 
             new_states.append(step_res.state)  # type: ignore
             forc_fluxes.append(step_res.forc_flux)  # type: ignore
@@ -1138,7 +1141,7 @@ class Model:
         write_time_series_results: bool = False,
         threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
         output_dir: str = "batch_results",
-    ) -> BatchResults:
+    ) -> tuple[DataFrame, list[tuple[Model, HydroModelResults]]]:
         """Runs a batch of model simulations in parallel.
 
         Args:
@@ -1164,7 +1167,7 @@ class Model:
                 - A DataFrame of scalar metrics for all runs.
                 - A list of tuples, each with a `Model` instance and its results.
         """
-        results: list[tuple[int, HydroModelResults]] = []
+        results: list[tuple[int, Model, HydroModelResults]] = []
         batch_params: Optional[BatchParams] = None
 
         if write_time_series_results:
@@ -1222,18 +1225,14 @@ class Model:
         with Pool(num_threads) as pool:
             results = pool.starmap(_run_model, args)  # type: ignore
 
-        indices = [x[0] for x in results]
-        obj_series: list[Series] = [
-            x[1]["objective_functions"].to_dict() for x in results
-        ]
-        sim_results: dict[int, DataFrame] = {x[0]: x[1]["simulation"] for x in results}
-
         # Now construct the dataframe of the resulting values
-        res_df: DataFrame = DataFrame(obj_series, index=indices).sort_index()
+        res_df: DataFrame = DataFrame(
+            [x for _, _, x in results], index=[x[0] for x in results]
+        ).sort_index()
 
         results.sort(key=lambda x: x[0])
 
-        return {"objective_functions": res_df, "simulations": sim_results}
+        return res_df, [results[i][1:] for i in range(len(results))]
 
     @classmethod
     def default_parameter_ranges(
@@ -1280,9 +1279,7 @@ class Model:
         cls,
         forc: ForcingData | Iterable[ForcingData],
         meas_streamflow: Series,
-        metric: (
-            Literal["nse", "kge", "combined"] | Callable[[HydroModelResults], float]
-        ),
+        metric: Literal["nse", "kge", "combined"],
         use_lapse_rates: bool = False,
         num_threads: int = -1,
         polish: bool = False,
@@ -1423,7 +1420,6 @@ class Model:
         num_samples: int = 1_000,
         metric: Callable[[HydroModelResults], float] | Literal["kge", "nse"] = "kge",
         initial_state: Optional[NDArray[f64]] = None,
-        random_seed: int = 0,
     ) -> tuple[DataFrame, DataFrame, emcee.EnsembleSampler, emcee.State]:
         """Runs a Markov Chain Monte Carlo simulation."""
         if num_threads < 1:
@@ -1443,11 +1439,6 @@ class Model:
 
         if num_walkers is None:
             num_walkers = 2 * ndim
-
-        # ==== Set random state ==== #
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        # ========================== #
 
         initial_walker_states = [
             initial_state + 0.25 * param_ranges * np.random.randn(ndim)
@@ -1486,15 +1477,7 @@ class Model:
         blob_arr = blob_arr.reshape(
             (blob_arr.shape[0] * blob_arr.shape[1], blob_arr.shape[2])
         )
-
-        # Get the examples
-        # base_model = cls()
-        column_names: list[str] = ["kge", "nse", "log_kge", "log_nse", "bias"]
-        # base_model.run(
-        #     forc=forc, meas_streamflow=meas_streamflow
-        # )["objective_functions"].index.tolist()
-
-        obj_func_df = DataFrame(blob_arr, columns=column_names)
+        obj_func_df = DataFrame(blob_arr, columns=["kge", "nse", "bias"])
 
         sample_arr: np.ndarray = sampler.get_chain()  # type: ignore
         sample_arr = sample_arr.reshape(
@@ -1860,30 +1843,10 @@ class HbvModel(Model):
 
     structure = [
         [SnowZone(name="snow")],
-        [SurfaceZone(name="surface")],
-        [GroundZone(name="shallow")],
-        [GroundZoneB(name="deep")],
+        [SurfaceZone(name="soil")],
+        [GroundZoneLinear(name="shallow")],
+        [GroundZoneLinearB(name="deep")],
     ]
-
-    def __repr__(self) -> str:
-        lines = [
-            "HbvModel(",
-            f"\ttt={round(self["snow"].tt, 2)},",
-            f"\tfmax={round(self["snow"].fmax, 2)},",
-            f"\tfc={round(self["soil"].fc, 2)},",
-            f"\tlp={round(self["soil"].lp, 2)},",
-            f"\tbeta={round(self["soil"].beta, 2)},",
-            f"\tk0={round(self["soil"].k0, 4)},",
-            f"\tthr={round(self["soil"].thr, 2)},",
-            f"\tk1={round(self["shallow"].k, 4)},",
-            f"\tk1={round(self["shallow"].alpha, 2)},",
-            f"\tperc={round(self["shallow"].perc, 2)},",
-            f"\tk2={round(self["deep"].k, 4)},",
-            f"\tk2={round(self["deep"].alpha, 2)},",
-            ")",
-        ]
-
-        return "\n".join(lines)
 
 
 class HbvLateralModel(Model):

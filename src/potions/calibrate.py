@@ -10,7 +10,7 @@ ZoneType = TypeVar("ZoneType", bound=Zone)
 
 
 def calibrate(
-    model: Model[ZoneType],
+    model: Model[ZoneType], # type: ignore
     forcing_data: list[ForcingData],
     calibration_data: DataFrame,
     param_ranges: Iterable[tuple[float, float]],

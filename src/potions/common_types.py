@@ -4,7 +4,8 @@ import numpy as np
 from numpy.typing import NDArray
 from numpy import float64 as f64
 from pandas import Series
-
+from collections import namedtuple
+from .common_types_compiled import HydroForcing # type: ignore
 
 # ==== Types ==== #
 M = TypeVar("M", bound=int)
@@ -13,21 +14,21 @@ Vector = np.ndarray[tuple[N], np.dtype[f64]]
 Matrix = np.ndarray[tuple[M, N], np.dtype[f64]]
 
 
-@dataclass(frozen=True)
-class HydroForcing:
-    """Contains hydrologic forcing data for a single zone at a single time step.
+# @dataclass(frozen=True)
+# class HydroForcing:
+#     """Contains hydrologic forcing data for a single zone at a single time step.
 
-    Attributes:
-        precip: Precipitation rate (e.g., mm/day).
-        temp: Temperature (e.g., °C).
-        pet: Potential evapotranspiration rate (e.g., mm/day).
-        q_in: Water input from an external zone
-    """
+#     Attributes:
+#         precip: Precipitation rate (e.g., mm/day).
+#         temp: Temperature (e.g., °C).
+#         pet: Potential evapotranspiration rate (e.g., mm/day).
+#         q_in: Water input from an external zone
+#     """
 
-    precip: float
-    temp: float
-    pet: float
-    q_in: float
+#     precip: float
+#     temp: float
+#     pet: float
+#     q_in: float
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,7 @@ class RtForcing:
     q_in: float
     q_lat_out: float
     q_vert_out: float
-    hydro_forc: HydroForcing
+    hydro_forc: HydroForcing # type: ignore
     storage: float  # Water storage in the zone, in millimeters
     s_w: float  # Fraction of soil taken up by water, ranges from [0,1], with 1 indicating all porosity is filled
     z_w: float  # Depth of the water table

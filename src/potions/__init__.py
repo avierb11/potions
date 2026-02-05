@@ -1,16 +1,16 @@
-from .hydro import (
+from potions.hydro_compiled import (
     HydroForcing,
     HydroStep,
     HydrologicZone,
     SnowZone,
-    SoilZone,
+    SurfaceZone,
     GroundZone,
     GroundZoneB,
     GroundZoneLinear,
     GroundZoneLinearB,
 )
 
-from .model import (
+from potions.model import (
     ForcingData,
     Layer,
     Hillslope,
@@ -22,16 +22,16 @@ from .model import (
     HbvNonlinearModel,
 )
 
-from .utils import (
+from potions.utils import (
     objective_function,
 )
 
-from .calibrate import calibrate
+from potions.calibrate import calibrate
 
-from .interfaces import Zone, StepResult
+from potions.interfaces import Zone, StepResult
 
 
-from .database import (
+from potions.database import (
     ExchangeReaction,
     MineralKineticReaction,
     MonodReaction,
@@ -44,7 +44,7 @@ from .database import (
 )
 
 
-from .common_types import (
+from potions.common_types import (
     ChemicalState,
     RtForcing,
     LapseRateParameters,
