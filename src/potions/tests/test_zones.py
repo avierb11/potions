@@ -1,4 +1,4 @@
-from ..hydro_compiled import GroundZone, HydroForcing, HydroStep, SnowZone, SurfaceZone
+from ..hydro import GroundZone, HydroForcing, HydroStep, SnowZone, SurfaceZone
 
 # CONST_FORCING: HydroForcing
 

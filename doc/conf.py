@@ -45,4 +45,9 @@ autodoc_mock_imports = [
     "potions.math_compiled",
     "potions.hydro_compiled",
     "potions.model",
+    "potions.utils",
+    "potions.forcing",
+    "potions.objective_functions",
+    "potions.common_types",
+    "potions.common_types_compiled",
 ]

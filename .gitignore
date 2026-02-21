@@ -196,3 +196,8 @@ potions/__pycache__/zones.cpython-313.pyc
 # Other data
 test_data/
 other_scripts/
+doc/_build/
+doc/_static/
+*.c
+compiled/
+doc.bak/

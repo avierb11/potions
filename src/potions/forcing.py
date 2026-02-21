@@ -1,10 +1,11 @@
 from typing import Callable
 from numpy.typing import NDArray
-from .utils import HydroForcing
+from potions.utils import HydroForcing
+
 
 def create_forcing_function(forc_mat: NDArray) -> Callable[[float], NDArray]:
     """
-    Take a list of forcing data and produce a function `d(t)` that 
+    Take a list of forcing data and produce a function `d(t)` that
     returns some `data` for the time `t`. This is necessary to be able to
     apply this function to scipy.
 

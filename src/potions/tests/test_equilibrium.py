@@ -19,8 +19,7 @@ def test_solve_equilibrium_simple_pandas():
         columns=species,
     )
 
-    equilibrium_series = pd.Series([2.0], index=secondary_species)
-    log_k = np.log10(equilibrium_series)
+    log_k = pd.Series([np.log10(2.0)], index=secondary_species)
 
     # Total A = [A] + [B]
     total_df = pd.DataFrame(
@@ -31,38 +30,34 @@ def test_solve_equilibrium_simple_pandas():
     )
 
     params = EquilibriumParameters(
-        stoich=stoich_df, equilibrium=equilibrium_series, total=total_df
+        stoich=stoich_df, log_eq_consts=log_k, total=total_df
     )
 
     # Initial state: [A]=1.0, [B]=0.0
-    initial_state = ChemicalState(
-        prim_aq_conc=np.array([1.0]),  # A
-        sec_conc=np.array([0.0]),  # B
-        min_conc=np.array([]),
-        exchange_conc=np.array([]),
+    initial_state = np.array(
+        [1.0, 0.0], dtype=np.float64  # Primary species  # Secondary species
     )
 
-    initial_all_conc = np.concatenate(
-        [initial_state.prim_aq_conc, initial_state.sec_conc]
-    )
-    c_tot = params.total.to_numpy() @ initial_all_conc
+    # initial_all_conc = np.concatenate(
+    #     [initial_state.prim_aq_conc, initial_state.sec_conc]
+    # )
+    c_tot = params.total.to_numpy() @ initial_state
 
     new_state = params.solve_equilibrium(initial_state)
-    new_all_conc = np.concatenate([new_state.prim_aq_conc, new_state.sec_conc])
 
     # Check mass balance
-    final_c_tot = params.total.to_numpy() @ new_all_conc
+    final_c_tot = params.total.to_numpy() @ new_state
     assert np.allclose(c_tot, final_c_tot)
 
     # Check equilibrium
-    log_new_conc = np.log10(new_all_conc)
+    log_new_conc = np.log10(new_state)
     iap = params.stoich.to_numpy() @ log_new_conc
     assert np.allclose(iap, log_k)
 
     # Check analytical solution
     # [B]/[A] = 2, [A]+[B]=1 => A=1/3, B=2/3
-    assert np.allclose(new_state.prim_aq_conc, [1 / 3])
-    assert np.allclose(new_state.sec_conc, [2 / 3])
+    assert np.allclose(new_state[0], 1 / 3)
+    assert np.allclose(new_state[1], 2 / 3)
 
 
 def test_solve_equilibrium_carbonate_system():
@@ -98,7 +93,6 @@ def test_solve_equilibrium_carbonate_system():
     )
 
     log_k = pd.Series([-14, 6.3, -10.33], index=secondary_species)
-    equilibrium_series = 10**log_k
 
     # Total concentration matrix
     # Rows are conserved quantities: Charge, Total Carbonate
@@ -112,32 +106,23 @@ def test_solve_equilibrium_carbonate_system():
     )
 
     params = EquilibriumParameters(
-        stoich=stoich_df, equilibrium=equilibrium_series, total=total_df
+        stoich=stoich_df, log_eq_consts=log_k, total=total_df
     )
 
     # Initial state
-    initial_state = ChemicalState(
-        prim_aq_conc=np.array([1e-7, 1e-3]),  # [H+], [HCO3-]
-        sec_conc=np.array([1e-7, 1e-6, 1e-8]),  # [OH-], [H2CO3], [CO3-2]
-        min_conc=np.array([]),
-        exchange_conc=np.array([]),
-    )
+    initial_conc = np.array(
+        [1e-7, 1e-3, 1e-7, 1e-6, 1e-8]
+    )  # [H+], [HCO3-], [OH-], [H2CO3], [CO3-2]
+    c_tot = params.total.to_numpy() @ initial_conc
 
-    initial_all_conc = np.concatenate(
-        [initial_state.prim_aq_conc, initial_state.sec_conc]
-    )
-    c_tot = params.total.to_numpy() @ initial_all_conc
-
-    new_state = params.solve_equilibrium(initial_state)
-
-    new_all_conc = np.concatenate([new_state.prim_aq_conc, new_state.sec_conc])
+    new_conc = params.solve_equilibrium(initial_conc)
 
     # 1. Check for mass balance
-    final_c_tot = params.total.to_numpy() @ new_all_conc
+    final_c_tot = params.total.to_numpy() @ new_conc
     assert np.allclose(c_tot, final_c_tot)
 
     # 2. Check for equilibrium condition
     # Add a small epsilon to avoid log(0)
-    log_new_conc = np.log10(new_all_conc + 1e-30)
+    log_new_conc = np.log10(new_conc + 1e-30)
     iap = params.stoich.to_numpy() @ log_new_conc
     assert np.allclose(iap, log_k, atol=1e-6)

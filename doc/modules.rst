@@ -6,6 +6,11 @@ API Reference
 
    model
    math_compiled
+   common_types_compiled
+   interfaces
+   objective_functions
+   utils
+   common_types
 
 
 

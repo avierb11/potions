@@ -9,17 +9,15 @@ from setuptools.extension import Extension
 # Define the extension module
 extensions = [
     Extension(
-        "potions.hydro_compiled",  # the module name in python
-        ["src/potions/hydro_compiled.py"],  # the cython source
+        "potions.hydro",  # the module name in python
+        ["src/potions/hydro.py"],  # the cython source
         include_dirs=["."],
-        # define_macros=[("CYTHON_TRACE", "1")],
         define_macros=[("CYTHON_PROFILE", "1")],
     ),
     Extension(
         "potions.math_compiled",  # the module name in python
         ["src/potions/math_compiled.py"],  # the cython source
         include_dirs=["."],
-        # define_macros=[("CYTHON_TRACE", "1")],
         define_macros=[("CYTHON_PROFILE", "1")],
     ),
 ]

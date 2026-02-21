@@ -38,11 +38,9 @@ from potions.utils import objective_function, log_probability, HydroModelResults
 from potions.interfaces import Zone, StateType
 
 # from .hydro import (
-from potions.hydro_compiled import (
+from potions.hydro import (
     GroundZone,
     GroundZoneB,
-    GroundZoneLinear,
-    GroundZoneLinearB,
     HydroForcing,
     HydroStep,
     HydrologicZone,
@@ -53,6 +51,12 @@ from potions.hydro_compiled import (
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
+
+# ==== Constants ==== #
+OUTPUT_COLUMNS_PER_ZONE: Final[int] = (
+    8  # Number of columns for each zone in the output. Includes 1 state + 6 fluxes (4 normal + 2 external)
+)
+# =================== #
 
 
 class BatchResults(TypedDict):
@@ -270,11 +274,14 @@ class ModelStep(Generic[StateType]):
         vert_flux: A list of the vertical fluxes for each zone.
     """
 
-    state: list[StateType]
-    forc_flux: list[StateType]
-    vap_flux: list[StateType]
-    lat_flux: list[StateType]
-    vert_flux: list[StateType]
+    state: np.ndarray
+    forc_flux: np.ndarray
+    vap_flux: np.ndarray
+    lat_flux: np.ndarray
+    vert_flux: np.ndarray
+    q_in: np.ndarray
+    lat_flux_ext: np.ndarray
+    vert_flux_ext: np.ndarray
 
 
 class Model:
@@ -331,7 +338,7 @@ class Model:
         self.__zones: dict[str, HydrologicZone] = {}
         for layer in self.structure:
             for zone in layer:
-                self.__zones[zone.name] = zone.default()
+                self.__zones[zone.name] = zone.default()  # type: ignore
 
         for zone_name, zone in zones.items():
             if zone_name not in self.get_zone_names():
@@ -349,7 +356,7 @@ class Model:
         for layer in self.structure:
             layer_vals: list[HydrologicZone] = []
             for zone in layer:
-                layer_vals.append(self.__zones[zone.name])
+                layer_vals.append(self.__zones[zone.name])  # type: ignore
 
             layers.append(Layer(layer_vals))
 
@@ -398,12 +405,12 @@ class Model:
         zone_names: list[str] = []
         for layer in cls.structure:
             for zone in layer:
-                zone_names.append(zone.name)
+                zone_names.append(zone.name)  # type: ignore
         return zone_names
 
     @property
     def num_surface_zones(self) -> int:
-        """The number of zones in the top layer of the model."""
+        """sThe number of zones in the top layer of the model."""
         return len(self.structure[0])
 
     @property
@@ -468,7 +475,11 @@ class Model:
         return self.__flat_model
 
     def step(
-        self, state: NDArray[f64], ds: list[HydroForcing], dt: float
+        self,
+        state: NDArray[f64],
+        ds: list[HydroForcing],
+        dt: float,
+        check_water_balance: bool = False,
     ) -> ModelStep[float]:
         """Advances all zones in the model by a single time step.
 
@@ -487,15 +498,16 @@ class Model:
             ModelStep[float]: An object containing the new states and all
                 calculated fluxes for every zone.
         """
+        num_zones: int = self.num_zones()
 
-        new_states: list[float] = []
-        forc_fluxes: list[float] = []
-        vap_fluxes: list[float] = []
-        lat_fluxes: list[float] = []
-        vert_fluxes: list[float] = []
-
-        # Determine the 'zero' value for fluxes based on the state type
-        zero_flux: float = 0.0
+        new_states: np.ndarray = np.zeros((num_zones,), dtype=np.float64)
+        forc_fluxes: np.ndarray = new_states.copy()
+        vap_fluxes: np.ndarray = new_states.copy()
+        lat_fluxes: np.ndarray = new_states.copy()
+        vert_fluxes: np.ndarray = new_states.copy()
+        q_ins: np.ndarray = new_states.copy()
+        lat_ext_fluxes: np.ndarray = new_states.copy()
+        vert_ext_fluxes: np.ndarray = new_states.copy()
 
         i: int
         zone: HydrologicZone
@@ -503,12 +515,15 @@ class Model:
         d_i: HydroForcing
         for i, (zone, (s_i, d_i)) in enumerate(zip(self.flat_model, zip(state, ds))):
             # Calculate incoming flux using faster NumPy dot products
-            num_fluxes = len(lat_fluxes)
+            # num_fluxes = len(lat_fluxes)
+            num_fluxes = i + 1
             if num_fluxes > 0:
-                q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], np.array(lat_fluxes))
-                q_in_vert = np.dot(self.vert_mat[i, :num_fluxes], np.array(vert_fluxes))
+                q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], lat_ext_fluxes[: i + 1])
+                q_in_vert = np.dot(
+                    self.vert_mat[i, :num_fluxes], vert_ext_fluxes[: i + 1]
+                )
             else:
-                q_in_lat, q_in_vert = zero_flux, zero_flux
+                q_in_lat, q_in_vert = 0.0, 0.0
 
             q_in = q_in_lat + q_in_vert
 
@@ -519,15 +534,40 @@ class Model:
             try:
                 step_res: HydroStep = zone.step(max(0.0, s_i), d_i_zone, dt)
             except ValueError as e:
-                print(f"Failed on zone {i} for zone {zone.name}, storages are {state=}")
+                print(f"Failed on zone {i} for zone {zone.name}, storages are {state=}")  # type: ignore
                 print(f"Zone: {zone}")
                 raise e
 
-            new_states.append(step_res.state)  # type: ignore
-            forc_fluxes.append(step_res.forc_flux)  # type: ignore
-            vap_fluxes.append(step_res.vap_flux)  # type: ignore
-            lat_fluxes.append(step_res.lat_flux)  # type: ignore
-            vert_fluxes.append(step_res.vert_flux)  # type: ignore
+            # ==== Check the water balance ==== #
+            if check_water_balance:
+                s_new = step_res.state
+                mass_balance = (
+                    d_i_zone.q_in
+                    + step_res.forc_flux
+                    - step_res.vap_flux
+                    - step_res.lat_flux
+                    - step_res.vert_flux
+                )
+
+                mass_err = (s_i - s_new) + dt * mass_balance
+
+                if abs(mass_err) > 1e-3:
+                    print(f"Mass balance error on for zone {i} with name {zone.name}")  # type: ignore
+                    print(f"Storage: {s_i}")
+                    print(f"Zone: {zone}")
+                    print(f"Forcing data: {d_i_zone}")
+                    print(f"Step: {step_res}")
+                    raise ValueError("Mass balance failed")
+            # ================================= #
+
+            new_states[i] = step_res.state
+            forc_fluxes[i] = step_res.forc_flux
+            vap_fluxes[i] = step_res.vap_flux
+            lat_fluxes[i] = step_res.lat_flux
+            vert_fluxes[i] = step_res.vert_flux
+            q_ins[i] = d_i_zone.q_in
+            lat_ext_fluxes[i] = step_res.lat_flux_ext
+            vert_ext_fluxes[i] = step_res.vert_flux_ext
 
         return ModelStep(
             state=new_states,
@@ -535,6 +575,9 @@ class Model:
             vap_flux=vap_fluxes,
             lat_flux=lat_fluxes,
             vert_flux=vert_fluxes,
+            q_in=q_ins,
+            lat_flux_ext=lat_ext_fluxes,
+            vert_flux_ext=vert_ext_fluxes,
         )
 
     def get_river_zone_ids(self) -> list[int]:
@@ -633,13 +676,16 @@ class Model:
                 f"q_vap_{zone_name}_{i}",
                 f"q_lat_{zone_name}_{i}",
                 f"q_vert_{zone_name}_{i}",
+                f"q_in_{zone_name}_{i}",
+                f"q_lat_ext_{zone_name}_{i}",
+                f"q_vert_ext_{zone_name}_{i}",
             ]
         return col_names
 
     @property
     def zone_labels(self) -> list[str]:
         """A list of zone labels for the final output DataFrame."""
-        return [f"{zone.name}_{i}" for i, zone in enumerate(self.flat_model)]
+        return [f"{zone.name}_{i}" for i, zone in enumerate(self.flat_model)]  # type: ignore
 
     # Newer definitions
     def construct_hydrologic_graph(self: Model):
@@ -846,10 +892,10 @@ class Model:
         for layer in cls.structure:
             for zone in layer:
                 ps, zone_params = (
-                    zone_params[: zone.num_parameters()],
-                    zone_params[zone.num_parameters() :],
+                    zone_params[: zone.num_parameters()],  # type: ignore
+                    zone_params[zone.num_parameters() :],  # type: ignore
                 )
-                new_zones[zone.name] = zone.from_array(ps)
+                new_zones[zone.name] = zone.from_array(ps)  # type: ignore
 
         new_lapse_rates: list[LapseRateParameters] = [
             LapseRateParameters(
@@ -876,8 +922,8 @@ class Model:
         param_names: list[str] = []
         for layer in self.structure:
             for zone in layer:
-                for param in zone.parameter_names():
-                    param_names += [f"{zone.name}.{param}"]
+                for param in zone.parameter_names():  # type: ignore
+                    param_names += [f"{zone.name}.{param}"]  # type: ignore
         for i, _ in enumerate(self.structure[0][:-1]):
             param_names.append(f"proportion.{i + 1}")
 
@@ -940,7 +986,7 @@ class Model:
             zone_param_dict = zone_params[zone_name]
             zone_type: type[HydrologicZone] = cls.get_zone_type(zone_name)
 
-            new_zone = zone_type.from_dict(zone_param_dict)
+            new_zone = zone_type.from_dict(zone_param_dict)  # type: ignore
             zones[zone_name] = new_zone
 
         # Get the sizes (if applicable)
@@ -988,7 +1034,7 @@ class Model:
         """
         for layer in cls.structure:
             for zone in layer:
-                if zone.name == name:
+                if zone.name == name:  # type: ignore
                     return type(zone)
         raise ValueError(f"Unknown zone name: {name}")
 
@@ -1000,7 +1046,7 @@ class Model:
             NDArray: An array of default initial storage values for all zones.
         """
         return np.array(
-            [zone.default_init_state() for layer in cls.structure for zone in layer]
+            [zone.default_init_state() for layer in cls.structure for zone in layer]  # type: ignore
         )
 
     def run(
@@ -1010,6 +1056,7 @@ class Model:
         meas_streamflow: Optional[Series] = None,
         average_elevation: Optional[float] = None,
         elevations: Optional[list[float]] = None,
+        check_water_balance: bool = False,
         objective_functions: Optional[
             list[tuple[str, Callable[[Series, Series], float]]]
         ] = None,
@@ -1076,12 +1123,15 @@ class Model:
             init_state=init_state,
             forc=forcing_data,
             dates=dates,
+            check_water_balance=check_water_balance,
         )
 
         streamflow_cols: list[str] = [
             col
             for col in model_res.columns
-            if "lat" in col and int(col.split("_")[-1]) in self.get_river_zone_ids()
+            if "lat" in col
+            and (not "ext" in col)
+            and int(col.split("_")[-1]) in self.get_river_zone_ids()
         ]
 
         sim_streamflow = model_res[streamflow_cols].sum(axis=1)
@@ -1224,7 +1274,7 @@ class Model:
 
         indices = [x[0] for x in results]
         obj_series: list[Series] = [
-            x[1]["objective_functions"].to_dict() for x in results
+            x[1]["objective_functions"].to_dict() for x in results  # type: ignore
         ]
         sim_results: dict[int, DataFrame] = {x[0]: x[1]["simulation"] for x in results}
 
@@ -1253,9 +1303,9 @@ class Model:
         # Add the hydrologic zone parameters
         for layer in cls.structure:
             for zone in layer:
-                zone_range = zone.default_parameter_range()
+                zone_range = zone.default_parameter_range()  # type: ignore
                 for param_name, param_range in zone_range.items():
-                    param_ranges[f"{zone.name}.{param_name}"] = param_range
+                    param_ranges[f"{zone.name}.{param_name}"] = param_range  # type: ignore
 
         # Add the size parameters
         for i, _ in enumerate(cls.structure[0][:-1]):
@@ -1288,6 +1338,7 @@ class Model:
         polish: bool = False,
         maxiter=10,
         print_values: bool = False,
+        param_ranges: Optional[dict[str, tuple[float, float]]] = None,
     ) -> tuple[dict[str, float], HydroModelResults, opt.OptimizeResult]:
         """Performs a simple calibration using differential evolution.
 
@@ -1313,9 +1364,12 @@ class Model:
                 - The results dictionary from the best-fit model run.
                 - The full `OptimizeResult` object from SciPy.
         """
-        bounds: dict[str, tuple[float, float]] = cls.default_parameter_ranges(
-            include_lapse_rates=use_lapse_rates
-        )
+
+        bounds: dict[str, tuple[float, float]]
+        if param_ranges is None:
+            bounds = cls.default_parameter_ranges(include_lapse_rates=use_lapse_rates)
+        else:
+            bounds = param_ranges
 
         bounds_list: list[tuple[float, float]] = list(bounds.values())
 
@@ -1630,6 +1684,7 @@ def run_hydro_model(
     init_state: NDArray[f64],
     forc: list[ForcingData],
     dates: Series[Timestamp] | Index[Timestamp],
+    check_water_balance: bool = False,
 ) -> DataFrame:
     """Runs a complete hydrologic simulation.
 
@@ -1716,7 +1771,9 @@ def run_hydro_model(
         (num_steps, num_zones), fill_value=np.nan, dtype=float
     )
     fluxes: NDArray[f64] = np.full(
-        (num_steps, num_zones, 4), fill_value=np.nan, dtype=float
+        (num_steps, num_zones, OUTPUT_COLUMNS_PER_ZONE - 1),
+        fill_value=np.nan,
+        dtype=float,
     )
 
     state: NDArray[f64] = init_state
@@ -1742,13 +1799,16 @@ def run_hydro_model(
         try:
             # Convert state array to list for the generic step method
             step_res: ModelStep = model.step(
-                list(state), ds_for_step, dt  # type: ignore
+                list(state), ds_for_step, dt, check_water_balance=check_water_balance  # type: ignore
             )
             storages[t_idx] = np.array(step_res.state)
             fluxes[t_idx, :, 0] = np.array(step_res.forc_flux)
             fluxes[t_idx, :, 1] = np.array(step_res.vap_flux)
             fluxes[t_idx, :, 2] = np.array(step_res.lat_flux)
             fluxes[t_idx, :, 3] = np.array(step_res.vert_flux)
+            fluxes[t_idx, :, 4] = np.array(step_res.q_in)
+            fluxes[t_idx, :, 5] = np.array(step_res.lat_flux_ext)
+            fluxes[t_idx, :, 6] = np.array(step_res.vert_flux_ext)
             # Convert state back to array for the next iteration
             state = np.array(step_res.state)
         except ValueError as e:
@@ -1757,14 +1817,21 @@ def run_hydro_model(
             raise e
 
     full_array: NDArray[f64] = np.full(
-        (num_steps, 5 * num_zones), fill_value=np.nan, dtype=float
+        (num_steps, OUTPUT_COLUMNS_PER_ZONE * num_zones), fill_value=np.nan, dtype=float
     )
     for i in range(num_zones):
-        full_array[:, 5 * i] = storages[:, i]
-        full_array[:, 5 * i + 1] = fluxes[:, i, 0]  # Forcing
-        full_array[:, 5 * i + 2] = fluxes[:, i, 1]  # Vaporization
-        full_array[:, 5 * i + 3] = fluxes[:, i, 2]  # Lateral
-        full_array[:, 5 * i + 4] = fluxes[:, i, 3]  # Vertical
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i] = storages[:, i]
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 1] = fluxes[:, i, 0]  # Forcing
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 2] = fluxes[:, i, 1]  # Vaporization
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 3] = fluxes[:, i, 2]  # Lateral
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 4] = fluxes[:, i, 3]  # Vertical
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 5] = fluxes[:, i, 4]  # q_in
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 6] = fluxes[
+            :, i, 5
+        ]  # Lateral (external)
+        full_array[:, OUTPUT_COLUMNS_PER_ZONE * i + 7] = fluxes[
+            :, i, 6
+        ]  # Vertical (external)
 
     col_names: list[str] = model.get_column_names()
 
@@ -1868,18 +1935,18 @@ class HbvModel(Model):
     def __repr__(self) -> str:
         lines = [
             "HbvModel(",
-            f"\ttt={round(self["snow"].tt, 2)},",
-            f"\tfmax={round(self["snow"].fmax, 2)},",
-            f"\tfc={round(self["soil"].fc, 2)},",
-            f"\tlp={round(self["soil"].lp, 2)},",
-            f"\tbeta={round(self["soil"].beta, 2)},",
-            f"\tk0={round(self["soil"].k0, 4)},",
-            f"\tthr={round(self["soil"].thr, 2)},",
-            f"\tk1={round(self["shallow"].k, 4)},",
-            f"\tk1={round(self["shallow"].alpha, 2)},",
-            f"\tperc={round(self["shallow"].perc, 2)},",
-            f"\tk2={round(self["deep"].k, 4)},",
-            f"\tk2={round(self["deep"].alpha, 2)},",
+            f"\ttt={round(self["snow"].tt, 2)},",  # type: ignore
+            f"\tfmax={round(self["snow"].fmax, 2)},",  # type: ignore
+            f"\tfc={round(self["soil"].fc, 2)},",  # type: ignore
+            f"\tlp={round(self["soil"].lp, 2)},",  # type: ignore
+            f"\tbeta={round(self["soil"].beta, 2)},",  # type: ignore
+            f"\tk0={round(self["soil"].k0, 4)},",  # type: ignore
+            f"\tthr={round(self["soil"].thr, 2)},",  # type: ignore
+            f"\tk1={round(self["shallow"].k, 4)},",  # type: ignore
+            f"\tk1={round(self["shallow"].alpha, 2)},",  # type: ignore
+            f"\tperc={round(self["shallow"].perc, 2)},",  # type: ignore
+            f"\tk2={round(self["deep"].k, 4)},",  # type: ignore
+            f"\tk2={round(self["deep"].alpha, 2)},",  # type: ignore
             ")",
         ]
 
@@ -1892,8 +1959,8 @@ class HbvLateralModel(Model):
     structure = [
         [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
         [SurfaceZone(name="soil_hs"), SurfaceZone(name="soil_rp")],
-        [GroundZoneLinear(name="shallow_hs"), GroundZoneLinear(name="shallow_rp")],
-        [GroundZoneLinearB(name="deep_hs"), GroundZoneLinearB(name="deep_rp")],
+        [GroundZone(name="shallow_hs"), GroundZone(name="shallow_rp")],
+        [GroundZoneB(name="deep_hs"), GroundZoneB(name="deep_rp")],
     ]
 
 

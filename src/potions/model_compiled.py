@@ -40,7 +40,7 @@ from .utils import objective_function, log_probability, HydroModelResults
 from .interfaces import Zone, StateType
 
 # from .hydro import (
-from .hydro_compiled import (
+from .hydro import (
     GroundZone,
     GroundZoneB,
     GroundZoneLinear,

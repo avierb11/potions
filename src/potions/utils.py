@@ -4,7 +4,8 @@ from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from .common_types import ForcingData, HydroForcing
+from potions.common_types_compiled import HydroForcing
+from potions.common_types import ForcingData
 
 # ==== Types ==== #
 
@@ -53,16 +54,16 @@ def objective_function(
     obj_val: float
 
     if metric == "kge":
-        obj_val = -results["kge"]  # type: ignore
+        obj_val = -results["objective_functions"]["kge"]  # type: ignore
     elif metric == "nse":
-        obj_val = -results["nse"]  # type: ignore
+        obj_val = -results["objective_functions"]["nse"]  # type: ignore
     elif metric == "combined":
-        obj_val = -results["kge"] - results["nse"]  # type: ignore
+        obj_val = -results["objective_functions"]["kge"] - results["objective_functions"]["nse"]  # type: ignore
     else:
         obj_val = metric(results)
 
-    if print_value:
-        print(f"{metric.upper()}: {-round(obj_val, 2)}")
+    if print_value and isinstance(obj_val, str):
+        print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
 
     return obj_val
 
@@ -146,6 +147,60 @@ def log_probability(
             return lp + metric(model_res), aux_values
     except Exception:
         return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan]
+
+
+def jac(
+    f: Callable[[np.ndarray], np.ndarray], x: np.ndarray, dx: float = 1e-3
+) -> np.ndarray:
+    """Numerically estimate the jacobian matrix using a finite difference approximation"""
+    jac_mat = np.zeros((x.size, x.size), dtype=np.float64)
+
+    for i, x_i in enumerate(x):
+        x_up = x.copy()
+        x_dn = x.copy()
+        x_up[i] += dx
+        x_dn[i] -= dx
+
+        jac_mat[:, i] = (f(x_up) - f(x_dn)) / (2 * dx)
+
+    return jac_mat
+
+
+def find_root_multi(
+    f: Callable[[NDArray], NDArray],
+    x_0: NDArray,
+    dx: float = 1e-3,
+    max_iter: int = 25,
+    tol: float = 1e-6,
+    debug: bool = False,
+) -> NDArray:
+    x: NDArray = x_0.copy()
+    f_x: NDArray = f(x)
+    err: float = (f_x**2).mean()
+
+    if debug:
+        print(f"Initial f(x): {f_x}")
+        print(f"Initial error: {err}")
+
+    for i in range(max_iter):
+        if err <= tol:
+            return x
+
+        jac_x: NDArray = jac(f, x, dx=dx)
+        step: NDArray = np.linalg.solve(jac_x, f_x)
+        x -= step
+        f_x = f(x)
+        err = (f_x**2).mean()
+
+        if debug:
+            print("-" * 10)
+            print(f"Step {i}")
+            print(f"f(x): {f_x}")
+            print(f"Jacobian matrix: \n{jac_x}")
+            print(f"Error: {err}")
+            print()
+
+    raise ValueError(f"Failed to find root starting at {x_0=}")
 
 
 # ======================== #
