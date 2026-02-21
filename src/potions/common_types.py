@@ -1,11 +1,14 @@
-from typing import TypeVar
 from dataclasses import dataclass
+from typing import TypeVar
+
 import numpy as np
-from numpy.typing import NDArray
 from numpy import float64 as f64
+from numpy.typing import NDArray
 from pandas import Series
-from collections import namedtuple
-from .common_types_compiled import HydroForcing  # type: ignore
+
+from potions.hydro import HydroStep
+
+from .common_types_compiled import HydroForcing
 
 # ==== Types ==== #
 M = TypeVar("M", bound=int)
@@ -67,7 +70,7 @@ class LapseRateParameters:
         except TypeError:
             raise TypeError(
                 f"Invalid parameters for lapse rate: {params}, expected {list(cls.default_parameter_range().keys())}"
-            )
+            ) from None
 
 
 @dataclass(frozen=True)
@@ -100,9 +103,7 @@ class RtForcing:
     """Contains the hydrologic and chemical drivers for a reactive transport step."""
 
     conc_in: NDArray  # The flow-weighted concentration of speices into this zone
-    q_lat_out: float
-    q_vert_out: float
-    storage: float  # Water storage in the zone, in millimeters
+    hydro_step: HydroStep
     hydro_forc: HydroForcing
     s_w: float  # Fraction of soil taken up by water, ranges from [0,1], with 1 indicating all porosity is filled
     z_w: float  # Depth of the water table
@@ -110,4 +111,4 @@ class RtForcing:
     @property
     def q_out(self) -> float:
         """The total flux of water out of this zone"""
-        return self.q_lat_out + self.q_vert_out
+        return self.hydro_step.lat_flux_ext + self.hydro_step.vert_flux_ext

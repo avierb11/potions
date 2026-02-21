@@ -1,14 +1,15 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Final
-import pandas as pd
-from pandas import DataFrame, Series
+
 import numpy as np
-from scipy.optimize import fsolve
+import pandas as pd
 import scipy.linalg as la
 from numpy.typing import NDArray
+from pandas import DataFrame, Series
 
-from .utils import find_root_multi
+from .common_types import Matrix, RtForcing, Vector
 from .database import (
     ExchangeReaction,
     MineralKineticData,
@@ -16,7 +17,7 @@ from .database import (
     PrimaryAqueousSpecies,
     SecondarySpecies,
 )
-from .common_types import Vector, Matrix, ChemicalState, RtForcing
+from .utils import find_root_multi
 
 
 @dataclass(frozen=True)
@@ -540,7 +541,7 @@ class ReactionNetwork:
             monod_df[mineral.name] = 0.0
         inhib_df: DataFrame = monod_df.copy()
 
-        for name, reaction in self.mineral_kinetics.monod_reactions.items():
+        for _name, reaction in self.mineral_kinetics.monod_reactions.items():
             monod_df[reaction.mineral_name] = reaction.monod_terms
             inhib_df[reaction.mineral_name] = reaction.inhib_terms
 

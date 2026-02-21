@@ -6,10 +6,10 @@
 # cython: profile=False
 
 from __future__ import annotations
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Optional
 from numpy.typing import NDArray
-from potions.math_compiled import find_root, bisect, midpoint_method, ode_is_stable
+from .math import find_root, bisect
 import cython  # type: ignore
 
 from .common_types_compiled import HydroForcing, HydroStep

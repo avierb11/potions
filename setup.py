@@ -15,8 +15,8 @@ extensions = [
         define_macros=[("CYTHON_PROFILE", "1")],
     ),
     Extension(
-        "potions.math_compiled",  # the module name in python
-        ["src/potions/math_compiled.py"],  # the cython source
+        "potions.math",  # the module name in python
+        ["src/potions/math.py"],  # the cython source
         include_dirs=["."],
         define_macros=[("CYTHON_PROFILE", "1")],
     ),

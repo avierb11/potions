@@ -1,4 +1,4 @@
-from ..math_compiled import bisect, find_root, sign, ode_is_stable
+from ..math import bisect, find_root, sign, ode_is_stable
 import pytest
 import numpy as np
 from unittest.mock import MagicMock

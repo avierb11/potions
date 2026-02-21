@@ -1,36 +1,18 @@
 from __future__ import annotations
-from abc import abstractmethod
-from typing import Callable, Any, Final, TypeVar, Generic
-from numpy.typing import NDArray
+
 from dataclasses import dataclass
+
 import numpy as np
-import pandas as pd
-from pandas import DataFrame, Series
+from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
-import scipy.linalg as la
-from scipy.optimize import fsolve
-from numpy import float64 as f64
 
-from .database import (
-    ExchangeReaction,
-    MineralKineticData,
-    MineralKineticReaction,
-    MineralSpecies,
-    MonodReaction,
-    PrimaryAqueousSpecies,
-    SecondarySpecies,
-    TstReaction,
-)
-
-from .interfaces import Zone, StepResult
-from .common_types_compiled import HydroForcing
-from .common_types import ChemicalState, RtForcing, Vector, Matrix, M, N
+from .common_types import RtForcing
 from .reaction_network import (
+    AuxiliaryParameters,
+    EquilibriumParameters,
+    MineralParameters,
     MonodParameters,
     TstParameters,
-    EquilibriumParameters,
-    AuxiliaryParameters,
-    MineralParameters,
 )
 
 
@@ -178,8 +160,12 @@ class ReactiveTransportZone:
         total_q_out_water = d.q_out
         if total_q_out_water > 1e-9:
             total_mass_out_flux = total_q_out_water * c_after_eq
-            lat_flux = total_mass_out_flux * (d.q_lat_out / total_q_out_water)
-            vert_flux = total_mass_out_flux * (d.q_vert_out / total_q_out_water)
+            lat_flux = total_mass_out_flux * (
+                d.hydro_step.lat_flux_ext / total_q_out_water
+            )
+            vert_flux = total_mass_out_flux * (
+                d.hydro_step.vert_flux_ext / total_q_out_water
+            )
         else:
             lat_flux = np.zeros_like(c_after_eq)
             vert_flux = np.zeros_like(c_after_eq)
