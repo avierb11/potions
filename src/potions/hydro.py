@@ -6,14 +6,15 @@
 # cython: profile=False
 
 from __future__ import annotations
+
 from abc import abstractmethod
 from typing import Optional
-from numpy.typing import NDArray
-from .math import find_root, bisect
+
 import cython  # type: ignore
+from numpy.typing import NDArray
 
 from .common_types_compiled import HydroForcing, HydroStep
-
+from .math import bisect, find_root
 
 """
 Things to add in
@@ -377,7 +378,7 @@ class HydrologicZone:
         except TypeError:
             raise TypeError(
                 f"Failed to construct Hydrologic zone with type {type(cls)} and params {params}, expected parameters named {cls.parameter_names()}"
-            )
+            ) from None
 
 
 @cython.final

@@ -1,6 +1,6 @@
 # setup.py
-from setuptools import setup
 from Cython.Build import cythonize
+from setuptools import setup
 from setuptools.extension import Extension
 
 # Create the 'compiled' directory if it doesn't exist

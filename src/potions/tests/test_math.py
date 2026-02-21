@@ -1,10 +1,11 @@
-from ..math import bisect, find_root, sign, ode_is_stable
-import pytest
-import numpy as np
+import math
 from unittest.mock import MagicMock
 
+import numpy as np
+import pytest
+
 from ..common_types_compiled import HydroForcing
-import math
+from ..math import bisect, find_root, ode_is_stable, sign
 
 
 def test_sign():
@@ -140,19 +141,31 @@ def test_ode_is_stable():
         return x**2
 
     # For x = 1, f(x) = 1, f'(x) = 2*1 = 2
-    assert ode_is_stable(quadratic_func, 1.0, d, 0.5) == False  # dt = 0.5, 2 / |2| = 1, 0.5 < 1
-    assert ode_is_stable(quadratic_func, 1.0, d, 2.0) == True  # dt = 2, 2 / |2| = 1, 2 > 1
+    assert (
+        ode_is_stable(quadratic_func, 1.0, d, 0.5) == False
+    )  # dt = 0.5, 2 / |2| = 1, 0.5 < 1
+    assert (
+        ode_is_stable(quadratic_func, 1.0, d, 2.0) == True
+    )  # dt = 2, 2 / |2| = 1, 2 > 1
 
     # Test with a linear function with negative slope
     def linear_negative(x, d):
         return -2 * x  # lambda = -2
 
-    assert ode_is_stable(linear_negative, 1.0, d, 0.25) == True  # dt = 0.25, 2 / |-2| = 1, 0.25 < 1
-    assert ode_is_stable(linear_negative, 1.0, d, 2.0) == True  # dt = 2, 2 / |-2| = 1, 2 > 1
+    assert (
+        ode_is_stable(linear_negative, 1.0, d, 0.25) == True
+    )  # dt = 0.25, 2 / |-2| = 1, 0.25 < 1
+    assert (
+        ode_is_stable(linear_negative, 1.0, d, 2.0) == True
+    )  # dt = 2, 2 / |-2| = 1, 2 > 1
 
     # Test with a linear function with positive slope
     def linear_positive(x, d):
         return 2 * x  # lambda = 2
 
-    assert ode_is_stable(linear_positive, 1.0, d, 0.25) == False  # dt = 0.25, 2 / |2| = 1, 0.25 < 1
-    assert ode_is_stable(linear_positive, 1.0, d, 2.0) == True  # dt = 2, 2 / |2| = 1, 2 > 1
+    assert (
+        ode_is_stable(linear_positive, 1.0, d, 0.25) == False
+    )  # dt = 0.25, 2 / |2| = 1, 0.25 < 1
+    assert (
+        ode_is_stable(linear_positive, 1.0, d, 2.0) == True
+    )  # dt = 2, 2 / |2| = 1, 2 > 1
