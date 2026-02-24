@@ -102,11 +102,8 @@ class ReactiveTransportZone:
 
     def __init__(
         self,
-        monod: MonodParameters,
-        tst: TstParameters,
-        eq: EquilibriumParameters,
-        aux: MineralParameters,
-        misc: MiscData,
+        network: ReactionNetwork,
+        params: dict[str, MineralAuxParams],
         name: str = "unnamed",
     ) -> None:
         """
@@ -136,20 +133,6 @@ class ReactiveTransportZone:
         parameter object contains the specific information needed for the
         corresponding type of process.
         """
-        self.name: str = name
-        self.monod: MonodParameters = monod
-        self.tst: TstParameters = tst
-        self.eq: EquilibriumParameters = eq
-        self.aux: MineralParameters = aux
-        self.misc: MiscData = misc
-
-    @staticmethod
-    def from_network(
-        network: ReactionNetwork,
-        params: dict[str, MineralAuxParams],
-        name: str = "unnamed",
-    ) -> ReactiveTransportZone:
-        """Convert this object into a reactive transport zone from the parameters and reaction network"""
         monod: MonodParameters = network.monod_params
         tst: TstParameters = network.tst_params
         eq: EquilibriumParameters = network.equilibrium_parameters
@@ -170,9 +153,13 @@ class ReactiveTransportZone:
             mineral_molar_mass=min_molar_mass,
         )
 
-        return ReactiveTransportZone(
-            monod=monod, tst=tst, eq=eq, aux=minerals, misc=misc, name=name
-        )
+        self.name: str = name
+        self.monod: MonodParameters = monod
+        self.tst: TstParameters = tst
+        self.eq: EquilibriumParameters = eq
+        self.aux: MineralParameters = minerals
+        self.misc: MiscData = misc
+        self.name = name
 
     def mass_balance_ode(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
