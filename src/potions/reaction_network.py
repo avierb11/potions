@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Iterable
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,7 @@ import scipy.linalg as la
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from .common_types import Matrix, RtForcing, Vector
+from .common_types import RtForcing, Vector
 from .database import (
     ExchangeReaction,
     MineralKineticData,
@@ -182,6 +182,68 @@ class TstParameters:
 
 @dataclass(frozen=True)
 class EquilibriumParameters:
+    """
+    Container class for equilibrium parameters used in aqueous chemical equilibrium calculations.
+
+    This class stores all necessary parameters for solving equilibrium concentrations
+    in aqueous chemical reaction networks. It handles stoichiometric relationships,
+    equilibrium constants, and mass/charge balance constraints for chemical species.
+
+    The equilibrium parameters are used to calculate steady-state concentrations
+    of chemical species in aqueous solutions, taking into account thermodynamic
+    properties and reaction stoichiometry.
+
+    Attributes
+    ----------
+    stoich : pandas.DataFrame
+        Matrix describing the stoichiometry of the secondary species. Each row
+        represents a constraint (mass balance, charge balance) and each column
+        represents a secondary species. The matrix defines the relationship
+        between species concentrations in the equilibrium system.
+    log_eq_consts : pandas.Series
+        Vector of the equilibrium constants for the secondary species in log10 scale.
+        These constants determine the ratio of product concentrations to reactant
+        concentrations at equilibrium, expressed in base-10 logarithmic form for
+        numerical stability.
+    total : pandas.DataFrame
+        Matrix describing the mass and charge balance of the species. This matrix
+        defines how the total concentrations of primary species relate to the
+        concentrations of secondary species in the system.
+
+    Examples
+    --------
+    >>> # Create equilibrium parameters from species data
+    >>> params = EquilibriumParameters.from_species(
+    ...     species=species_series,
+    ...     primary=primary_species_list,
+    ...     secondary=secondary_species_list,
+    ...     exchange=exchange_reactions_list
+    ... )
+
+    >>> # Solve equilibrium concentrations
+    >>> concentrations = params.solve_equilibrium(concentrations_vector)
+
+    Notes
+    -----
+    The EquilibriumParameters class is designed for aqueous chemical systems where
+    the equilibrium is determined by:
+
+    1. Stoichiometric relationships between species
+    2. Equilibrium constants for reactions
+    3. Mass and charge conservation constraints
+
+    The logarithmic representation of equilibrium constants (log10 scale) provides
+    numerical stability for calculations involving very large or very small constants.
+
+    The class uses linear algebra operations to solve the constrained equilibrium
+    problem, where:
+
+    - The stoichiometry matrix defines the relationship between species
+    - The null space of stoichiometry provides the degrees of freedom
+    - The particular solution gives the equilibrium concentrations for a reference
+    - Total concentrations are used to solve for the actual equilibrium distribution
+    """
+
     stoich: DataFrame  # Matrix describing the stoichiometry of the secondary species
     log_eq_consts: Series  # Vector of the equilibrium constants for the secondary species in log10 scale
     total: DataFrame  # Matrix describing the mass and charge balance of the species
@@ -194,30 +256,156 @@ class EquilibriumParameters:
         exchange: list[ExchangeReaction],
     ) -> EquilibriumParameters:
         """
-        Construct the equilibrium parameters from the database
+        Construct the equilibrium parameters from the database species information.
+
+        This static method creates an EquilibriumParameters object by processing
+        the database information about primary and secondary species, as well as
+        exchange reactions to build the stoichiometric matrices and equilibrium
+        constant vectors needed for equilibrium calculations.
+
+        Parameters
+        ----------
+        species : pandas.Series
+            Series containing species information from the database
+        primary : list of PrimaryAqueousSpecies
+            List of primary aqueous species in the system
+        secondary : list of SecondarySpecies
+            List of secondary species formed from primary species
+        exchange : list of ExchangeReaction
+            List of exchange reactions that define the relationships between
+            species in the system
+
+        Returns
+        -------
+        EquilibriumParameters
+            Initialized EquilibriumParameters object with stoichiometry and
+            equilibrium constants set up for equilibrium calculations
+
+        Raises
+        ------
+        NotImplementedError
+            This method is not yet implemented and raises an exception when called
+
+        Notes
+        -----
+        This method serves as the factory constructor for the EquilibriumParameters
+        class. It processes the database information to build the mathematical
+        framework needed for solving aqueous chemical equilibrium problems.
         """
         raise NotImplementedError()
 
     @property
-    def stoich_null_space(self) -> Matrix:
-        """Return the null space of the stoichiometry matrix"""
-        return la.null_space(self.stoich)  # type: ignore
+    def stoich_null_space(self) -> NDArray:
+        """
+        Return the null space of the stoichiometry matrix.
+
+        The null space represents the degrees of freedom in the equilibrium system.
+        Any vector in the null space corresponds to a valid set of concentrations
+        that satisfy the stoichiometric constraints.
+
+        Returns
+        -------
+        numpy.ndarray
+            Matrix whose columns form a basis for the null space of the stoichiometry
+            matrix. Each column represents an independent degree of freedom in the
+            equilibrium system.
+
+        Notes
+        -----
+        The null space is computed using linear algebra operations and provides
+        the mathematical foundation for solving the equilibrium problem. It
+        represents the space of all possible concentration distributions that
+        satisfy the stoichiometric constraints.
+        """
+        return la.null_space(self.stoich)
 
     @property
-    def log10_k_w(self) -> Vector:
-        """Return a vector of the equilibrium constants in base-10 logarithm"""
+    def log10_k_w(self) -> NDArray:
+        """
+        Return a vector of the equilibrium constants in base-10 logarithm.
+
+        This property provides the equilibrium constants in logarithmic scale,
+        which is more numerically stable for calculations involving very large
+        or very small equilibrium constants.
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector of equilibrium constants in base-10 logarithmic scale,
+            corresponding to the secondary species in the system.
+
+        Notes
+        -----
+        The logarithmic representation is used throughout the equilibrium
+        calculations to avoid numerical overflow or underflow issues that
+        could occur with direct exponential representations of equilibrium
+        constants.
+        """
         return self.log_eq_consts.to_numpy()
 
     @property
-    def x_particular(self) -> Vector:
+    def x_particular(self) -> NDArray:
         """
-        Return a vector of the particular solution of the null space of the stoichiometry
+        Return a vector of the particular solution of the null space of the stoichiometry.
+
+        This particular solution represents a specific equilibrium concentration
+        distribution that satisfies the stoichiometric constraints. It is used
+        as a reference point in the equilibrium calculation.
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector representing a particular solution to the equilibrium problem,
+            derived from the pseudo-inverse of the stoichiometry matrix and the
+            logarithmic equilibrium constants.
+
+        Notes
+        -----
+        The particular solution is computed as: x_particular = pinv(stoich) @ log10_k_w
+        This provides a reference equilibrium state that can be combined with
+        the null space to find all possible equilibrium solutions.
         """
-        return la.pinv(self.stoich) @ self.log10_k_w  # type: ignore
+        return la.pinv(self.stoich) @ self.log10_k_w
 
     def solve_equilibrium(self, chms: NDArray, debug: bool = False) -> NDArray:
         """
-        Solve for the equilibrium concentrations of all of the species
+        Solve for the equilibrium concentrations of all of the species.
+
+        This method calculates the equilibrium concentrations of all chemical
+        species in the system given the total concentrations of primary species.
+
+        Parameters
+        ----------
+        chms : numpy.ndarray
+            Vector of total concentrations of primary species in the system.
+            These represent the initial conditions for the equilibrium calculation.
+        debug : bool, optional
+            If True, print debug information including the total concentrations
+            and intermediate calculation steps (default: False)
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector of equilibrium concentrations for all secondary species in
+            logarithmic scale (base-10). Each element represents the log10 of the
+            equilibrium concentration of the corresponding species.
+
+        Notes
+        -----
+        The equilibrium calculation uses a root-finding algorithm to solve the
+        system of equations that represent the mass balance constraints and
+        equilibrium relationships. The method:
+
+        1. Computes total concentrations from primary species concentrations
+        2. Defines a function that relates total concentrations to equilibrium
+           concentrations
+        3. Uses a multi-dimensional root solver to find the equilibrium solution
+        4. Returns the logarithmic equilibrium concentrations
+
+        The solution is based on the relationship:
+        c_eq = 10^(null_space @ tot_conc + x_particular)
+        where c_eq represents equilibrium concentrations and tot_conc represents
+        total concentrations.
         """
         c_tot: Final[NDArray] = (
             self.total.values @ chms
@@ -227,7 +415,17 @@ class EquilibriumParameters:
 
         def conc(tot_conc: NDArray) -> NDArray:
             """
-            Return a vector of the aqueous concentrations in base-10 logarithm
+            Return a vector of the aqueous concentrations in base-10 logarithm.
+
+            Parameters
+            ----------
+            tot_conc : numpy.ndarray
+                Vector of total concentrations
+
+            Returns
+            -------
+            numpy.ndarray
+                Vector of logarithmic aqueous concentrations
             """
             return 10 ** (self.stoich_null_space @ tot_conc + self.x_particular)
 
@@ -242,28 +440,11 @@ class EquilibriumParameters:
         return new_conc
 
 
-class MineralParameters:
-    def __init__(
-        self,
-        volume_fraction: NDArray,
-        ssa: NDArray,
-        rate_const: NDArray,
-    ) -> None:
-        self.volume_fraction: NDArray = (
-            volume_fraction  # Volume fraction of each mineral species in grams mineral/grams solid
-        )
-        self.ssa: NDArray = (
-            ssa  # Specific surface area in units of m^2 mineral surface area / grams mineral
-        )
-        self.rate_const: NDArray = rate_const  # Rate constant for the reactions
-
-    @property
-    def surface_area(self) -> NDArray:
-        return self.volume_fraction * self.ssa  # type: ignore
-
-
 @dataclass(frozen=True)
 class MineralAuxParams:
+    volume_fraction: float  # Volume fraction of this mineral
+    ssa: float  # Specific surface area in units of g/mol
+    rate_const: float  # Reaction rate constant in units of moles per second per square meter (mol/m^2/s)
     sw_threshold: float
     sw_exp: float
     n_alpha: float
@@ -278,35 +459,27 @@ class ZoneDimensions:
 
 
 @dataclass(frozen=True)
-class AuxiliaryParameters:
+class MineralParameters:
     sw_threshold: NDArray  # The soil water threshold
     sw_exp: NDArray  # The soil water exponent
     n_alpha: NDArray  # The water table depth factor
     q_10: NDArray  # The temperature factor range
-    porosity: float  # Porosity of this zone, must be in the range (0, 1)
-    depth: float  # Depth of this zone, in millimeters
-    passive_water_storage: float  # Passive water storage in this zone
+    volume_fraction: NDArray  # The volume fraction of the mineral in the subsurface
+    ssa: NDArray  # The specific surface area in units of g/mol
+    rate_const: NDArray  # The reaction rate constant in units of moles per second per square meter (mol/m^2/s)
 
     @staticmethod
     def from_minerals(
         min_params: list[MineralAuxParams], zone_params: ZoneDimensions
-    ) -> AuxiliaryParameters:
-        sw_thresholds: np.ndarray = np.array(
-            list(map(lambda x: x.sw_threshold, min_params))
-        )
-        sw_exps: np.ndarray = np.array(list(map(lambda x: x.sw_exp, min_params)))
-        n_alphas: np.ndarray = np.array(list(map(lambda x: x.n_alpha, min_params)))
-        q_10s: np.ndarray = np.array(list(map(lambda x: x.q_10, min_params)))
+    ) -> MineralParameters:
+        # sw_thresholds: np.ndarray = np.array(
+        #     list(map(lambda x: x.sw_threshold, min_params))
+        # )
+        # sw_exps: np.ndarray = np.array(list(map(lambda x: x.sw_exp, min_params)))
+        # n_alphas: np.ndarray = np.array(list(map(lambda x: x.n_alpha, min_params)))
+        # q_10s: np.ndarray = np.array(list(map(lambda x: x.q_10, min_params)))
 
-        return AuxiliaryParameters(
-            sw_threshold=sw_thresholds,
-            sw_exp=sw_exps,
-            n_alpha=n_alphas,
-            q_10=q_10s,
-            porosity=zone_params.porosity,
-            depth=zone_params.depth,
-            passive_water_storage=zone_params.passive_water_storage,
-        )
+        raise NotImplementedError()
 
     def soil_water_factor(self, forc: RtForcing) -> Vector:
         """
@@ -349,6 +522,43 @@ class AuxiliaryParameters:
         """
         return self.soil_water_factor(forc) * self.temperature_factor(forc) * self.water_table_factor(forc)  # type: ignore
 
+    @staticmethod
+    def from_mineral_parameters(
+        minerals: Iterable[MineralAuxParams],
+    ) -> MineralParameters:
+        """Take a list of mineral parameters and convert them into an aggregation"""
+        sw_thrs: list[float] = []
+        sw_exps: list[float] = []
+        n_alphas: list[float] = []
+        q_10s: list[float] = []
+        ssas: list[float] = []
+        rate_consts: list[float] = []
+        vol_fracs: list[float] = []
+
+        for m in minerals:
+            sw_thrs.append(m.sw_threshold)
+            sw_exps.append(m.sw_exp)
+            n_alphas.append(m.n_alpha)
+            q_10s.append(m.q_10)
+            ssas.append(m.ssa)
+            rate_consts.append(m.rate_const)
+            vol_fracs.append(m.volume_fraction)
+        return MineralParameters(
+            sw_threshold=np.array(sw_thrs),
+            sw_exp=np.array(sw_exps),
+            n_alpha=np.array(n_alphas),
+            q_10=np.array(q_10s),
+            ssa=np.array(ssas),
+            rate_const=np.array(rate_consts),
+            volume_fraction=np.array(vol_fracs),
+        )
+
+
+@dataclass(frozen=True)
+class ReactiveTransportParameters:
+    dimensions: ZoneDimensions
+    mineral_params: MineralParameters
+
 
 class ReactionNetwork:
 
@@ -358,23 +568,23 @@ class ReactionNetwork:
         mineral: list[MineralSpecies],
         secondary: list[SecondarySpecies],
         mineral_kinetics: MineralKineticData,
-        exchange: list[ExchangeReaction],
+        # exchange: list[ExchangeReaction],
     ) -> None:
         self.primary_aqueous: list[PrimaryAqueousSpecies] = primary_aqueous
         self.mineral: list[MineralSpecies] = mineral
         self.secondary: list[SecondarySpecies] = secondary
         self.mineral_kinetics: MineralKineticData = mineral_kinetics
-        self.exchange: list[ExchangeReaction] = exchange
+        # self.exchange: list[ExchangeReaction] = exchange
 
         species_types: list[str] = ["primary"] * len(primary_aqueous) + [
             "secondary"
         ] * len(secondary)
         names: list[str] = [x.name for x in primary_aqueous + secondary]
-        if exchange:
-            species_types += ["exchange"] * len(exchange)
-            names += [x.name for x in exchange]
-            names.insert(len(primary_aqueous), "X-")
-            species_types.insert(len(primary_aqueous), "exchange")
+        # if exchange:
+        #     species_types += ["exchange"] * len(exchange)
+        #     names += [x.name for x in exchange]
+        #     names.insert(len(primary_aqueous), "X-")
+        #     species_types.insert(len(primary_aqueous), "exchange")
 
         species_types += ["mineral"] * len(mineral)
         names += [x.name for x in mineral]
@@ -392,7 +602,8 @@ class ReactionNetwork:
         """
         Boolean test for whether or not there are exchange species included in this reaction network
         """
-        return bool(self.exchange)
+        # return bool(self.exchange)
+        return False
 
     @property
     def charges(self) -> Series[float]:
@@ -401,7 +612,8 @@ class ReactionNetwork:
         """
         charge_df: DataFrame = self.species.copy()
         charge_df["charge"] = 0.0
-        for spec in self.primary_aqueous + self.secondary + self.exchange:
+        # for spec in self.primary_aqueous + self.secondary + self.exchange:
+        for spec in self.primary_aqueous + self.secondary:
             charge_df.loc[spec.name, "charge"] = spec.charge
 
         charge_df.loc["X-", "charge"] = -1.0
@@ -439,7 +651,8 @@ class ReactionNetwork:
         """
         # Construct the mass and charge conservation matrix
         mass_stoich_df: DataFrame = self.species
-        for spec in self.secondary + self.exchange:
+        # for spec in self.secondary + self.exchange:
+        for spec in self.secondary:
             mass_stoich_df[spec.name] = spec.stoichiometry
 
         total_species: list[str] = mass_stoich_df.loc[
@@ -473,7 +686,8 @@ class ReactionNetwork:
 
         # Construct the stoichiometry matrix
         sec_stoich_df: DataFrame = self.species
-        for spec in self.secondary + self.exchange:
+        # for spec in self.secondary + self.exchange:
+        for spec in self.secondary:
             sec_stoich_df[spec.name] = spec.stoichiometry
         sec_stoich_df = (
             sec_stoich_df.drop(columns=["type"]).fillna(0.0).T[self.species_order]
@@ -482,9 +696,10 @@ class ReactionNetwork:
         sec_eq_vec: Series = Series(
             np.array(
                 [x.eq_consts[1] for x in self.secondary]
-                + [x.log10_k_eq for x in self.exchange]
+                # + [x.log10_k_eq for x in self.exchange]
             ),
-            index=[x.name for x in self.secondary + self.exchange],
+            # index=[x.name for x in self.secondary + self.exchange],
+            index=[x.name for x in self.secondary],
         )
 
         return EquilibriumParameters(
@@ -581,3 +796,8 @@ class ReactionNetwork:
         """
         mobile_vals = self.species["type"] != "mineral"
         return mobile_vals.to_numpy()
+
+    @property
+    def mineral_molar_masses(self) -> NDArray:
+        """The molar masses of each of the minerals"""
+        return np.array([x.molar_mass for x in self.mineral])

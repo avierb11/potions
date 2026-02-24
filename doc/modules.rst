@@ -11,6 +11,7 @@ API Reference
    objective_functions
    utils
    common_types
+   reaction_network
 
 
 

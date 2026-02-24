@@ -46,15 +46,16 @@ __all__ = [
     "nse",
     "objective_high_flow",
     "objective_low_flow",
-    "AuxiliaryParameters",
-    "EquilibriumParameters",
     "MineralParameters",
+    "EquilibriumParameters",
+    "MinConcParameters",
     "MonodParameters",
     "ReactionNetwork",
     "TstParameters",
     "ReactiveTransportZone",
     "RtStep",
     "objective_function",
+    "MineralAuxParams"
 ]
 
 from .common_types import ChemicalState, LapseRateParameters, RtForcing
@@ -94,12 +95,12 @@ from .model import (
 )
 from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
 from .reaction_network import (
-    AuxiliaryParameters,
-    EquilibriumParameters,
     MineralParameters,
+    EquilibriumParameters,
     MonodParameters,
     ReactionNetwork,
     TstParameters,
+    MineralAuxParams
 )
 from .reactive_transport import (
     ReactiveTransportZone,

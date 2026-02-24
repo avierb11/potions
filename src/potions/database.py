@@ -6,11 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import json
 import os
-from typing import Literal
-
-from pandas import DataFrame, Series
-
-from .utils import Matrix
+from typing import Iterable, Literal
 
 
 @dataclass(frozen=True)
@@ -178,21 +174,24 @@ class ChemicalDatabase:
 
 
     def get_primary_aqueous_species(
-        self, species_name: str | list[str]
+        self, species_name: str | Iterable[str]
     ) -> list[PrimaryAqueousSpecies]:
         """Get one or more mineral species from the database"""
         return [self.primary_species[name] for name in species_name]
 
 
     def get_mineral_species(
-        self, mineral_name: str | list[str]
+        self, mineral_name: str | Iterable[str]
     ) -> list[MineralSpecies]:
         """Get one or more mineral species from the database"""
-        return [self.mineral_species[name] for name in mineral_name]
+        if isinstance(mineral_name, str):
+            return [self.mineral_species[mineral_name]]
+        else:
+            return [self.mineral_species[name] for name in mineral_name]
 
 
     def get_secondary_species(
-        self, species_name: str | list[str]
+        self, species_name: str | Iterable[str]
     ) -> list[SecondarySpecies]:
         """Get the secondary species by also providing the primary species to ensure that the reactions are valid.
         If a secondary species contains a primary species not included in `primary`, an error will be thrown to prevent
@@ -238,7 +237,7 @@ class ChemicalDatabase:
             "monod": []
         }
 
-        for mineral, label in zip(mineral_names, labels): # type: ignore
+        for mineral, label in zip(mineral_names, labels, strict=True): # type: ignore
             reaction_type, reaction = self.get_single_mineral_reaction(mineral, label) # type: ignore
             mineral_reactions[reaction_type].append(reaction)
 

@@ -8,18 +8,20 @@ from scipy.integrate import solve_ivp
 
 from .common_types import RtForcing
 from .reaction_network import (
-    AuxiliaryParameters,
-    EquilibriumParameters,
+    MineralAuxParams,
     MineralParameters,
+    EquilibriumParameters,
     MonodParameters,
+    ReactionNetwork,
     TstParameters,
 )
 
 
 @dataclass(frozen=True)
 class MiscData:
-    mineral_stoichiometry: NDArray
-    species_mobility: NDArray
+    mineral_stoichiometry: NDArray  # Matrix describing the stoichiometry of the mineral dissolution reactions
+    species_mobility: NDArray  # Boolean vector describing whether each species is mobile or not. All aqueous species are mobile, and all mineral species are immobile.
+    mineral_molar_mass: NDArray  # The molar mass of each of the minerals
 
 
 @dataclass(frozen=True)
@@ -34,16 +36,68 @@ class RtStep:
 
 
 class ReactiveTransportZone:
-    """A zone that solves reactive transport
+    """
+    A zone that solves reactive transport processes in hydrologic systems.
 
-    This class acts as an ODE solver and orchestrator. It is initialized with
-    functions that define the specific transport and kinetic reaction logic.
-    This allows for a flexible definition of the model's biogeochemistry without
-    hard-coding it into the zone itself.
+    This class acts as an ODE solver and orchestrator for reactive transport
+    calculations in hydrologic zones. It is initialized with functions and
+    parameters that define the specific transport and kinetic reaction logic,
+    allowing for flexible definition of biogeochemical processes without
+    hard-coding them into the zone itself.
 
-    The `step` method uses operator splitting:
-    1. Solves the ODE for transport and kinetic reactions.
-    2. Solves for instantaneous chemical equilibrium.
+    The class implements operator splitting to handle both transport and
+    chemical reaction processes separately, then combines them to solve
+    for the complete reactive transport behavior in the zone.
+
+    Attributes
+    ----------
+    name : str
+        Identifier name for the reactive transport zone
+    monod : MonodParameters
+        Parameters for Monod-type reaction kinetics
+    tst : TstParameters
+        Parameters for TST-type (Two-Stage Transport) reaction kinetics
+    eq : EquilibriumParameters
+        Parameters for equilibrium calculations of chemical species
+    aux : AuxiliaryParameters
+        Auxiliary parameters for environmental factors (temperature, moisture, etc.)
+    min : MineralParameters
+        Parameters for mineral reaction kinetics and stoichiometry
+    misc : MiscData
+        Miscellaneous data and configuration parameters
+
+    Examples
+    --------
+    >>> # Initialize a reactive transport zone
+    >>> zone = ReactiveTransportZone(
+    ...     monod=monod_params,
+    ...     tst=tst_params,
+    ...     eq=equilibrium_params,
+    ...     aux=aux_params,
+    ...     min=mineral_params,
+    ...     misc=misc_data,
+    ...     name="zone_1"
+    ... )
+
+    >>> # Advance the chemical state by one time step
+    >>> result = zone.step(
+    ...     c_0=initial_concentrations,
+    ...     d=forcing_data,
+    ...     dt=time_step,
+    ...     q_in=water_inflow_rate
+    ... )
+
+    Notes
+    -----
+    The ReactiveTransportZone implements operator splitting to handle the
+    complex reactive transport problem:
+
+    1. Transport and kinetic reactions are solved first using ODE integration
+    2. Chemical equilibrium is then computed for the resulting concentrations
+    3. Output fluxes are calculated for mass balance and reporting
+
+    This approach allows for efficient computation while maintaining accuracy
+    in both transport and reaction processes.
     """
 
     def __init__(
@@ -51,26 +105,105 @@ class ReactiveTransportZone:
         monod: MonodParameters,
         tst: TstParameters,
         eq: EquilibriumParameters,
-        aux: AuxiliaryParameters,
-        min: MineralParameters,
+        aux: MineralParameters,
         misc: MiscData,
         name: str = "unnamed",
     ) -> None:
-        """Initializes the zone with specific logic functions and parameters."""
+        """
+        Initializes the zone with specific parameters.
+
+        Parameters
+        ----------
+        monod : MonodParameters
+            Parameters for Monod-type reaction kinetics
+        tst : TstParameters
+            Parameters for TST-type (Two-Stage Transport) reaction kinetics
+        eq : EquilibriumParameters
+            Parameters for equilibrium calculations of chemical species
+        aux : AuxiliaryParameters
+            Auxiliary parameters for environmental factors (temperature, moisture, etc.)
+        min : MineralParameters
+            Parameters for mineral reaction kinetics and stoichiometry
+        misc : MiscData
+            Miscellaneous data and configuration parameters
+        name : str, optional
+            Identifier name for the reactive transport zone (default: "unnamed")
+
+        Notes
+        -----
+        The initialization sets up all the necessary components for solving
+        reactive transport problems in this specific hydrologic zone. Each
+        parameter object contains the specific information needed for the
+        corresponding type of process.
+        """
         self.name: str = name
         self.monod: MonodParameters = monod
         self.tst: TstParameters = tst
         self.eq: EquilibriumParameters = eq
-        self.aux: AuxiliaryParameters = aux
-        self.min: MineralParameters = min
+        self.aux: MineralParameters = aux
         self.misc: MiscData = misc
 
-    def mass_balance_ode(self, chms: NDArray, d: RtForcing) -> NDArray:
-        """Calculates the net rate of change of concentration (dC/dt).
+    @staticmethod
+    def from_network(
+        network: ReactionNetwork,
+        params: dict[str, MineralAuxParams],
+        name: str = "unnamed",
+    ) -> ReactiveTransportZone:
+        """Convert this object into a reactive transport zone from the parameters and reaction network"""
+        monod: MonodParameters = network.monod_params
+        tst: TstParameters = network.tst_params
+        eq: EquilibriumParameters = network.equilibrium_parameters
+        min_params: list[MineralAuxParams] = []
+        for m in network.mineral:
+            min_params.append(params[m.name])
+        minerals: MineralParameters = MineralParameters.from_mineral_parameters(
+            min_params
+        )
 
-        This method is conceptually based on the reactive transport equation, where the change in mass
-        comes from the change from transports and the change due to transport:
+        stoich = network.mineral_stoichiometry
+        mobility = network.transport_mask
+        min_molar_mass = network.mineral_molar_masses
+
+        misc = MiscData(
+            mineral_stoichiometry=stoich.values,
+            species_mobility=mobility,
+            mineral_molar_mass=min_molar_mass,
+        )
+
+        return ReactiveTransportZone(
+            monod=monod, tst=tst, eq=eq, aux=minerals, misc=misc, name=name
+        )
+
+    def mass_balance_ode(self, chms: NDArray, d: RtForcing) -> NDArray:
+        """
+        Calculates the net rate of change of concentration (dC/dt) for the mass balance ODE.
+
+        This method implements the reactive transport equation, where the change in mass
+        comes from both reaction processes and transport processes:
         dm/dt = (dm/dt)_reaction + (dm/dt)_transport
+
+        Parameters
+        ----------
+        chms : numpy.ndarray
+            Current concentrations of all chemical species in the zone
+        d : RtForcing
+            Forcing data containing hydrological and environmental conditions
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector of net rates of change of concentration for all species
+            (dC/dt) representing the total mass balance rate
+
+        Notes
+        -----
+        The mass balance ODE combines:
+        - Reaction rates from Monod and TST kinetics
+        - Transport rates from hydrological forcing
+        - Mineral reaction rates from the mineral parameters
+
+        This combined rate represents the total change in species concentrations
+        due to all processes occurring in the zone.
         """
         reaction_rate_vec: NDArray = self.reaction_rate(
             chms, d
@@ -82,7 +215,37 @@ class ReactiveTransportZone:
 
     def reaction_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
-        Calculate the rate of reaction for this time step - the rate that the primary species are produced or consumed
+        Calculate the rate of reaction for this time step - the rate that primary species are produced or consumed.
+
+        This method computes the net reaction rate for all primary species based on:
+        - Monod kinetics for biological reactions
+        - TST kinetics for transport-type reactions
+        - Auxiliary factors (temperature, moisture, etc.)
+        - Mineral reaction rates and stoichiometry
+
+        Parameters
+        ----------
+        chms : numpy.ndarray
+            Current concentrations of all chemical species in the zone
+        d : RtForcing
+            Forcing data containing environmental conditions
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector of reaction rates for primary species (positive = production, negative = consumption)
+
+        Notes
+        -----
+        The reaction rate calculation involves:
+        1. Computing Monod reaction rates for biological processes
+        2. Computing TST reaction rates for transport processes
+        3. Applying auxiliary factor modulation (temperature, moisture, etc.)
+        4. Calculating mineral reaction rates based on surface area and rate constants
+        5. Converting mineral rates to primary species rates using stoichiometry
+
+        The final result represents the net rate of change for all primary species
+        due to all reaction processes occurring in the zone.
         """
         monod_rate: NDArray = self.monod.rate(
             chms
@@ -94,9 +257,14 @@ class ReactiveTransportZone:
             d
         )  # Reaction rate modulation from soil moisture, temperature, and water table factors
 
+        num_min: int = self.monod.inhib_mat.shape[0]
+        min_conc: NDArray = chms[-num_min:]  # Get just the mineral concentrations
+
         mineral_rates: NDArray = (
-            self.min.rate_const
-            * self.min.surface_area
+            self.aux.rate_const
+            * self.aux.ssa
+            * self.misc.mineral_molar_mass
+            * min_conc
             * aux_rate
             * (monod_rate + tst_rate)
         )
@@ -107,8 +275,35 @@ class ReactiveTransportZone:
 
     def transport_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
-        Calculate the rate of transport for this time step for each of the aqueous species, including primary and secondary species
-        This also includes the external transport into the zone.
+        Calculate the rate of transport for this time step for each aqueous species.
+
+        This method computes the transport rate for each species based on:
+        - Water inflow and outflow rates
+        - Concentrations of species in inflow and current state
+        - Mobility status of each species (mobile vs. immobile)
+
+        Parameters
+        ----------
+        chms : numpy.ndarray
+            Current concentrations of all chemical species in the zone
+        d : RtForcing
+            Forcing data containing hydrological conditions
+
+        Returns
+        -------
+        numpy.ndarray
+            Vector of transport rates for each species (positive = inflow, negative = outflow)
+
+        Notes
+        -----
+        Transport calculations include:
+        1. Mass inflow from external sources (q_in * conc_in)
+        2. Mass outflow from the zone (q_out * chms)
+        3. Setting immobile species (minerals) to zero transport rate
+        4. Accounting for water table and hydrological conditions
+
+        The transport rate represents the net change in mass due to hydrological
+        transport processes in the zone.
         """
         mass_in: NDArray = d.hydro_forc.q_in * d.conc_in
         # mass_out: NDArray = (d.q_in / d.storage) * (d.conc_in - chms)
@@ -124,7 +319,44 @@ class ReactiveTransportZone:
     def step(
         self, c_0: NDArray, d: RtForcing, dt: float, q_in: float, debug: bool = False
     ) -> RtStep:
-        """Advances the chemical state by one time step."""
+        """
+        Advances the chemical state by one time step using operator splitting.
+
+        This method implements the complete reactive transport solution using
+        operator splitting where:
+        1. Transport and kinetic reactions are solved first using ODE integration
+        2. Chemical equilibrium is computed for the resulting concentrations
+
+        Parameters
+        ----------
+        c_0 : numpy.ndarray
+            Initial concentrations of all chemical species in the zone
+        d : RtForcing
+            Forcing data containing hydrological and environmental conditions
+        dt : float
+            Time step size for the calculation
+        q_in : float
+            Water inflow rate to the zone
+        debug : bool, optional
+            If True, print debug information including intermediate results
+            (default: False)
+
+        Returns
+        -------
+        RtStep
+            Result containing the final state and fluxes for the time step
+
+        Notes
+        -----
+        The step method implements the following sequence:
+        1. Solve ODE for transport and kinetic reactions using solve_ivp
+        2. Apply chemical equilibrium calculations to the resulting concentrations
+        3. Calculate output fluxes (latitudinal and vertical) based on final concentrations
+        4. Return complete time step results including state and fluxes
+
+        This operator splitting approach allows for efficient computation while
+        maintaining accuracy in both transport and reaction processes.
+        """
 
         # 1. Solve the ODE for kinetic reactions and transport
         def ode(_t: float, c: NDArray) -> NDArray:
@@ -179,7 +411,28 @@ class ReactiveTransportZone:
         )
 
     def columns(self, zone_id: int) -> list[str]:
-        """Gets the column names for this zone for the output DataFrame."""
+        """
+        Gets the column names for this zone for the output DataFrame.
+
+        Parameters
+        ----------
+        zone_id : int
+            Identifier for the specific zone to generate column names for
+
+        Returns
+        -------
+        list[str]
+            List of column names for output DataFrame including:
+            - Concentration columns
+            - Flux columns (forcing, vapor, lateral, vertical)
+
+        Notes
+        -----
+        The column names are generated based on the zone identifier and
+        follow a consistent naming convention for easy data handling and
+        analysis. The naming convention includes the zone name and ID to
+        distinguish between different zones in multi-zone simulations.
+        """
         # This will need to be updated based on the number of species.
         name = f"{self.name}_{zone_id}"
         return [

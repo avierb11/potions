@@ -77,12 +77,11 @@ class LapseRateParameters:
 class ChemicalState:
     """Represents the chemical state of a zone, partitioned by species type."""
 
-    prim_aq_conc: NDArray
-    min_conc: NDArray
-    sec_conc: NDArray
-    exchange_conc: NDArray
+    prim_aq_conc: NDArray # Primary aqueous species concentrations
+    sec_conc: NDArray # Secondary species concentrations
+    min_conc: NDArray # Mineral concentrations
 
-    def to_primary_array(self) -> Vector:
+    def to_primary_array(self) -> NDArray:
         """Concatenates primary aqueous and mineral species into a single array."""
         return np.concatenate([self.prim_aq_conc, self.min_conc])  # type: ignore
 
@@ -91,7 +90,7 @@ class ChemicalState:
         raise NotImplementedError()
 
     @property
-    def aqueous_concentrations(self) -> Vector:
+    def aqueous_concentrations(self) -> NDArray:
         """
         Get a vector of aqueous concentrations, including primary and secondary
         """

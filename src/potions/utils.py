@@ -4,8 +4,7 @@ from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from potions.common_types_compiled import HydroForcing
-from potions.common_types import ForcingData
+from .common_types import ForcingData
 
 # ==== Types ==== #
 
@@ -99,7 +98,7 @@ def log_prior(params: np.ndarray, bounds: dict[str, tuple[float, float]]) -> flo
     """
     Computes the log prior probability for a given set of parameters.
     """
-    for param, (min_val, max_val) in zip(params, bounds.values()):
+    for param, (min_val, max_val) in zip(params, bounds.values(), strict=True):
         if param < min_val or param > max_val:
             return -np.inf
     return 0.0
@@ -155,7 +154,7 @@ def jac(
     """Numerically estimate the jacobian matrix using a finite difference approximation"""
     jac_mat = np.zeros((x.size, x.size), dtype=np.float64)
 
-    for i, x_i in enumerate(x):
+    for i, _x_i in enumerate(x):
         x_up = x.copy()
         x_dn = x.copy()
         x_up[i] += dx
