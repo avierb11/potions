@@ -55,7 +55,9 @@ __all__ = [
     "ReactiveTransportZone",
     "RtStep",
     "objective_function",
-    "MineralAuxParams"
+    "MineralAuxParams",
+    "ReactiveTransportParameters",
+    "ZoneDimensions"
 ]
 
 from .common_types import ChemicalState, LapseRateParameters, RtForcing
@@ -100,7 +102,9 @@ from .reaction_network import (
     MonodParameters,
     ReactionNetwork,
     TstParameters,
-    MineralAuxParams
+    MineralAuxParams,
+    ReactiveTransportParameters,
+    ZoneDimensions
 )
 from .reactive_transport import (
     ReactiveTransportZone,

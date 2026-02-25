@@ -444,7 +444,6 @@ class EquilibriumParameters:
 class MineralAuxParams:
     volume_fraction: float  # Volume fraction of this mineral
     ssa: float  # Specific surface area in units of g/mol
-    rate_const: float  # Reaction rate constant in units of moles per second per square meter (mol/m^2/s)
     sw_threshold: float
     sw_exp: float
     n_alpha: float
@@ -466,7 +465,6 @@ class MineralParameters:
     q_10: NDArray  # The temperature factor range
     volume_fraction: NDArray  # The volume fraction of the mineral in the subsurface
     ssa: NDArray  # The specific surface area in units of g/mol
-    rate_const: NDArray  # The reaction rate constant in units of moles per second per square meter (mol/m^2/s)
 
     @staticmethod
     def from_minerals(
@@ -532,7 +530,6 @@ class MineralParameters:
         n_alphas: list[float] = []
         q_10s: list[float] = []
         ssas: list[float] = []
-        rate_consts: list[float] = []
         vol_fracs: list[float] = []
 
         for m in minerals:
@@ -541,7 +538,6 @@ class MineralParameters:
             n_alphas.append(m.n_alpha)
             q_10s.append(m.q_10)
             ssas.append(m.ssa)
-            rate_consts.append(m.rate_const)
             vol_fracs.append(m.volume_fraction)
         return MineralParameters(
             sw_threshold=np.array(sw_thrs),
@@ -549,7 +545,6 @@ class MineralParameters:
             n_alpha=np.array(n_alphas),
             q_10=np.array(q_10s),
             ssa=np.array(ssas),
-            rate_const=np.array(rate_consts),
             volume_fraction=np.array(vol_fracs),
         )
 
@@ -801,3 +796,13 @@ class ReactionNetwork:
     def mineral_molar_masses(self) -> NDArray:
         """The molar masses of each of the minerals"""
         return np.array([x.molar_mass for x in self.mineral])
+
+    @property
+    def rate_consts(self) -> NDArray:
+        log10_rate_consts: list[float] = []
+        for m in self.mineral:
+            if m.name in self.mineral_kinetics.monod_reactions:
+                log10_rate_consts.append(self.mineral_kinetics.monod_reactions[m.name].rate_constant)
+            else:
+                log10_rate_consts.append(self.mineral_kinetics.tst_reactions[m.name].rate_constant)
+        return 10 ** np.array(log10_rate_consts)

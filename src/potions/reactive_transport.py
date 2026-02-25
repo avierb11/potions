@@ -22,6 +22,7 @@ class MiscData:
     mineral_stoichiometry: NDArray  # Matrix describing the stoichiometry of the mineral dissolution reactions
     species_mobility: NDArray  # Boolean vector describing whether each species is mobile or not. All aqueous species are mobile, and all mineral species are immobile.
     mineral_molar_mass: NDArray  # The molar mass of each of the minerals
+    rate_const: NDArray # The rate constants for the mineral reactions. Note that these are _not_ parameters. They are constants.
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ class ReactiveTransportZone:
             mineral_stoichiometry=stoich.values,
             species_mobility=mobility,
             mineral_molar_mass=min_molar_mass,
+            rate_const=network.rate_consts
         )
 
         self.name: str = name
@@ -248,7 +250,7 @@ class ReactiveTransportZone:
         min_conc: NDArray = chms[-num_min:]  # Get just the mineral concentrations
 
         mineral_rates: NDArray = (
-            self.aux.rate_const
+            self.misc.rate_const
             * self.aux.ssa
             * self.misc.mineral_molar_mass
             * min_conc

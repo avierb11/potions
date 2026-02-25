@@ -1,5 +1,4 @@
 from __future__ import annotations
-from abc import ABC
 import datetime
 import itertools
 from multiprocessing import Pool
@@ -28,7 +27,6 @@ import random
 from numpy import float64 as f64
 from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Index, Series, Timestamp
-import pandas as pd
 import scipy.optimize as opt
 
 from potions.common_types import ForcingData, LapseRateParameters
@@ -297,7 +295,7 @@ class Model:
 
     Example:
         >>> class MySimpleModel(Model):
-        ...     structure = [[SnowZone()], [SoilZone()]]
+        ...     structure = [[SnowZone()], [SurfaceZone()]]
         >>> model = MySimpleModel()
     """
 
@@ -350,7 +348,7 @@ class Model:
             else:
                 self.__zones[zone_name] = zone
 
-        # Construct the linear model
+        # Construct the lapse rates
         self.lapse_rates: list[LapseRateParameters] = lapse_rates
         layers: list[Layer] = []
         for layer in self.structure:
@@ -477,7 +475,7 @@ class Model:
     def step(
         self,
         state: NDArray[f64],
-        ds: list[HydroForcing],
+        ds: Iterable[HydroForcing],
         dt: float,
         check_water_balance: bool = False,
     ) -> ModelStep[float]:
@@ -513,7 +511,9 @@ class Model:
         zone: HydrologicZone
         s_i: float
         d_i: HydroForcing
-        for i, (zone, (s_i, d_i)) in enumerate(zip(self.flat_model, zip(state, ds))):
+        for i, (zone, (s_i, d_i)) in enumerate(
+            zip(self.flat_model, zip(state, ds, strict=True), strict=True)
+        ):
             # Calculate incoming flux using faster NumPy dot products
             # num_fluxes = len(lat_fluxes)
             num_fluxes = i + 1
@@ -669,16 +669,16 @@ class Model:
         """A class method to get column names for the final output DataFrame."""
         zone_names: list[str] = cls.get_zone_names()
         col_names: list[str] = []
-        for i, zone_name in enumerate(zone_names):
+        for _i, zone_name in enumerate(zone_names):
             col_names += [
-                f"s_{zone_name}_{i}",
-                f"q_forc_{zone_name}_{i}",
-                f"q_vap_{zone_name}_{i}",
-                f"q_lat_{zone_name}_{i}",
-                f"q_vert_{zone_name}_{i}",
-                f"q_in_{zone_name}_{i}",
-                f"q_lat_ext_{zone_name}_{i}",
-                f"q_vert_ext_{zone_name}_{i}",
+                f"s_{zone_name}",
+                f"q_forc_{zone_name}",
+                f"q_vap_{zone_name}",
+                f"q_lat_{zone_name}",
+                f"q_vert_{zone_name}",
+                f"q_in_{zone_name}",
+                f"q_lat_ext_{zone_name}",
+                f"q_vert_ext_{zone_name}",
             ]
         return col_names
 
@@ -686,6 +686,17 @@ class Model:
     def zone_labels(self) -> list[str]:
         """A list of zone labels for the final output DataFrame."""
         return [f"{zone.name}_{i}" for i, zone in enumerate(self.flat_model)]  # type: ignore
+
+    @property
+    def zone_indices(self) -> dict[str, int]:
+        zones: dict[str, int] = {}
+        counter: int = 0
+        for layer in self.structure:
+            for zone in layer:
+                zones[zone.name] = counter  # type: ignore
+                counter += 1
+
+        return zones
 
     # Newer definitions
     def construct_hydrologic_graph(self: Model):
@@ -903,7 +914,7 @@ class Model:
                 precip_factor=precip_factor,
             )
             for precip_factor, temp_factor in zip(
-                lapse_rate_params[::2], lapse_rate_params[1::2]
+                lapse_rate_params[::2], lapse_rate_params[1::2], strict=True
             )
         ]
 
@@ -1014,7 +1025,7 @@ class Model:
             for k, v in itertools.groupby(lapse_rates_grouped, lambda x: x[0])
         }
 
-        for k, v in lapse_rate_groups.items():
+        for _k, v in lapse_rate_groups.items():
             param_dict = {}
             for _, key, val in v:
                 param_dict[key] = val
@@ -1030,7 +1041,7 @@ class Model:
             name (str): The name of the zone.
 
         Returns:
-            type: The class of the specified zone (e.g., `SoilZone`).
+            type: The class of the specified zone (e.g., `SurfaceZone`).
         """
         for layer in cls.structure:
             for zone in layer:
@@ -1080,7 +1091,7 @@ class Model:
         Returns:
             HydroModelResults: A `HydroModelResults` dictionary.
         """
-        # Check the model structure
+        # Check the model structure to make sure that all of the zones are correct
         self._validate_model_structure()
 
         # Check if need initial state
@@ -1088,50 +1099,28 @@ class Model:
             init_state = self.default_init_state()
 
         # Construct the forcing data
-        forcing_data: list[ForcingData]
-        if isinstance(forc, ForcingData):
-            forcing_data = [forc] * self.num_surface_zones
-        else:
-            forcing_data = list(forc)  # type: ignore
-            if len(forcing_data) != 1:
-                if len(forcing_data) != self.num_surface_zones:
-                    raise ValueError(
-                        f"The number of forcing data series must be either 1 or {
-                            self.num_surface_zones
-                        }, not {len(forcing_data)}"
-                    )
-
-        # Scale the forcing data based on the lapse rates
-        if len(self.lapse_rates) > 0:
-            if average_elevation is None or elevations is None:
-                raise ValueError(
-                    "If using lapse rates, you must pass an average elevation and mean elevations for each band"
-                )
-
-            for i, (fd, lp, elev) in enumerate(
-                zip(forcing_data, self.lapse_rates, elevations)
-            ):
-                forcing_data[i] = lp.scale_forcing_data(
-                    gauge_elevation=average_elevation, elev=elev, forcing_data=fd
-                )
-
-        dates = forcing_data[0].precip.index
 
         # Run the model forwards
         model_res: DataFrame = run_hydro_model(
             model=self,
             init_state=init_state,
-            forc=forcing_data,
-            dates=dates,
+            forc=forc,
             check_water_balance=check_water_balance,
         )
+
+        river_zone_ids: list[int] = self.get_river_zone_ids()
+
+        def is_streamflow_col(x: str) -> bool:
+            if not x.startswith("q_lat_"):
+                return False
+
+            zone_name: str = x.replace("q_lat_", "")
+            return self.zone_indices[zone_name] in river_zone_ids
 
         streamflow_cols: list[str] = [
             col
             for col in model_res.columns
-            if "lat" in col
-            and (not "ext" in col)
-            and int(col.split("_")[-1]) in self.get_river_zone_ids()
+            if "lat" in col and ("ext" not in col) and is_streamflow_col(col)
         ]
 
         sim_streamflow = model_res[streamflow_cols].sum(axis=1)
@@ -1141,12 +1130,6 @@ class Model:
             model_res["meas_streamflow_mmd"] = meas_streamflow
 
         # Calculate objective functions
-        kge_val: Optional[float] = None
-        nse_val: Optional[float] = None
-        bias_val: Optional[float] = None
-        r_squared_val: Optional[float] = None
-        spearman_rho_val: Optional[float] = None
-
         obj_vals: dict[str, float] = {}
         if meas_streamflow is not None:
             if objective_functions is None:
@@ -1165,8 +1148,8 @@ class Model:
         props: dict[str, float] = {}
         for col_id in streamflow_ids:
             zone_name: str = zone_names[col_id]
-            col_name: str = f"q_lat_{zone_name}_{col_id}"
-            prop_name: str = f"prop_q_{zone_name}_{col_id}"
+            col_name: str = f"q_lat_{zone_name}"
+            prop_name: str = f"prop_q_{zone_name}"
             model_res[prop_name] = model_res[col_name] / model_res["sim_streamflow_mmd"]
             props[prop_name] = model_res[prop_name].mean()
 
@@ -1267,7 +1250,9 @@ class Model:
             num_threads = os.cpu_count()  # type: ignore
         if num_threads is None:
             num_threads = 1
-            warnings.warn("Failed to get number of threads, defaulting to 1")
+            warnings.warn(
+                "Failed to get number of threads, defaulting to 1", stacklevel=1
+            )
 
         with Pool(num_threads) as pool:
             results = pool.starmap(_run_model, args)  # type: ignore
@@ -1397,7 +1382,7 @@ class Model:
         )
 
         opt_params: dict[str, float] = {
-            key: val for key, val in zip(bounds.keys(), opt_res.x)
+            key: val for key, val in zip(bounds.keys(), opt_res.x, strict=True)
         }
 
         return opt_params, best_results, opt_res
@@ -1430,7 +1415,9 @@ class Model:
         bounds: dict = self.default_parameter_ranges(
             include_lapse_rates=include_lapse_rates
         )
-        for i, (x_i, (min_val, max_val)) in enumerate(zip(params, bounds.values())):
+        for i, (x_i, (min_val, max_val)) in enumerate(
+            zip(params, bounds.values(), strict=True)
+        ):
             # Compute the gradient at x_i using centered finite differences
             state_left = params.copy()
             state_right = params.copy()
@@ -1617,7 +1604,10 @@ class Model:
         Returns:
             dict[str, float]: A dictionary mapping parameter names to values.
         """
-        return {key: val for key, val in zip(self.parameter_names(), self.to_array())}
+        return {
+            key: val
+            for key, val in zip(self.parameter_names(), self.to_array(), strict=True)
+        }
 
     def to_series(self) -> Series:
         """Converts the model's parameters to a pandas Series.
@@ -1643,6 +1633,116 @@ class Model:
     def num_parameters(self) -> int:
         """The total number of tunable parameters in the model."""
         return len(self.to_array())
+
+    def construct_forcing_data(
+        self,
+        forc: ForcingData | list[ForcingData],
+        elevations: Optional[list[float]] = None,
+        average_elevation: Optional[float] = None,
+    ) -> NDArray[np.object_]:
+        """
+        Take the input of the forcing data and turn it into the Python formats that are useful for potions
+        """
+        # Construct the forcing data
+        forcing_data: list[ForcingData]
+        if isinstance(forc, ForcingData):
+            forcing_data = [forc] * self.num_surface_zones
+        else:
+            forcing_data = list(forc)  # type: ignore
+            if len(forcing_data) != 1:
+                if len(forcing_data) != self.num_surface_zones:
+                    raise ValueError(
+                        f"The number of forcing data series must be either 1 or {
+                            self.num_surface_zones
+                        }, not {len(forcing_data)}"
+                    )
+
+        # Scale the forcing data based on the lapse rates
+        if len(self.lapse_rates) > 0:
+            if average_elevation is None or elevations is None:
+                raise ValueError(
+                    "If using lapse rates, you must pass an average elevation and mean elevations for each band"
+                )
+
+            fd: ForcingData
+            for i, (fd, lp, elev) in enumerate(
+                zip(forcing_data, self.lapse_rates, elevations, strict=True)
+            ):
+                forcing_data[i] = lp.scale_forcing_data(
+                    gauge_elevation=average_elevation, elev=elev, forcing_data=fd
+                )
+
+        # Now, turn these into the values of
+        num_steps: Final[int] = len(forcing_data[0].precip)  # Number of steps
+
+        num_forcing_sources_expected: Final[int] = self.precip_mat.shape[1]
+
+        all_precip_sources_matrix: NDArray[f64]
+        all_temp_sources_matrix: NDArray[f64]
+        all_pet_sources_matrix: NDArray[f64]
+
+        # Validate and prepare source forcing matrices
+        if forcing_data:
+            if len(forcing_data) != num_forcing_sources_expected:
+                raise ValueError(
+                    f"Model expects {
+                        num_forcing_sources_expected} ForcingData objects, "
+                    f"but {len(forcing_data)} were provided in the 'forc' list."
+                )
+            for i, fd in enumerate(forcing_data):
+                if not (
+                    len(fd.precip) == num_steps
+                    and len(fd.temp) == num_steps
+                    and len(fd.pet) == num_steps
+                ):
+                    raise ValueError(
+                        f"ForcingData at index {
+                            i
+                        } has series lengths inconsistent with num_steps ({num_steps}). "
+                        f"P length: {len(fd.precip)}, T length: {
+                            len(fd.temp)
+                        }, PET length: {len(fd.pet)}"
+                    )
+            all_precip_sources_matrix = np.vstack(
+                [fd.precip.to_numpy() for fd in forcing_data]
+            ).T  # type: ignore
+            all_temp_sources_matrix = np.vstack(
+                [fd.temp.to_numpy() for fd in forcing_data]
+            ).T  # type: ignore
+            all_pet_sources_matrix = np.vstack(
+                [fd.pet.to_numpy() for fd in forcing_data]
+            ).T  # type: ignore
+        else:  # forc is empty
+            if num_forcing_sources_expected > 0:
+                raise ValueError(
+                    f"Model expects {
+                        num_forcing_sources_expected
+                    } forcing inputs, but 'forcing_data' list is empty."
+                )
+            # If no forcing sources are expected, create empty (0-column) matrices
+            all_precip_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
+            all_temp_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
+            all_pet_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
+
+        # Distribute source forcings to each zone for all time steps
+        # Resulting shape for each: (num_steps, num_zones)
+        zone_precip_series = all_precip_sources_matrix @ self.precip_mat.T
+        zone_temp_series = all_temp_sources_matrix @ self.temp_mat.T
+        zone_pet_series = all_pet_sources_matrix @ self.pet_mat.T
+
+        # Now, create a matrix of the hydrologic forcing values
+        hydro_forcing: NDArray = np.empty(zone_precip_series.shape, dtype=object)
+        for i, (ppt_row_i, temp_row_i, pet_row_i) in enumerate(
+            zip(zone_precip_series, zone_temp_series, zone_pet_series, strict=True)
+        ):
+            for j, (ppt_ij, temp_ij, pet_ij) in enumerate(
+                zip(ppt_row_i, temp_row_i, pet_row_i, strict=True)
+            ):
+                hydro_forcing[i, j] = HydroForcing(
+                    precip=ppt_ij, temp=temp_ij, pet=pet_ij, q_in=0.0
+                )
+
+        return hydro_forcing
 
 
 @dataclass(frozen=True)
@@ -1682,8 +1782,7 @@ class AnnotatedZone:
 def run_hydro_model(
     model: Model[HydrologicZone],  # type: ignore
     init_state: NDArray[f64],
-    forc: list[ForcingData],
-    dates: Series[Timestamp] | Index[Timestamp],
+    forc: ForcingData | list[ForcingData],
     check_water_balance: bool = False,
 ) -> DataFrame:
     """Runs a complete hydrologic simulation.
@@ -1709,63 +1808,18 @@ def run_hydro_model(
             match what the model expects, or if their time series lengths are
             inconsistent.
     """
+    dates: Series[Timestamp] | Index[Timestamp]
+    if isinstance(forc, ForcingData):
+        dates = forc.precip.index
+    elif isinstance(forc, (list, tuple)):
+        dates = forc[0].precip.index
+    else:
+        raise TypeError("Forcing data is the wrong type")
+
     num_steps: Final[int] = len(dates)  # Number of steps
     num_zones: Final[int] = model.num_zones()
-    num_forcing_sources_expected: Final[int] = model.precip_mat.shape[1]
 
-    all_precip_sources_matrix: NDArray[f64]
-    all_temp_sources_matrix: NDArray[f64]
-    all_pet_sources_matrix: NDArray[f64]
-
-    # Validate and prepare source forcing matrices
-    if forc:
-        if len(forc) != num_forcing_sources_expected:
-            raise ValueError(
-                f"Model expects {
-                    num_forcing_sources_expected} ForcingData objects, "
-                f"but {len(forc)} were provided in the 'forc' list."
-            )
-        fd: ForcingData
-        for i, fd in enumerate(forc):
-            if not (
-                len(fd.precip) == num_steps
-                and len(fd.temp) == num_steps
-                and len(fd.pet) == num_steps
-            ):
-                raise ValueError(
-                    f"ForcingData at index {
-                        i
-                    } has series lengths inconsistent with num_steps ({num_steps}). "
-                    f"P length: {len(fd.precip)}, T length: {
-                        len(fd.temp)
-                    }, PET length: {len(fd.pet)}"
-                )
-        all_precip_sources_matrix = np.vstack(
-            [fd.precip.to_numpy() for fd in forc]
-        ).T  # type: ignore
-        all_temp_sources_matrix = np.vstack(
-            [fd.temp.to_numpy() for fd in forc]
-        ).T  # type: ignore
-        all_pet_sources_matrix = np.vstack(
-            [fd.pet.to_numpy() for fd in forc]
-        ).T  # type: ignore
-    else:  # forc is empty
-        if num_forcing_sources_expected > 0:
-            raise ValueError(
-                f"Model expects {
-                    num_forcing_sources_expected
-                } forcing inputs, but 'forc' list is empty."
-            )
-        # If no forcing sources are expected, create empty (0-column) matrices
-        all_precip_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
-        all_temp_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
-        all_pet_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
-
-    # Distribute source forcings to each zone for all time steps
-    # Resulting shape for each: (num_steps, num_zones)
-    zone_precip_series = all_precip_sources_matrix @ model.precip_mat.T
-    zone_temp_series = all_temp_sources_matrix @ model.temp_mat.T
-    zone_pet_series = all_pet_sources_matrix @ model.pet_mat.T
+    hydro_forcing = model.construct_forcing_data(forc)
 
     storages: NDArray[f64] = np.full(
         (num_steps, num_zones), fill_value=np.nan, dtype=float
@@ -1786,15 +1840,7 @@ def run_hydro_model(
     for t_idx in range(num_steps):
         # Forcings for the current time step, one HydroForcing object per zone
         dt: float = delta_ts[t_idx]
-        ds_for_step: list[HydroForcing] = [
-            HydroForcing(
-                precip=zone_precip_series[t_idx, j],
-                temp=zone_temp_series[t_idx, j],
-                pet=zone_pet_series[t_idx, j],
-                q_in=0.0,
-            )
-            for j in range(num_zones)
-        ]
+        ds_for_step: list[HydroForcing] = hydro_forcing[t_idx]
 
         try:
             # Convert state array to list for the generic step method
@@ -1935,18 +1981,18 @@ class HbvModel(Model):
     def __repr__(self) -> str:
         lines = [
             "HbvModel(",
-            f"\ttt={round(self["snow"].tt, 2)},",  # type: ignore
-            f"\tfmax={round(self["snow"].fmax, 2)},",  # type: ignore
-            f"\tfc={round(self["soil"].fc, 2)},",  # type: ignore
-            f"\tlp={round(self["soil"].lp, 2)},",  # type: ignore
-            f"\tbeta={round(self["soil"].beta, 2)},",  # type: ignore
-            f"\tk0={round(self["soil"].k0, 4)},",  # type: ignore
-            f"\tthr={round(self["soil"].thr, 2)},",  # type: ignore
-            f"\tk1={round(self["shallow"].k, 4)},",  # type: ignore
-            f"\tk1={round(self["shallow"].alpha, 2)},",  # type: ignore
-            f"\tperc={round(self["shallow"].perc, 2)},",  # type: ignore
-            f"\tk2={round(self["deep"].k, 4)},",  # type: ignore
-            f"\tk2={round(self["deep"].alpha, 2)},",  # type: ignore
+            f"\ttt={round(self['snow'].tt, 2)},",  # type: ignore
+            f"\tfmax={round(self['snow'].fmax, 2)},",  # type: ignore
+            f"\tfc={round(self['surface'].fc, 2)},",  # type: ignore
+            f"\tlp={round(self['surface'].lp, 2)},",  # type: ignore
+            f"\tbeta={round(self['surface'].beta, 2)},",  # type: ignore
+            f"\tk0={round(self['surface'].k0, 4)},",  # type: ignore
+            f"\tthr={round(self['surface'].thr, 2)},",  # type: ignore
+            f"\tk1={round(self['shallow'].k, 4)},",  # type: ignore
+            f"\tk1={round(self['shallow'].alpha, 2)},",  # type: ignore
+            f"\tperc={round(self['shallow'].perc, 2)},",  # type: ignore
+            f"\tk2={round(self['deep'].k, 4)},",  # type: ignore
+            f"\tk2={round(self['deep'].alpha, 2)},",  # type: ignore
             ")",
         ]
 
@@ -1958,7 +2004,7 @@ class HbvLateralModel(Model):
 
     structure = [
         [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
-        [SurfaceZone(name="soil_hs"), SurfaceZone(name="soil_rp")],
+        [SurfaceZone(name="surface_hs"), SurfaceZone(name="surface_rp")],
         [GroundZone(name="shallow_hs"), GroundZone(name="shallow_rp")],
         [GroundZoneB(name="deep_hs"), GroundZoneB(name="deep_rp")],
     ]
@@ -1969,7 +2015,7 @@ class HbvNonlinearModel(Model):
 
     structure = [
         [SnowZone(name="snow")],
-        [SurfaceZone(name="soil")],
+        [SurfaceZone(name="surface")],
         [GroundZone(name="shallow")],
         [GroundZoneB(name="deep")],
     ]
@@ -1980,7 +2026,7 @@ class ThreeLayerModel(Model):
 
     structure = [
         [SnowZone(name="snow")],
-        [SurfaceZone(name="soil")],
+        [SurfaceZone(name="surface")],
         [GroundZoneB(name="ground")],
     ]
 

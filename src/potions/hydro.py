@@ -45,7 +45,7 @@ class HydrologicZone:
         name (str): A descriptive name for the zone (e.g., "snow", "soil").
     """
 
-    name: str = cython.declare(str, visibility="public")
+    __name: str = cython.declare(str, visibility="public")
 
     def __init__(self, name: str = "unnamed"):
         """
@@ -54,7 +54,7 @@ class HydrologicZone:
         Args:
             name (str, optional): The name of the zone. Defaults to "unnamed".
         """
-        self.name = name
+        self.__name = name
 
     @cython.ccall
     def __midpoint_func(
@@ -236,6 +236,10 @@ class HydrologicZone:
         """
         return []
 
+    @property
+    def name(self) -> str:
+        return self.__name
+
     def columns(self, zone_id: int) -> list[str]:
         """
         Gets the column names for this zone for the final output DataFrame.
@@ -250,13 +254,13 @@ class HydrologicZone:
             list[str]: A list of column names for the zone's time series data.
         """
         return [
-            f"s_{self.name}_{zone_id}",
-            f"q_forc_{self.name}_{zone_id}",
-            f"q_vap_{self.name}_{zone_id}",
-            f"q_lat_{self.name}_{zone_id}",
-            f"q_vert_{self.name}_{zone_id}",
-            f"q_lat_ext_{self.name}_{zone_id}",
-            f"q_vert_ext_{self.name}_{zone_id}",
+            f"s_{self.__name}",
+            f"q_forc_{self.__name}",
+            f"q_vap_{self.__name}",
+            f"q_lat_{self.__name}",
+            f"q_vert_{self.__name}",
+            f"q_lat_ext_{self.__name}",
+            f"q_vert_ext_{self.__name}",
         ]
 
     @classmethod
@@ -566,10 +570,10 @@ class SurfaceZone(HydrologicZone):
         beta: cython.double = 1.0,
         k0: cython.double = 0.1,
         thr: cython.double = 10.0,
-        name: str = "soil",
+        name: str = "surface",
     ):
         """
-        Initializes the SoilZone.
+        Initializes the SurfaceZone.
 
         Args:
             fc (cython.double, optional): Field capacity (mm). Defaults to 100.0.
