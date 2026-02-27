@@ -48,16 +48,18 @@ __all__ = [
     "objective_low_flow",
     "MineralParameters",
     "EquilibriumParameters",
-    "MinConcParameters",
     "MonodParameters",
     "ReactionNetwork",
     "TstParameters",
-    "ReactiveTransportZone",
+    "RtZone",
     "RtStep",
     "objective_function",
     "MineralAuxParams",
-    "ReactiveTransportParameters",
-    "ZoneDimensions"
+    "RtParameters",
+    "ZoneDimensions",
+    "find_root_multi",
+    "calculate_water_table_depth",
+    "calculate_moisture_fraction",
 ]
 
 from .common_types import ChemicalState, LapseRateParameters, RtForcing
@@ -103,13 +105,16 @@ from .reaction_network import (
     ReactionNetwork,
     TstParameters,
     MineralAuxParams,
-    ReactiveTransportParameters,
-    ZoneDimensions
+    RtParameters,
+    ZoneDimensions,
 )
 from .reactive_transport import (
-    ReactiveTransportZone,
+    RtZone,
     RtStep,
+    calculate_water_table_depth,
+    calculate_moisture_fraction,
 )
 from .utils import (
     objective_function,
+    find_root_multi,
 )

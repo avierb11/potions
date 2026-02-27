@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime
+from doctest import debug
 import itertools
 from multiprocessing import Pool
 import os
@@ -29,14 +30,24 @@ from numpy.typing import NDArray, ArrayLike
 from pandas import DataFrame, Index, Series, Timestamp
 import scipy.optimize as opt
 
-from potions.common_types import ForcingData, LapseRateParameters
+from potions.common_types import ForcingData, LapseRateParameters, RtForcing
 from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from potions.reactive_transport import ReactiveTransportZone
-from potions.utils import objective_function, log_probability, HydroModelResults
+from potions.reactive_transport import (
+    RtZone,
+    RtStep,
+    calculate_moisture_fraction,
+    calculate_water_table_depth,
+    get_hydro_steps,
+)
+from potions.utils import (
+    RtModelResults,
+    objective_function,
+    log_probability,
+    HydroModelResults,
+)
 from potions.interfaces import Zone, StateType
 
-# from .hydro import (
-from potions.hydro import (
+from .hydro import (
     GroundZone,
     GroundZoneB,
     HydroForcing,
@@ -514,8 +525,6 @@ class Model:
         for i, (zone, (s_i, d_i)) in enumerate(
             zip(self.flat_model, zip(state, ds, strict=True), strict=True)
         ):
-            # Calculate incoming flux using faster NumPy dot products
-            # num_fluxes = len(lat_fluxes)
             num_fluxes = i + 1
             if num_fluxes > 0:
                 q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], lat_ext_fluxes[: i + 1])
@@ -1617,6 +1626,15 @@ class Model:
         """
         return Series(self.to_array(), index=self.parameter_names())
 
+    @property
+    def surface_zone_ids(self) -> list[int]:
+        """
+        Get a list of the numerical indices of the surface zones in the model.
+
+        Note that these must be the top zones in the model. It's just the indices of the first later of zones
+        """
+        return [i for i, _ in enumerate(self.structure[0])]
+
     @classmethod
     def from_series(cls, series: Series) -> Model:
         """Creates a new model instance from a pandas Series of parameters.
@@ -1631,12 +1649,12 @@ class Model:
 
     @property
     def num_parameters(self) -> int:
-        """The total number of tunable parameters in the model."""
+        """The total number of optimizable parameters in the model."""
         return len(self.to_array())
 
-    def construct_forcing_data(
+    def construct_hydro_forcing_matrix(
         self,
-        forc: ForcingData | list[ForcingData],
+        forc: ForcingData | Iterable[ForcingData],
         elevations: Optional[list[float]] = None,
         average_elevation: Optional[float] = None,
     ) -> NDArray[np.object_]:
@@ -1744,6 +1762,194 @@ class Model:
 
         return hydro_forcing
 
+    def construct_rt_forcing_matrix(
+        self,
+        forc: ForcingData | Iterable[ForcingData],
+        hydro_sim_df: DataFrame,
+        precip_conc: NDArray,
+        model_rt_params: dict[str, RtZone],
+    ) -> NDArray:
+        """
+        Construct the reactive transport forcing data
+
+        precip_conc: The precipitation concentrations at each step. Note that this has shape: (number of surface zones, number of steps)
+        """
+        sw_vals = calculate_moisture_fraction(model_rt_params, hydro_sim_df)
+        zw_vals = calculate_water_table_depth(model_rt_params, hydro_sim_df)
+        hydro_steps = get_hydro_steps(hydro_sim_df)
+        hydro_forcing: NDArray = self.construct_hydro_forcing_matrix(forc).T
+
+        num_zones: int = hydro_forcing.shape[0]
+        num_steps: int = hydro_forcing.shape[1]
+
+        rt_forcings: NDArray = np.empty((num_zones, num_steps), dtype=object)
+
+        for i in range(num_zones):
+            for j in range(num_steps):
+                d_ij = RtForcing(
+                    conc_in=np.zeros(num_zones),
+                    hydro_step=hydro_steps[i, j],
+                    hydro_forc=hydro_forcing[i, j],
+                    s_w=sw_vals[i, j],
+                    z_w=zw_vals[i, j],
+                )
+                rt_forcings[i, j] = d_ij
+
+        # Now, insert the precipitation chemistry for each zone
+        if precip_conc.shape[0] != len(self.surface_zone_ids):  # type: ignore
+            raise ValueError(
+                f"The first dimension of precipitation chemistry must be the same as the the number of surface zones: {self.num_surface_zones}, not {precip_conc.shape[0]}"  # type: ignore
+            )
+
+        if precip_conc.shape[1] != len(hydro_sim_df):
+            raise ValueError(
+                f"The second dimension of precipitation chemistry must be the same as the the number of surface zones: {len(hydro_sim_df)}, not {precip_conc.shape[1]}"
+            )
+
+        for i, zone_data in enumerate(precip_conc):
+            for j, species_conc in enumerate(zone_data):
+                rt_forcings[i, j].conc_in = species_conc
+
+        return rt_forcings
+
+    def step_rt_model(
+        self,
+        model: dict[str, RtZone],
+        state: NDArray,
+        ds: Iterable[RtForcing],
+        dt_days: float,
+        verbose: bool = False,
+    ) -> list[RtStep]:
+        num_zones: int = len(model)
+        zones: list[RtZone] = list(model.values())
+
+        num_species: int = zones[0].num_species
+
+        lat_mass: NDArray = np.zeros(
+            (num_zones, num_species), dtype=np.float64
+        )  # Lateral mass transfered by a zone
+        vert_mass: NDArray = lat_mass.copy()  # Mass transferred vertically by a zone
+
+        steps: list[RtStep] = []
+
+        i: int
+        zone: RtZone
+        s_i: NDArray
+        d_i: RtForcing
+        for i, (zone, s_i, d_i) in enumerate(  # type: ignore
+            zip(model.values(), state, ds, strict=True)
+        ):
+            if verbose:
+                print(f"Starting solution for zone '{zone.name}'")
+            # num_fluxes = i + 1
+            if i not in self.surface_zone_ids:
+                lat_dep_row = self.lat_mat[i]
+                vert_dep_row = self.vert_mat[i]
+
+                lat_mass_in = lat_mass.T @ lat_dep_row
+                vert_mass_in = vert_mass.T @ vert_dep_row
+
+                mass_in = lat_mass_in + vert_mass_in
+
+                if verbose:
+                    print(f"Mass entering zone '{zone.name}': \n{mass_in=}")
+                    print(f"Lateral component: {lat_mass_in}")
+                    print(f"Vertical component: {vert_mass_in}")
+
+            else:  # For surface zones, the incoming precipitation provides the mass flux
+                mass_in = d_i.conc_in * d_i.hydro_step.q_in
+
+            if d_i.hydro_step.q_in > 0:
+                conc_in = mass_in / d_i.hydro_step.q_in
+            else:
+                conc_in = np.zeros_like(mass_in)
+            d_i.conc_in = conc_in
+
+            if verbose:
+                print(f"Incoming concentration to zone {i}: {conc_in}")
+
+            try:
+                step = zone.step(s_i, d_i, dt_days)
+            except Exception as e:
+                print(f"Failed on zone {i} with values:")
+                print(f"{s_i=}")
+                print(f"{d_i=}")
+                print(f"{dt_days=}")
+                raise e
+            lat_mass[i] = step.lat_mass
+            vert_mass[i] = step.vert_mass
+            steps.append(step)
+            if verbose:
+                print(
+                    f"Finished zone '{zone.name}', outgoing concentration: {np.array2string(step.state, formatter={'all': lambda x: f'{x:.2e}'})}"
+                )
+                print(f"Lateral mass transfer matrix after zone {i}: \n{lat_mass=}")
+                print(f"Vertical mass transfer matrix after zone {i}: \n{vert_mass=}")
+
+                print("\n\n")
+        if verbose:
+            print("=" * 25 + "\n")
+
+        return steps
+
+    def run_rt_model(
+        self,
+        rt_zones: dict[str, RtZone],
+        hydro_sim_df: DataFrame,
+        forc: ForcingData | Iterable[ForcingData],
+        precip_conc: NDArray,
+        init_conc: NDArray,
+        meas_river_conc: Optional[DataFrame] = None,
+        verbose: bool = False,
+    ) -> RtModelResults:
+        """Run the reactive transport simulation forwards"""
+        rt_forcing = self.construct_rt_forcing_matrix(
+            hydro_sim_df=hydro_sim_df,
+            forc=forc,
+            precip_conc=precip_conc,
+            model_rt_params=rt_zones,
+        )
+        dates: NDArray[np.object_] = hydro_sim_df.index.to_numpy()
+        time_delta_nanoseconds: NDArray[np.int64] = (
+            dates[1:] - dates[:-1]
+        )  # Time deltas are calculated in nanoseconds
+        time_delta_seconds: NDArray[np.float64] = (
+            time_delta_nanoseconds / 1e9
+        )  # Need the time step in terms of seconds
+        time_step_days: list[float] = [1.0] + (
+            time_delta_seconds / 86_400.0
+        ).tolist()  # Now, need the time delta int terms of days
+
+        state: NDArray = init_conc
+
+        # Run the model forwards
+        steps: NDArray[np.object_] = np.empty(
+            (self.num_zones(), len(dates)), dtype=np.object_
+        )
+        try:
+            for i, (ds_for_step, dt_days_i) in enumerate(
+                zip(rt_forcing.T, time_step_days, strict=True)
+            ):
+                if verbose:
+                    print(f"Starting step {i}")
+                step: list[RtStep] = self.step_rt_model(
+                    rt_zones, state, ds_for_step.tolist(), dt_days_i, verbose=verbose
+                )
+                for j, zone_step in enumerate(step):
+                    steps[j, i] = zone_step
+
+                state = np.array([x.state for x in step])
+
+                if verbose:
+                    print(f"Finished step {i}")
+        except Exception as e:
+            print(f"Failed on step {i} with error: {e}")
+            return steps
+
+        # Construct an output dataframe
+
+        return None
+
 
 @dataclass(frozen=True)
 class ZonePosition:
@@ -1819,7 +2025,7 @@ def run_hydro_model(
     num_steps: Final[int] = len(dates)  # Number of steps
     num_zones: Final[int] = model.num_zones()
 
-    hydro_forcing = model.construct_forcing_data(forc)
+    hydro_forcing = model.construct_hydro_forcing_matrix(forc)
 
     storages: NDArray[f64] = np.full(
         (num_steps, num_zones), fill_value=np.nan, dtype=float
@@ -1886,7 +2092,7 @@ def run_hydro_model(
 
 
 def run_reactive_transport_model(
-    model: Model[ReactiveTransportZone],  # type: ignore
+    model: Model[RtZone],  # type: ignore
     init_state: NDArray[f64],
     hydro_results,
     rt_forcing: list[

@@ -6,9 +6,7 @@ from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import Series
 
-from potions.hydro import HydroStep
-
-from .common_types_compiled import HydroForcing
+from .common_types_compiled import HydroStep, HydroForcing
 
 # ==== Types ==== #
 M = TypeVar("M", bound=int)
@@ -77,9 +75,9 @@ class LapseRateParameters:
 class ChemicalState:
     """Represents the chemical state of a zone, partitioned by species type."""
 
-    prim_aq_conc: NDArray # Primary aqueous species concentrations
-    sec_conc: NDArray # Secondary species concentrations
-    min_conc: NDArray # Mineral concentrations
+    prim_aq_conc: NDArray  # Primary aqueous species concentrations
+    sec_conc: NDArray  # Secondary species concentrations
+    min_conc: NDArray  # Mineral concentrations
 
     def to_primary_array(self) -> NDArray:
         """Concatenates primary aqueous and mineral species into a single array."""
@@ -97,7 +95,7 @@ class ChemicalState:
         return np.concatenate([self.prim_aq_conc, self.sec_conc])  # type: ignore
 
 
-@dataclass(frozen=True)
+@dataclass
 class RtForcing:
     """Contains the hydrologic and chemical drivers for a reactive transport step."""
 

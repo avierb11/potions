@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from typing import Final, Iterable
 
 import numpy as np
+from numpy.linalg import LinAlgError
 import pandas as pd
 import scipy.linalg as la
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
+from scipy.optimize import fsolve
 
 from .common_types import RtForcing, Vector
 from .database import (
@@ -169,10 +171,10 @@ class TstParameters:
             >>> print(rates)
             [0.2, 0.1]  # Example output: reaction rates for two minerals
         """
-        log_prim: NDArray = np.log10(chms)
+        log_conc: NDArray = np.log10(chms)
 
-        log_dep: NDArray = self.dep.values @ log_prim
-        log_iap: NDArray = self.stoich.values @ log_prim
+        log_dep: NDArray = self.dep.values @ log_conc
+        log_iap: NDArray = self.stoich.values @ log_conc
 
         dep: NDArray = 10**log_dep
         iap: NDArray = 10**log_iap
@@ -410,6 +412,12 @@ class EquilibriumParameters:
         c_tot: Final[NDArray] = (
             self.total.values @ chms
         )  # Total concentrations in the system
+
+        # Set the charge balance value to zero (in case there is an error)
+        if "Charge" in self.total.index:
+            charge_ind: int = self.total.index.tolist().index("Charge")  # type: ignore
+            c_tot[charge_ind] = 0.0
+
         if debug:
             print(f"{c_tot=}")
 
@@ -432,8 +440,8 @@ class EquilibriumParameters:
         def f(tot_conc: NDArray) -> NDArray:
             return c_tot - self.total.values @ conc(tot_conc)
 
-        # sol: NDArray = fsolve(f, x0=c_tot)
-        sol: NDArray = find_root_multi(f=f, x_0=c_tot, debug=debug)
+        sol: NDArray
+        sol = fsolve(f, c_tot)
 
         new_conc: NDArray = conc(sol)
 
@@ -506,11 +514,16 @@ class MineralParameters:
         fzw_mask: NDArray = self.n_alpha == 0
 
         n_alpha_vals: NDArray = np.ones_like(fzw_mask, dtype=np.float64)
-        second_term: NDArray = np.exp(
-            -abs(self.n_alpha) * forc.z_w ** (self.n_alpha / abs(self.n_alpha))
-        )
+        # second_term: NDArray = np.exp(
+        #     -abs(self.n_alpha) * forc.z_w ** (self.n_alpha / abs(self.n_alpha))
+        # )
 
-        n_alpha_vals[~fzw_mask] = second_term
+        # n_alpha_vals[~fzw_mask] = second_term
+        for i, n_alpha_i in enumerate(self.n_alpha):
+            if n_alpha_i != 0:
+                n_alpha_vals[i] = np.exp(
+                    -abs(n_alpha_i) * forc.z_w ** (n_alpha_i / abs(n_alpha_i))
+                )
 
         return n_alpha_vals
 
@@ -550,7 +563,7 @@ class MineralParameters:
 
 
 @dataclass(frozen=True)
-class ReactiveTransportParameters:
+class RtParameters:
     dimensions: ZoneDimensions
     mineral_params: MineralParameters
 
@@ -802,7 +815,11 @@ class ReactionNetwork:
         log10_rate_consts: list[float] = []
         for m in self.mineral:
             if m.name in self.mineral_kinetics.monod_reactions:
-                log10_rate_consts.append(self.mineral_kinetics.monod_reactions[m.name].rate_constant)
+                log10_rate_consts.append(
+                    self.mineral_kinetics.monod_reactions[m.name].rate_constant
+                )
             else:
-                log10_rate_consts.append(self.mineral_kinetics.tst_reactions[m.name].rate_constant)
+                log10_rate_consts.append(
+                    self.mineral_kinetics.tst_reactions[m.name].rate_constant
+                )
         return 10 ** np.array(log10_rate_consts)

@@ -35,7 +35,7 @@ import cython  # type: ignore
 
 from .common_types import ForcingData, LapseRateParameters
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from .reactive_transport import ReactiveTransportZone
+from .reactive_transport import RtZone
 from .utils import objective_function, log_probability, HydroModelResults
 from .interfaces import Zone, StateType
 
@@ -1756,7 +1756,7 @@ def run_hydro_model(
 
 
 def run_reactive_transport_model(
-    model: Model[ReactiveTransportZone],  # type: ignore
+    model: Model[RtZone],  # type: ignore
     init_state: NDArray[f64],
     hydro_results,
     rt_forcing: list[

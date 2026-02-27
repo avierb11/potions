@@ -34,6 +34,12 @@ class HydroModelResults(TypedDict):
     objective_functions: Series
 
 
+class RtModelResults(TypedDict):
+    rt_simulation: DataFrame
+    hydro_simulation: DataFrame
+    objective_functions: Series
+
+
 def objective_function(
     x: NDArray,
     cls,
@@ -190,6 +196,14 @@ def find_root_multi(
         x -= step
         f_x = f(x)
         err = (f_x**2).mean()
+        if np.isnan(err):
+            print("Rootfinding error: the calculated error is NaN. Values:")
+            print(f"{x_0=}")
+            print(f"{x=}")
+            print(f"{f_x=}")
+            print(f"{jac_x=}")
+            print(f"{step=}")
+            raise ValueError("NaN value encountered in rootfinding")
 
         if debug:
             print("-" * 10)
@@ -199,7 +213,7 @@ def find_root_multi(
             print(f"Error: {err}")
             print()
 
-    raise ValueError(f"Failed to find root starting at {x_0=}")
+    raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")
 
 
 # ======================== #
