@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from numpy.linalg import LinAlgError
@@ -8,20 +9,23 @@ from numpy.typing import NDArray
 from pandas import DataFrame, Series
 from scipy.optimize import fsolve
 
-from potions.utils import find_root_multi
+from ..utils import ZERO_CONC, find_root_multi
 
-from .common_types_compiled import HydroStep
+from ..common_types_compiled import HydroStep
 
 # from potions.utils import find_root_multi
 
-from .common_types import RtForcing
-from .reaction_network import (
+from ..common_types import RtForcing
+from .kinetic_structures import (
     MineralParameters,
     EquilibriumParameters,
     MonodParameters,
-    ReactionNetwork,
-    RtParameters,
     TstParameters,
+    RtParameters,
+)
+
+from .reaction_network import (
+    ReactionNetwork,
 )
 
 
@@ -31,6 +35,19 @@ class MiscData:
     species_mobility: NDArray  # Boolean vector describing whether each species is mobile or not. All aqueous species are mobile, and all mineral species are immobile.
     mineral_molar_mass: NDArray  # The molar mass of each of the minerals
     rate_const: NDArray  # The rate constants for the mineral reactions. Note that these are _not_ parameters. They are constants.
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MiscData):
+            raise TypeError(f"Cannot compare MiscData with '{type(other)}'")
+        else:
+            vals: list[bool] = [
+                np.allclose(self.mineral_stoichiometry, other.mineral_stoichiometry),
+                np.allclose(self.species_mobility, other.species_mobility),
+                np.allclose(self.mineral_molar_mass, other.mineral_molar_mass),
+                np.allclose(self.rate_const, other.rate_const),
+            ]
+
+            return all(vals)
 
 
 @dataclass(frozen=True)
@@ -44,6 +61,7 @@ class RtStep:
     vert_conc: NDArray
     lat_mass: NDArray
     vert_mass: NDArray
+    mineral_rates: NDArray  # Rate of mineral reactions
 
 
 class RtZone:
@@ -174,7 +192,10 @@ class RtZone:
         self.aux: MineralParameters = minerals
         self.misc: MiscData = misc
         self.parameters: RtParameters = params
-        self.name = name
+
+    @property
+    def network(self) -> ReactionNetwork:
+        return self.__network
 
     def mass_balance_ode(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
@@ -221,7 +242,9 @@ class RtZone:
             reaction_rate_vec = np.zeros_like(transport_rate_vec)
         return reaction_rate_vec + transport_rate_vec
 
-    def reaction_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
+    def reaction_rate(
+        self, chms: NDArray, d: RtForcing, minerals_only: bool = False
+    ) -> NDArray:
         """
         Calculate the rate of reaction for this time step - the rate that primary species are produced or consumed.
 
@@ -269,7 +292,8 @@ class RtZone:
         min_conc: NDArray = chms[-num_min:]  # Get just the mineral concentrations
 
         mineral_rates: NDArray = (
-            self.misc.rate_const
+            86_400
+            * self.misc.rate_const
             * self.aux.ssa
             * self.misc.mineral_molar_mass
             * min_conc
@@ -277,12 +301,15 @@ class RtZone:
             * (monod_rate + tst_rate)
         )
 
-        all_species_rates = (
-            self.misc.mineral_stoichiometry @ mineral_rates
-        )  # Rate of reaction in mol/s
-        # Need to convert to mol/day by multiplying by 86,400 seconds per day
+        if minerals_only:
+            return np.array(mineral_rates)
+        else:
+            all_species_rates = (
+                self.misc.mineral_stoichiometry @ mineral_rates
+            )  # Rate of reaction in mol/s
+            # Need to convert to mol/day by multiplying by 86,400 seconds per day
 
-        return 86400 * all_species_rates
+            return all_species_rates
 
     def transport_rate(self, chms: NDArray, d: RtForcing) -> NDArray:
         """
@@ -318,11 +345,15 @@ class RtZone:
         """
         hs: HydroStep = d.hydro_step
 
-        q_ext: float = hs.lat_flux_ext + hs.vert_flux_ext - hs.lat_flux - hs.vert_flux
+        q_ext: float = (
+            hs.lat_flux_ext + hs.vert_flux_ext - hs.lat_flux - hs.vert_flux
+        )  # External fluxes passing through the zone
         q_int: float = hs.lat_flux + hs.vert_flux
         mass_in: NDArray = d.hydro_forc.q_in * d.conc_in
         # mass_out: NDArray = (d.q_in / d.storage) * (d.conc_in - chms)
-        mass_out: NDArray = q_int * chms + q_ext * d.conc_in
+        mass_out_internal: NDArray = q_int * chms
+        mass_out_external: NDArray = q_ext * d.conc_in
+        mass_out: NDArray = mass_out_internal + mass_out_external
         # Note that d.q_out = q_int + q_ext
 
         mass_change: NDArray = mass_in - mass_out
@@ -330,16 +361,15 @@ class RtZone:
             0.0  # Set all immobile (mineral) species mass change to zero
         )
 
-        # print(f"{q_ext=}")
-        # print(f"{q_int=}")
-        # print(f"{mass_in=}")
-        # print(f"{mass_out=}")
-        # print(f"{mass_change=}")
-
         return mass_change
 
     def step(
-        self, c_0: NDArray, d: RtForcing, dt_days: float, verbose: bool = False
+        self,
+        c_0: NDArray,
+        d: RtForcing,
+        dt_days: float,
+        verbose: bool = False,
+        failed_dir: Optional[str] = None,
     ) -> RtStep:
         """
         Advances the chemical state by one time step using operator splitting.
@@ -383,40 +413,55 @@ class RtZone:
             print(f"Incoming concentrations to zone `{self.name}`: \n{c_0=}")
 
         # 1. Solve the ODE for kinetic reactions and transport
-        # def ode(_t: float, c: NDArray) -> NDArray:
-        #     return self.mass_balance_ode(c_0, d)
-
         def residual(c: NDArray) -> NDArray:
-            return (c_0 - c) + dt_days * self.mass_balance_ode(0.5 * (c_0 + c), d)
+            # return (c_0 - c) + dt_days * self.mass_balance_ode(0.5 * (c_0 + c), d)
+            return (c_0 - c) + dt_days * self.mass_balance_ode(c, d)
 
-        # ode_res = solve_ivp(ode, [0, dt], y0=c_0)
+        # def ode(_t: float, c: NDArray) -> NDArray:
+        #     return self.mass_balance_ode(c, d)
+
         try:
-            opt_res = fsolve(residual, c_0)
-        except LinAlgError:
             opt_res = find_root_multi(residual, c_0)
+        except (LinAlgError, ValueError) as e:
+            print("Failed to find root using my own function in solving R+T")
+            opt_res_full = fsolve(residual, c_0, full_output=True)
+            opt_res = opt_res_full[0]  # type: ignore
+
+            if opt_res_full[2] != 0:
+                raise ValueError("Both solvers failed to find root") from e
+
+        # ivp_res = solve_ivp(ode, t_span=[0, dt_days], y0=c_0)
+        # opt_res = ivp_res.y[:, -1]
 
         # Solve for the next concentration using some rootfinding method
-        # c_after_rt: NDArray = ode_res.y[:, -1]
         c_after_rt: NDArray = opt_res
+
+        if any(c_after_rt < 0):
+            print("Got negative concentrations after RT")
+            print(f"{d=}")
+            print(f"{dt_days=}")
+            print(f"{c_0=}")
+            print(f"{c_after_rt=}")
+            raise ValueError("Failed in equilibrium")
 
         if verbose:
             print(f"C after Reaction+Transport and before equilibrium: \n{c_after_rt}")
 
         c_after_eq: NDArray
+        # After finding the new concentrations that are not at equilibrium, solve for the equilibrium concentrations
         if self.do_speciation:
-            # After finding the new concentrations that are not at equilibrium, solve for the equilibrium concentrations
-            c_after_eq = self.eq.solve_equilibrium(c_after_rt)
+            c_after_eq = self.eq.solve_equilibrium(c_after_rt, failed_dir=failed_dir)
         else:
             c_after_eq = c_after_rt
 
-        # 3. Calculate output fluxes for the time step
-        # forc_flux = q_in * d.conc_in
-        # vap_flux = np.zeros_like(c_after_eq)
+        # 2.5 Correct the outputs so that there is nothing smaller than our threshold here
+        c_after_eq[c_after_eq < ZERO_CONC] = ZERO_CONC
 
+        # 3. Calculate output fluxes for the time step
         if verbose:
             print(f"C after equilibrium: \n{c_after_eq}")
-            tot_after_rt = self.eq.total.values @ c_after_rt
-            tot_after_eq = self.eq.total.values @ c_after_eq
+            tot_after_rt = self.eq.total @ c_after_rt
+            tot_after_eq = self.eq.total @ c_after_eq
             print(f"Total before equilibrium: {tot_after_rt}")
             print(f"Total after equilibrium:  {tot_after_eq}")
 
@@ -434,12 +479,11 @@ class RtZone:
                 d.hydro_step.vert_flux_ext / total_q_out_water
             )
         else:
-            lat_conc = np.zeros_like(c_after_eq)
-            vert_conc = np.zeros_like(c_after_eq)
+            lat_conc = np.full_like(c_after_eq, ZERO_CONC)
+            vert_conc = np.full_like(c_after_eq, ZERO_CONC)
 
-        # if self.name == "snow":
-        #     print(f"Incoming concentration: {c_0=}")
-        #     print(f"")
+        # Calculate the mineral rates using the updated concentrations
+        mineral_rates: NDArray = self.reaction_rate(c_after_eq, d, minerals_only=True)
 
         return RtStep(
             state=c_after_eq,
@@ -449,40 +493,8 @@ class RtZone:
             vert_conc=vert_conc,
             lat_mass=lat_conc * d.hydro_step.lat_flux_ext,
             vert_mass=vert_conc * d.hydro_step.vert_flux_ext,
+            mineral_rates=mineral_rates,
         )
-
-    def columns(self, zone_id: int) -> list[str]:
-        """
-        Gets the column names for this zone for the output DataFrame.
-
-        Parameters
-        ----------
-        zone_id : int
-            Identifier for the specific zone to generate column names for
-
-        Returns
-        -------
-        list[str]
-            List of column names for output DataFrame including:
-            - Concentration columns
-            - Flux columns (forcing, vapor, lateral, vertical)
-
-        Notes
-        -----
-        The column names are generated based on the zone identifier and
-        follow a consistent naming convention for easy data handling and
-        analysis. The naming convention includes the zone name and ID to
-        distinguish between different zones in multi-zone simulations.
-        """
-        # This will need to be updated based on the number of species.
-        name = f"{self.name}_{zone_id}"
-        return [
-            f"c_{name}",
-            f"j_forc_{name}",
-            f"j_vap_{name}",
-            f"j_lat_{name}",
-            f"j_vert_{name}",
-        ]
 
     @property
     def all_species(self) -> list[str]:
@@ -490,9 +502,49 @@ class RtZone:
         return self.__network.species_names
 
     @property
+    def mineral_species(self) -> list[str]:
+        """The list of all species involved in the mdoel"""
+        return self.__network.mineral_species_names
+
+    @property
     def num_species(self) -> int:
         """The number of species involved in this zone"""
         return len(self.__network.species_names)
+
+    def to_array(self) -> NDArray:
+        return self.parameters.to_array()
+
+    @staticmethod
+    def from_array(
+        arr: NDArray,
+        network: ReactionNetwork,
+        do_reactions: bool = True,
+        do_speciation: bool = True,
+        name: str = "unnamed",
+    ) -> RtZone:
+        parameters: RtParameters = RtParameters.from_array(arr)
+        return RtZone(
+            params=parameters,
+            network=network,
+            do_reactions=do_reactions,
+            do_speciation=do_speciation,
+            name=name,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RtZone):
+            return False
+        else:
+            vals: list[bool] = [
+                self.parameters == other.parameters,
+                self.monod == other.monod,
+                self.tst == other.tst,
+                self.eq == other.eq,
+                self.aux == other.aux,
+                self.misc == other.misc,
+            ]
+
+            return all(vals)
 
 
 # ==== Functions ==== #
@@ -500,17 +552,22 @@ def calculate_moisture_fraction(
     zone_params: dict[str, RtZone], sim_res: DataFrame
 ) -> NDArray:
     sw_vals: NDArray = np.zeros((len(zone_params), len(sim_res)))
+    zone_names: list[str] = list(zone_params.keys())
     zone_name: str
     zone: RtZone
     for i, (zone_name, zone) in enumerate(zone_params.items()):  # type: ignore
         col_name: str = f"s_{zone_name}"
+        max_water_volume = zone.parameters.dimensions.max_water_volume
         storage: Series = sim_res[col_name]
-        volume: float = (
-            zone.parameters.dimensions.depth * zone.parameters.dimensions.porosity
+
+        if storage.max() >= max_water_volume:
+            raise ValueError(
+                f"Water volume error in zone '{zone_names[i]}': Maximum volume is {round(max_water_volume, 1)} mm but maximum simulated storage is {round(storage.max(),1)} mm. Increase porosity or volume"
+            )
+
+        sw_vals[i] = (storage + zone.parameters.dimensions.passive_water_storage) / (
+            max_water_volume + zone.parameters.dimensions.passive_water_storage
         )
-        sw_vals[i] = (
-            storage + zone.parameters.dimensions.passive_water_storage
-        ) / volume
 
     return sw_vals
 

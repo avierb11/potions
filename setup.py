@@ -20,6 +20,18 @@ extensions = [
         include_dirs=["."],
         define_macros=[("CYTHON_PROFILE", "1")],
     ),
+    Extension(
+        "potions.reactive_transport",  # the module name in python
+        [
+            "src/potions/reactive_transport/__init__.py",
+            "src/potions/reactive_transport/database.py",
+            "src/potions/reactive_transport/kinetic_structures.py",
+            "src/potions/reactive_transport/reaction_network.py",
+            "src/potions/reactive_transport/rt_zone.py",
+        ],  # the cython source
+        include_dirs=["."],
+        define_macros=[("CYTHON_PROFILE", "1")],
+    ),
 ]
 
 for ext in extensions:

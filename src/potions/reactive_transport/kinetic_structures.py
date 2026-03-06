@@ -1,25 +1,22 @@
 from __future__ import annotations
-
+import os
+from typing import Optional, Final, Callable, Iterable
 from dataclasses import dataclass
-from typing import Final, Iterable
-
-import numpy as np
-from numpy.linalg import LinAlgError
-import pandas as pd
-import scipy.linalg as la
-from numpy.typing import NDArray
 from pandas import DataFrame, Series
+import numpy as np
+from numpy.typing import NDArray
+import scipy.linalg as la
 from scipy.optimize import fsolve
 
-from .common_types import RtForcing, Vector
-from .database import (
-    ExchangeReaction,
-    MineralKineticData,
-    MineralSpecies,
-    PrimaryAqueousSpecies,
-    SecondarySpecies,
-)
-from .utils import find_root_multi
+
+from ..common_types import RtForcing, Vector
+from .database import PrimaryAqueousSpecies, SecondarySpecies, ExchangeReaction
+from ..utils import find_root_multi
+
+
+# ==== Constants ==== #
+PARAMETERS_PER_MINERAL: Final[int] = 5
+# =================== #
 
 
 @dataclass(frozen=True)
@@ -97,6 +94,35 @@ class MonodParameters:
             inhib[i] = np.nanprod(row / (row + chms))
 
         return monod * inhib
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MonodParameters):
+            raise TypeError(f"Cannot compare MonodParameters with '{type(other)}'")
+        else:
+            monod_arr_1 = self.monod_mat.to_numpy().flatten()
+            monod_arr_2 = other.monod_mat.to_numpy().flatten()
+            inhib_arr_1 = self.inhib_mat.to_numpy().flatten()
+            inhib_arr_2 = other.inhib_mat.to_numpy().flatten()
+
+            monod_mask_1 = np.isfinite(monod_arr_1)
+            monod_mask_2 = np.isfinite(monod_arr_2)
+            inhib_mask_1 = np.isfinite(inhib_arr_1)
+            inhib_mask_2 = np.isfinite(inhib_arr_2)
+
+            if not all(monod_mask_1 == monod_mask_2):
+                return False
+
+            if not all(inhib_mask_1 == inhib_mask_2):
+                return False
+
+            monod_are_equal = np.allclose(
+                monod_arr_1[monod_mask_1], monod_arr_2[monod_mask_2]
+            )
+            inhib_are_equal = np.allclose(
+                inhib_arr_1[inhib_mask_1], inhib_arr_2[inhib_mask_2]
+            )
+
+            return bool(monod_are_equal and inhib_are_equal)
 
 
 @dataclass(frozen=True)
@@ -180,6 +206,22 @@ class TstParameters:
         iap: NDArray = 10**log_iap
 
         return dep * (1.0 - iap / self.min_eq_const)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TstParameters):
+            raise TypeError(f"Cannot compare TstParameters with '{type(other)}'")
+        else:
+            stoich_diff = self.stoich - other.stoich
+            dep_diff = self.dep - other.dep
+            min_eq_diff = self.min_eq_const - other.min_eq_const
+
+            stoich_max_diff: float = stoich_diff.abs().max().max()
+            dep_max_diff: float = dep_diff.abs().max().max()
+            eq_max_diff: float = min_eq_diff.abs().max()
+
+            return bool(
+                stoich_max_diff < 1e-12 and dep_max_diff < 1e-12 and eq_max_diff < 1e-12
+            )
 
 
 @dataclass(frozen=True)
@@ -369,7 +411,9 @@ class EquilibriumParameters:
         """
         return la.pinv(self.stoich) @ self.log10_k_w
 
-    def solve_equilibrium(self, chms: NDArray, debug: bool = False) -> NDArray:
+    def solve_equilibrium(
+        self, chms: NDArray, debug: bool = False, failed_dir: Optional[str] = None
+    ) -> NDArray:
         """
         Solve for the equilibrium concentrations of all of the species.
 
@@ -440,22 +484,123 @@ class EquilibriumParameters:
         def f(tot_conc: NDArray) -> NDArray:
             return c_tot - self.total.values @ conc(tot_conc)
 
-        sol: NDArray
-        sol = fsolve(f, c_tot)
+        try:
+            sol = find_root_multi(f, c_tot)
+        except Exception as _e:
+            print("Failed to find root with `find_root_multi`, trying my `fsolve`")
+            if failed_dir is not None:
+                os.makedirs(failed_dir, exist_ok=True)
+                my_function_path: str = os.path.join(
+                    failed_dir, "my_function_failed.txt"
+                )
+                if os.path.exists(my_function_path):
+                    file = open(my_function_path, "a")
+                else:
+                    file = open(my_function_path, "a+")
+                file.write(",".join(map(str, chms.tolist())) + "\n")
+            try:
+                sol = fsolve(f, c_tot)
+            except Exception as e2:
+                print("Failed to find root with `fsolve` :(")
+                if failed_dir is not None:
+                    os.makedirs(failed_dir, exist_ok=True)
+                    fsolve_path: str = os.path.join(failed_dir, "fsolve_failed.txt")
+                    if os.path.exists(fsolve_path):
+                        file = open(fsolve_path, "a")
+                    else:
+                        file = open(fsolve_path, "a+")
+                    file.write(",".join(map(str, chms.tolist())) + "\n")
+                raise e2
 
         new_conc: NDArray = conc(sol)
 
         return new_conc
 
+    def get_equilibrium_residual_function(
+        self, chms: NDArray
+    ) -> Callable[[NDArray], NDArray]:
+        """
+        Get the function that describes the residual for this zone
+        """
+        c_tot: Final[NDArray] = (
+            self.total.values @ chms
+        )  # Total concentrations in the system
+
+        # Set the charge balance value to zero (in case there is an error)
+        if "Charge" in self.total.index:
+            charge_ind: int = self.total.index.tolist().index("Charge")  # type: ignore
+            c_tot[charge_ind] = 0.0
+
+        def conc(tot_conc: NDArray) -> NDArray:
+            """
+            Return a vector of the aqueous concentrations in base-10 logarithm.
+
+            Parameters
+            ----------
+            tot_conc : numpy.ndarray
+                Vector of total concentrations
+
+            Returns
+            -------
+            numpy.ndarray
+                Vector of logarithmic aqueous concentrations
+            """
+            return 10 ** (self.stoich_null_space @ tot_conc + self.x_particular)
+
+        def f(tot_conc: NDArray) -> NDArray:
+            return c_tot - self.total.values @ conc(tot_conc)
+
+        return f
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EquilibriumParameters):
+            raise TypeError(
+                f"Cannot compare EquilibriumParameters with '{type(other)}'"
+            )
+        else:
+            stoich_diff = self.stoich - other.stoich
+            total_diff = self.total - other.total
+            eq_diff = self.log_eq_consts - other.log_eq_consts
+
+            stoich_max_diff: float = stoich_diff.abs().max().max()
+            total_max_diff: float = total_diff.abs().max().max()
+            eq_max_diff: float = eq_diff.abs().max()
+
+            return bool(
+                stoich_max_diff < 1e-12
+                and total_max_diff < 1e-12
+                and eq_max_diff < 1e-12
+            )
+
 
 @dataclass(frozen=True)
 class MineralAuxParams:
-    volume_fraction: float  # Volume fraction of this mineral
-    ssa: float  # Specific surface area in units of g/mol
     sw_threshold: float
     sw_exp: float
     n_alpha: float
     q_10: float
+    ssa: float  # Specific surface area in units of g/mol
+
+    def to_array(self) -> NDArray:
+        return np.array(
+            [
+                self.sw_threshold,
+                self.sw_exp,
+                self.n_alpha,
+                self.q_10,
+                self.ssa,
+            ]
+        )
+
+    @staticmethod
+    def from_array(arr: NDArray) -> MineralAuxParams:
+        return MineralAuxParams(
+            sw_threshold=arr[0],
+            sw_exp=arr[1],
+            n_alpha=arr[2],
+            q_10=arr[3],
+            ssa=arr[4],
+        )
 
 
 @dataclass(frozen=True)
@@ -464,6 +609,28 @@ class ZoneDimensions:
     depth: float
     passive_water_storage: float
 
+    def to_array(self) -> NDArray:
+        return np.array([self.porosity, self.depth, self.passive_water_storage])
+
+    @staticmethod
+    def from_array(arr: NDArray) -> ZoneDimensions:
+        """Conver this object from an array into a ZoneDimensions object"""
+        return ZoneDimensions(arr[0], arr[1], arr[2])
+
+    @property
+    def max_water_volume(self) -> float:
+        """The maximum water storage that can exist in this zone"""
+        return self.porosity * self.depth - self.passive_water_storage
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ZoneDimensions):
+            raise TypeError(f"Cannot compare ZoneDimensions with {type(other)}")
+        else:
+            return np.allclose(self.to_array(), other.to_array())
+
+    def __ne__(self, other: object) -> bool:
+        return not (self == other)
+
 
 @dataclass(frozen=True)
 class MineralParameters:
@@ -471,21 +638,38 @@ class MineralParameters:
     sw_exp: NDArray  # The soil water exponent
     n_alpha: NDArray  # The water table depth factor
     q_10: NDArray  # The temperature factor range
-    volume_fraction: NDArray  # The volume fraction of the mineral in the subsurface
     ssa: NDArray  # The specific surface area in units of g/mol
 
-    @staticmethod
-    def from_minerals(
-        min_params: list[MineralAuxParams], zone_params: ZoneDimensions
-    ) -> MineralParameters:
-        # sw_thresholds: np.ndarray = np.array(
-        #     list(map(lambda x: x.sw_threshold, min_params))
-        # )
-        # sw_exps: np.ndarray = np.array(list(map(lambda x: x.sw_exp, min_params)))
-        # n_alphas: np.ndarray = np.array(list(map(lambda x: x.n_alpha, min_params)))
-        # q_10s: np.ndarray = np.array(list(map(lambda x: x.q_10, min_params)))
+    def to_array(self) -> NDArray:
+        combined_arr = np.vstack(
+            [
+                self.sw_threshold,
+                self.sw_exp,
+                self.n_alpha,
+                self.q_10,
+                self.ssa,
+            ]
+        )
 
-        raise NotImplementedError()
+        return combined_arr.T.flatten()
+
+    @staticmethod
+    def from_array(arr: NDArray) -> MineralParameters:
+        if arr.size % PARAMETERS_PER_MINERAL != 0:
+            raise ValueError(
+                f"Array passed to `MineralParameters.from_array` must have size that is as multiple of 6, not {arr.size}"
+            )
+        num_minerals = arr.size // PARAMETERS_PER_MINERAL
+
+        param_arr = arr.reshape((num_minerals, PARAMETERS_PER_MINERAL)).T
+
+        return MineralParameters(
+            sw_threshold=param_arr[0],
+            sw_exp=param_arr[1],
+            n_alpha=param_arr[2],
+            q_10=param_arr[3],
+            ssa=param_arr[4],
+        )
 
     def soil_water_factor(self, forc: RtForcing) -> Vector:
         """
@@ -543,7 +727,6 @@ class MineralParameters:
         n_alphas: list[float] = []
         q_10s: list[float] = []
         ssas: list[float] = []
-        vol_fracs: list[float] = []
 
         for m in minerals:
             sw_thrs.append(m.sw_threshold)
@@ -551,15 +734,29 @@ class MineralParameters:
             n_alphas.append(m.n_alpha)
             q_10s.append(m.q_10)
             ssas.append(m.ssa)
-            vol_fracs.append(m.volume_fraction)
         return MineralParameters(
             sw_threshold=np.array(sw_thrs),
             sw_exp=np.array(sw_exps),
             n_alpha=np.array(n_alphas),
             q_10=np.array(q_10s),
             ssa=np.array(ssas),
-            volume_fraction=np.array(vol_fracs),
         )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MineralParameters):
+            raise TypeError(f"Cannot compare MineralParameters with {type(other)}")
+        else:
+            vals = [
+                np.allclose(self.sw_threshold, other.sw_threshold),
+                np.allclose(self.sw_exp, other.sw_exp),
+                np.allclose(self.n_alpha, other.n_alpha),
+                np.allclose(self.q_10, other.q_10),
+                np.allclose(self.ssa, other.ssa),
+            ]
+            return all(vals)
+
+    def __ne__(self, other: object) -> bool:
+        return not (self == other)
 
 
 @dataclass(frozen=True)
@@ -567,259 +764,31 @@ class RtParameters:
     dimensions: ZoneDimensions
     mineral_params: MineralParameters
 
+    def to_array(self) -> NDArray:
+        """Convert this object to an array"""
+        params_list: list[NDArray] = [self.dimensions.to_array()] + [
+            self.mineral_params.to_array()
+        ]
 
-class ReactionNetwork:
+        return np.concat(params_list)
 
-    def __init__(
-        self,
-        primary_aqueous: list[PrimaryAqueousSpecies],
-        mineral: list[MineralSpecies],
-        secondary: list[SecondarySpecies],
-        mineral_kinetics: MineralKineticData,
-        # exchange: list[ExchangeReaction],
-    ) -> None:
-        self.primary_aqueous: list[PrimaryAqueousSpecies] = primary_aqueous
-        self.mineral: list[MineralSpecies] = mineral
-        self.secondary: list[SecondarySpecies] = secondary
-        self.mineral_kinetics: MineralKineticData = mineral_kinetics
-        # self.exchange: list[ExchangeReaction] = exchange
+    @staticmethod
+    def from_array(arr: NDArray) -> RtParameters:
+        """Convert this object from a numpy array into a set of parameters"""
+        size_params: NDArray
+        mineral_params: NDArray
+        size_params, mineral_params = arr[0:3], arr[3:]
 
-        species_types: list[str] = ["primary"] * len(primary_aqueous) + [
-            "secondary"
-        ] * len(secondary)
-        names: list[str] = [x.name for x in primary_aqueous + secondary]
-        # if exchange:
-        #     species_types += ["exchange"] * len(exchange)
-        #     names += [x.name for x in exchange]
-        #     names.insert(len(primary_aqueous), "X-")
-        #     species_types.insert(len(primary_aqueous), "exchange")
-
-        species_types += ["mineral"] * len(mineral)
-        names += [x.name for x in mineral]
-
-        self.__species: DataFrame = DataFrame(
-            {"name": names, "type": species_types}
-        ).set_index("name")
-
-    @property
-    def species_order(self) -> list[str]:
-        return self.__species.index.tolist()
-
-    @property
-    def has_exchange(self) -> bool:
-        """
-        Boolean test for whether or not there are exchange species included in this reaction network
-        """
-        # return bool(self.exchange)
-        return False
-
-    @property
-    def charges(self) -> Series[float]:
-        """
-        Return a series of charges for all species in the model
-        """
-        charge_df: DataFrame = self.species.copy()
-        charge_df["charge"] = 0.0
-        # for spec in self.primary_aqueous + self.secondary + self.exchange:
-        for spec in self.primary_aqueous + self.secondary:
-            charge_df.loc[spec.name, "charge"] = spec.charge
-
-        charge_df.loc["X-", "charge"] = -1.0
-        return charge_df["charge"][self.species_order]
-
-    @property
-    def species(self) -> DataFrame:
-        """
-        Get DataFrame of all species in a dataframe with 1 column called "type"
-        """
-        return self.__species[["type"]]
-
-    @property
-    def equilibrium_species(self) -> DataFrame:
-        """
-        Return a DataFrame with the species name as the index and only the column `type` on the
-        species names. This includes primary, exchange, and secondary aqueous species
-        """
-        df: DataFrame = self.species
-        return df.loc[df.type.isin(["primary", "exchange", "secondary"])].copy()
-
-    @property
-    def kinetic_species(self) -> DataFrame:
-        """
-        Get the matrix of only the aqueous species
-        """
-        return self.__species.loc[
-            self.__species.type.isin(("primary", "mineral", "secondary"))
-        ].copy()
-
-    @property
-    def equilibrium_parameters(self) -> EquilibriumParameters:
-        """
-        Construct the equilibrium parameters from the database
-        """
-        # Construct the mass and charge conservation matrix
-        mass_stoich_df: DataFrame = self.species
-        # for spec in self.secondary + self.exchange:
-        for spec in self.secondary:
-            mass_stoich_df[spec.name] = spec.stoichiometry
-
-        total_species: list[str] = mass_stoich_df.loc[
-            (mass_stoich_df.type.isin(("primary", "mineral")))
-            | (mass_stoich_df.index == "X-")
-        ].index.tolist()
-        mass_stoich_df = (
-            mass_stoich_df.loc[total_species].drop(columns="type").fillna(0.0)
-        )
-        primary_eye = DataFrame(
-            np.eye(mass_stoich_df.shape[0]),
-            columns=mass_stoich_df.index,
-            index=mass_stoich_df.index,
-        )
-        mass_stoich_df = pd.concat([primary_eye, mass_stoich_df], axis=1)
-
-        rows = []
-        for i, row in mass_stoich_df.iterrows():
-            if i == "H+":
-                # Use charge balance for mass balance on 'H+'
-                new_row = self.charges.loc[mass_stoich_df.columns]
-                new_row.name = "Charge"
-                rows.append(new_row.to_frame().T)
-
-            else:
-                new_row = row.abs()
-                new_row.name = f"Tot_{new_row.name}"
-                rows.append(new_row.to_frame().T)
-
-        mass_stoich_df = pd.concat(rows)[self.species_order]
-
-        # Construct the stoichiometry matrix
-        sec_stoich_df: DataFrame = self.species
-        # for spec in self.secondary + self.exchange:
-        for spec in self.secondary:
-            sec_stoich_df[spec.name] = spec.stoichiometry
-        sec_stoich_df = (
-            sec_stoich_df.drop(columns=["type"]).fillna(0.0).T[self.species_order]
+        return RtParameters(
+            dimensions=ZoneDimensions.from_array(size_params),
+            mineral_params=MineralParameters.from_array(mineral_params),
         )
 
-        sec_eq_vec: Series = Series(
-            np.array(
-                [x.eq_consts[1] for x in self.secondary]
-                # + [x.log10_k_eq for x in self.exchange]
-            ),
-            # index=[x.name for x in self.secondary + self.exchange],
-            index=[x.name for x in self.secondary],
-        )
-
-        return EquilibriumParameters(
-            stoich=sec_stoich_df, log_eq_consts=sec_eq_vec, total=mass_stoich_df
-        )
-
-    @property
-    def tst_params(self) -> TstParameters:
-        """
-        Construct the TST parameters for this reaction network
-        """
-        # Stoichiometry
-        mineral_stoich_df: DataFrame = self.species
-        for mineral in self.mineral:
-            if mineral.name in self.mineral_kinetics.tst_reactions:
-                mineral_stoich_df[mineral.name] = mineral.stoichiometry
-            else:
-                mineral_stoich_df[mineral.name] = 0.0
-
-        mineral_stoich_df = (
-            mineral_stoich_df.drop(columns="type").fillna(0.0).T[self.species_order]
-        )
-
-        # Dependence
-        tst_dep_df: DataFrame = self.species
-        for mineral in self.mineral:
-            tst_dep_df[mineral.name] = 0.0
-
-        for name, reaction in self.mineral_kinetics.tst_reactions.items():
-            tst_dep_df[name] = reaction.dependence
-        tst_dep_df = tst_dep_df.drop(columns="type").fillna(0.0).T[self.species_order]
-
-        # Equilibrium constants
-
-        min_eq_const: Series = Series(
-            [
-                x.eq_consts[1] if x.name in self.mineral_kinetics.tst_reactions else 1.0
-                for x in self.mineral
-            ],
-            index=[x.name for x in self.mineral],
-        ).astype(float)
-
-        return TstParameters(
-            stoich=mineral_stoich_df, dep=tst_dep_df, min_eq_const=min_eq_const
-        )
-
-    @property
-    def monod_params(self) -> MonodParameters:
-        """
-        Construct the Monod parameters for this reaction network
-        """
-        monod_df: DataFrame = self.species
-        for mineral in self.mineral:
-            monod_df[mineral.name] = 0.0
-        inhib_df: DataFrame = monod_df.copy()
-
-        for _name, reaction in self.mineral_kinetics.monod_reactions.items():
-            monod_df[reaction.mineral_name] = reaction.monod_terms
-            inhib_df[reaction.mineral_name] = reaction.inhib_terms
-
-        monod_df = monod_df.drop(columns=["type"]).copy().T[self.species_order]
-        inhib_df = (
-            inhib_df.drop(columns=["type"]).copy().astype(float).T[self.species_order]
-        )
-
-        return MonodParameters(monod_mat=monod_df, inhib_mat=inhib_df)
-
-    @property
-    def species_names(self) -> list[str]:
-        """
-        Return the names of the species, in order, that they are solved
-        """
-        return self.species_order
-
-    @property
-    def mineral_stoichiometry(self) -> DataFrame:
-        """
-        Return a dataframe of of the mineral stoichiometry
-        """
-        stoich_df: DataFrame = self.species
-
-        mineral_names: list[str] = []
-        for mineral in self.mineral:
-            stoich_df[mineral.name] = mineral.stoichiometry
-            mineral_names.append(mineral.name)
-
-        return stoich_df[mineral_names].copy().fillna(0.0)
-
-    @property
-    def transport_mask(self) -> NDArray:
-        """
-        Get a boolean mask for the species that are either mobile or immobile. Mineral species
-        and exchange sites (X-) are immobile and will not be moved during transport
-        """
-        mobile_vals = self.species["type"] != "mineral"
-        return mobile_vals.to_numpy()
-
-    @property
-    def mineral_molar_masses(self) -> NDArray:
-        """The molar masses of each of the minerals"""
-        return np.array([x.molar_mass for x in self.mineral])
-
-    @property
-    def rate_consts(self) -> NDArray:
-        log10_rate_consts: list[float] = []
-        for m in self.mineral:
-            if m.name in self.mineral_kinetics.monod_reactions:
-                log10_rate_consts.append(
-                    self.mineral_kinetics.monod_reactions[m.name].rate_constant
-                )
-            else:
-                log10_rate_consts.append(
-                    self.mineral_kinetics.tst_reactions[m.name].rate_constant
-                )
-        return 10 ** np.array(log10_rate_consts)
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RtParameters):
+            raise TypeError(f"Cannot compare RtParameters with {type(other)}")
+        else:
+            return (
+                self.dimensions == other.dimensions
+                and self.mineral_params == other.mineral_params
+            )

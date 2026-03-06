@@ -1,14 +1,14 @@
 __all__ = [
+    # Sub-modules
     "common_types",
     "common_types_compiled",
-    "database",
     "hydro",
     "interfaces",
     "model",
     "objective_functions",
-    "reaction_network",
     "reactive_transport",
     "utils",
+    # Types and functions
     "ChemicalState",
     "LapseRateParameters",
     "RtForcing",
@@ -60,21 +60,12 @@ __all__ = [
     "find_root_multi",
     "calculate_water_table_depth",
     "calculate_moisture_fraction",
+    "RtZoneConfiguration",
+    "ModelResults",
 ]
 
 from .common_types import ChemicalState, LapseRateParameters, RtForcing
 from .common_types_compiled import HydroForcing, HydroStep
-from .database import (
-    ChemicalDatabase,
-    ExchangeReaction,
-    MineralKineticReaction,
-    MineralSpecies,
-    MonodReaction,
-    PrimaryAqueousSpecies,
-    SecondarySpecies,
-    SurfaceComplexationReaction,
-    TstReaction,
-)
 from .hydro import (
     GroundZone,
     GroundZoneB,
@@ -96,9 +87,20 @@ from .model import (
     Layer,
     Model,
     ThreeLayerModel,
+    RtZoneConfiguration,
+    ModelResults,
 )
 from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
-from .reaction_network import (
+from .reactive_transport import (
+    ChemicalDatabase,
+    ExchangeReaction,
+    MineralKineticReaction,
+    MineralSpecies,
+    MonodReaction,
+    PrimaryAqueousSpecies,
+    SecondarySpecies,
+    SurfaceComplexationReaction,
+    TstReaction,
     MineralParameters,
     EquilibriumParameters,
     MonodParameters,
@@ -107,8 +109,6 @@ from .reaction_network import (
     MineralAuxParams,
     RtParameters,
     ZoneDimensions,
-)
-from .reactive_transport import (
     RtZone,
     RtStep,
     calculate_water_table_depth,

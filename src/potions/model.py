@@ -1,62 +1,65 @@
 from __future__ import annotations
+
 import datetime
-from doctest import debug
 import itertools
-from multiprocessing import Pool
+import operator
 import os
+import random
+import warnings
+from copy import deepcopy
+from dataclasses import dataclass
+from functools import reduce
+from multiprocessing import Pool
 from typing import (
+    Any,
     Callable,
     Final,
+    Generic,
     Iterable,
     Iterator,
     Literal,
     Optional,
     TypedDict,
-    overload,
-    Any,
-    Generic,
     TypeVar,
+    overload,
 )
-from functools import reduce
-import operator
-from dataclasses import dataclass
-import warnings
+
 import emcee  # type: ignore
 import networkx as nx
 import numpy as np
-import random
-from numpy import float64 as f64
-from numpy.typing import NDArray, ArrayLike
-from pandas import DataFrame, Index, Series, Timestamp
 import scipy.optimize as opt
+from numpy import float64 as f64
+from numpy.typing import ArrayLike, NDArray
+from pandas import DataFrame, Index, Series, Timestamp
 
-from potions.common_types import ForcingData, LapseRateParameters, RtForcing
-from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from potions.reactive_transport import (
-    RtZone,
-    RtStep,
-    calculate_moisture_fraction,
-    calculate_water_table_depth,
-    get_hydro_steps,
-)
-from potions.utils import (
-    RtModelResults,
-    objective_function,
-    log_probability,
-    HydroModelResults,
-)
-from potions.interfaces import Zone, StateType
-
-from .hydro import (
+from .common_types import ForcingData, LapseRateParameters, RtForcing
+from .hydro import (  # Still needed for run_hydro_model
     GroundZone,
     GroundZoneB,
     HydroForcing,
-    HydroStep,
     HydrologicZone,
+    HydroStep,
     SnowZone,
     SurfaceZone,
-)  # Still needed for run_hydro_model
-
+)
+from .interfaces import StateType, Zone
+from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
+from .reactive_transport import (
+    RtStep,
+    RtZone,
+    calculate_moisture_fraction,
+    calculate_water_table_depth,
+    ReactionNetwork,
+    RtParameters,
+    get_hydro_steps,
+)
+from .utils import (
+    HydroModelResults,
+    RtModelResults,
+    log_probability,
+    objective_function,
+    rt_minerals_to_array,
+)
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
@@ -66,6 +69,19 @@ OUTPUT_COLUMNS_PER_ZONE: Final[int] = (
     8  # Number of columns for each zone in the output. Includes 1 state + 6 fluxes (4 normal + 2 external)
 )
 # =================== #
+
+
+class ModelResults(TypedDict):
+    hydro_sim_df: DataFrame
+    hydro_obj_funcs: Optional[Series]
+    rt_sim_df: DataFrame
+    rt_obj_funcs: Optional[DataFrame]
+
+
+@dataclass(frozen=True)
+class RtZoneConfiguration:
+    do_reactions: bool
+    do_speciation: bool
 
 
 class BatchResults(TypedDict):
@@ -124,8 +140,8 @@ def _run_model(
             - A dictionary of scalar metrics from the run.
     """
     try:
-        model = cls.from_series(params)
-        run_res: HydroModelResults = model.run(
+        model = cls.hydro_from_series(params)
+        run_res: HydroModelResults = model.run_hydro_model(
             forc=forc,
             init_state=init_state,
             meas_streamflow=meas_streamflow,
@@ -314,9 +330,14 @@ class Model:
 
     def __init__(
         self,
+        # Hydrology arguments
         zones: Optional[dict[str, HydrologicZone]] = None,
         scales: Optional[list[float]] = None,
         lapse_rates: Optional[list[LapseRateParameters]] = None,
+        # Reactive transport arguments
+        network: Optional[ReactionNetwork] = None,
+        rt_params: Optional[dict[str, RtParameters]] = None,
+        rt_configuration: Optional[dict[str, RtZoneConfiguration]] = None,
         verbose: bool = False,
     ) -> None:
         """Initializes the model engine.
@@ -334,11 +355,11 @@ class Model:
                 initialization. Defaults to False.
         """
         # Check for empty values
-        if scales is None:
+        if scales is None or scales == []:
             # Get the default
             num_zones: int = len(self.structure[0])
             scales = [1 / num_zones for _ in range(num_zones)]
-        if lapse_rates is None:
+        if lapse_rates is None or lapse_rates == []:
             lapse_rates = []
         if zones is None:
             zones = {}
@@ -347,17 +368,20 @@ class Model:
         self.__zones: dict[str, HydrologicZone] = {}
         for layer in self.structure:
             for zone in layer:
-                self.__zones[zone.name] = zone.default()  # type: ignore
+                if zone.name in zones:  # type: ignore
+                    self.__zones[zone.name] = zones[zone.name]  # type: ignore
+                else:
+                    self.__zones[zone.name] = zone.default()  # type: ignore
 
-        for zone_name, zone in zones.items():
-            if zone_name not in self.get_zone_names():
-                raise ValueError(
-                    f"Unknown zone name: {zone_name}. The zone name must be one of {
-                        self.get_zone_names()
-                    }"
-                )
-            else:
-                self.__zones[zone_name] = zone
+        # for zone_name, zone in zones.items():
+        #     if zone_name not in self.get_zone_names():
+        #         raise ValueError(
+        #             f"Unknown zone name: {zone_name}. The zone name must be one of {
+        #                 self.get_zone_names()
+        #             }"
+        #         )
+        #     else:
+        #         self.__zones[zone_name] = zone
 
         # Construct the lapse rates
         self.lapse_rates: list[LapseRateParameters] = lapse_rates
@@ -382,6 +406,67 @@ class Model:
         self.__vert_matrix: NDArray[f64] = vert
         self.__forcing_mat: NDArray[f64] = self.get_forc_mat(scales)
         self.__forcing_rel_mat: NDArray[f64] = self.get_forc_mat(scales, relative=True)
+
+        # ==== Initialize reactive transport ==== #
+        # Make sure that all arguments are present
+        if (network is not None) == (rt_params is not None):
+            pass
+        else:
+            raise ValueError(
+                "When doing reactive transport simulation, you must pass both `network` and `rt_zones` parameters, not just one of them"
+            )
+
+        if (network is not None) and (rt_params is not None):
+            self._has_rt = True
+            self._network: ReactionNetwork = network
+            self._rt_params: dict[str, RtParameters] = rt_params
+            # Make sure that all of the required zones are in the reactive transport zones
+            model_zone_names = set(self.zone_names)
+            rt_zone_names = set(rt_params.keys())
+
+            if model_zone_names != rt_zone_names:
+                raise ValueError(
+                    f"Incorrect structure for `rt_params`. Expected dictionary with keys {list(model_zone_names)}, got keys {list(rt_zone_names)}"
+                )
+
+            if rt_configuration is None:
+                rt_configuration = dict()
+
+            # Get the configurations
+            cfg: dict[str, RtZoneConfiguration] = {}
+            for zone_name in self.zone_names:
+                if zone_name in rt_configuration:
+                    cfg[zone_name] = rt_configuration[zone_name]
+                else:
+                    cfg[zone_name] = RtZoneConfiguration(
+                        do_reactions=True, do_speciation=True
+                    )
+
+            self._rt_zones: dict[str, RtZone] = {
+                key: RtZone(
+                    network=network,
+                    params=val,
+                    name=key,
+                    do_reactions=cfg[key].do_reactions,
+                    do_speciation=cfg[key].do_speciation,
+                )
+                for key, val in rt_params.items()
+            }
+            self._zone_configs: dict[str, RtZoneConfiguration] = cfg
+
+        # Set the configuration for each reactive transport zone
+
+    @property
+    def hydro_zones(self) -> dict[str, HydrologicZone]:
+        return self.__zones
+
+    @property
+    def reaction_network(self) -> Optional[ReactionNetwork]:
+        if self._has_rt:
+            return self._network
+        else:
+            print("This model does not have reactive transport capabilities")
+            return None
 
     def __getitem__(self, zone_name: str) -> HydrologicZone:
         """Access a hydrologic zone within the model by its name.
@@ -462,6 +547,10 @@ class Model:
         """The list of relative areas for each surface zone."""
         return self.__scales
 
+    @property
+    def rt_zones(self) -> dict[str, RtZone]:
+        return self._rt_zones
+
     def __len__(self) -> int:
         """Returns the number of layers in the model."""
         return len(self.layers)
@@ -483,7 +572,7 @@ class Model:
         """A 1D list of all zones in the model, in the order of evaluation."""
         return self.__flat_model
 
-    def step(
+    def step_hydro_model(
         self,
         state: NDArray[f64],
         ds: Iterable[HydroForcing],
@@ -507,7 +596,7 @@ class Model:
             ModelStep[float]: An object containing the new states and all
                 calculated fluxes for every zone.
         """
-        num_zones: int = self.num_zones()
+        num_zones: int = self.num_zones
 
         new_states: np.ndarray = np.zeros((num_zones,), dtype=np.float64)
         forc_fluxes: np.ndarray = new_states.copy()
@@ -607,9 +696,19 @@ class Model:
             current_zone_idx += len(layer)
         return river_zones
 
+    @property
     def num_zones(self) -> int:
         """Returns the total number of zones in the model."""
         return len(self.flat_model)
+
+    @classmethod
+    def get_num_zones(cls: type[Model]) -> int:
+        """Returns the total number of zones in the model."""
+        num_zones: int = 0
+        for layer in cls.structure:  # type: ignore
+            num_zones += len(layer)
+
+        return num_zones
 
     def get_size_mat(self) -> NDArray[f64]:
         """Calculates a matrix mapping surface zones to their contributing areas.
@@ -674,7 +773,7 @@ class Model:
             return mat
 
     @classmethod
-    def get_column_names(cls) -> list[str]:
+    def get_hydro_column_names(cls) -> list[str]:
         """A class method to get column names for the final output DataFrame."""
         zone_names: list[str] = cls.get_zone_names()
         col_names: list[str] = []
@@ -695,6 +794,17 @@ class Model:
     def zone_labels(self) -> list[str]:
         """A list of zone labels for the final output DataFrame."""
         return [f"{zone.name}_{i}" for i, zone in enumerate(self.flat_model)]  # type: ignore
+
+    @property
+    def zone_names(self) -> list[str]:
+        """A list of the names of the zones in the order that they are evaluated"""
+        names: list[str] = []
+
+        for layer in self.structure:
+            for zone in layer:
+                names.append(zone.name)  # type: ignore
+
+        return names
 
     @property
     def zone_indices(self) -> dict[str, int]:
@@ -825,7 +935,7 @@ class Model:
 
         return lateral_matrix_augmented, vertical_matrix_nn, all_nodes
 
-    def to_array(self) -> NDArray:
+    def hydro_to_array(self) -> NDArray:
         """Serializes all model parameters into a single 1D NumPy array.
 
         Returns:
@@ -873,7 +983,7 @@ class Model:
         return len(cls.structure[0]) - 1
 
     @classmethod
-    def from_array(cls, arr: NDArray, latent: bool = False) -> Model:
+    def hydro_from_array(cls, arr: NDArray, latent: bool = False) -> Model:
         """Creates a new model instance from a 1D NumPy array of parameters.
 
         Args:
@@ -933,7 +1043,7 @@ class Model:
             lapse_rates=new_lapse_rates,
         )
 
-    def parameter_names(self) -> list[str]:
+    def hydro_parameter_names(self) -> list[str]:
         """Gets an ordered list of all parameter names in the model.
 
         Returns:
@@ -1059,7 +1169,7 @@ class Model:
         raise ValueError(f"Unknown zone name: {name}")
 
     @classmethod
-    def default_init_state(cls) -> NDArray:
+    def default_hydro_init_state(cls) -> NDArray:
         """Gets the default initial state for the model.
 
         Returns:
@@ -1069,7 +1179,7 @@ class Model:
             [zone.default_init_state() for layer in cls.structure for zone in layer]  # type: ignore
         )
 
-    def run(
+    def run_hydro_model(
         self,
         forc: ForcingData | list[ForcingData],
         init_state: Optional[NDArray[f64]] = None,
@@ -1105,7 +1215,7 @@ class Model:
 
         # Check if need initial state
         if init_state is None:
-            init_state = self.default_init_state()
+            init_state = self.default_hydro_init_state()
 
         # Construct the forcing data
 
@@ -1382,10 +1492,10 @@ class Model:
         )
 
         # Now, run the model and return the optimum results
-        model = cls.from_array(opt_res.x)
-        best_results = model.run(
+        model = cls.hydro_from_array(opt_res.x)
+        best_results = model.run_hydro_model(
             forc=forc,  # type: ignore
-            init_state=cls.default_init_state(),
+            init_state=cls.default_hydro_init_state(),
             meas_streamflow=meas_streamflow,
             verbose=False,
         )
@@ -1418,7 +1528,7 @@ class Model:
         else:
             operational_obj_func = obj_func  # type: ignore
 
-        params = self.to_array()
+        params = self.hydro_to_array()
 
         grad_vals: list[float] = []
         bounds: dict = self.default_parameter_ranges(
@@ -1443,13 +1553,13 @@ class Model:
             state_left[i] = x_i_left
             state_right[i] = x_i_right
 
-            left_model = self.from_array(state_left)
-            right_model = self.from_array(state_right)
+            left_model = self.hydro_from_array(state_left)
+            right_model = self.hydro_from_array(state_right)
 
-            left_res = left_model.run(
+            left_res = left_model.run_hydro_model(
                 forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
             )
-            right_res = right_model.run(
+            right_res = right_model.run_hydro_model(
                 forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
             )
 
@@ -1615,7 +1725,9 @@ class Model:
         """
         return {
             key: val
-            for key, val in zip(self.parameter_names(), self.to_array(), strict=True)
+            for key, val in zip(
+                self.hydro_parameter_names(), self.hydro_to_array(), strict=True
+            )
         }
 
     def to_series(self) -> Series:
@@ -1624,7 +1736,7 @@ class Model:
         Returns:
             Series: A Series with parameter names as the index.
         """
-        return Series(self.to_array(), index=self.parameter_names())
+        return Series(self.hydro_to_array(), index=self.hydro_parameter_names())
 
     @property
     def surface_zone_ids(self) -> list[int]:
@@ -1636,7 +1748,7 @@ class Model:
         return [i for i, _ in enumerate(self.structure[0])]
 
     @classmethod
-    def from_series(cls, series: Series) -> Model:
+    def hydro_from_series(cls, series: Series) -> Model:
         """Creates a new model instance from a pandas Series of parameters.
 
         Args:
@@ -1650,7 +1762,114 @@ class Model:
     @property
     def num_parameters(self) -> int:
         """The total number of optimizable parameters in the model."""
-        return len(self.to_array())
+        return len(self.hydro_to_array())
+
+    @classmethod
+    def get_num_parameters(cls: type[Model]) -> int:
+        """The total number of optimizable parameters in the model."""
+        num_params: int = 0
+        for layer in cls.structure:
+            for zone in layer:
+                num_params += zone.num_parameters()  # type: ignore
+
+        return num_params
+
+    def rt_to_array(self) -> NDArray:
+        """Convert the reactive transport structures into an array"""
+        components: list[NDArray] = []
+
+        for zone_name in self.zone_names:
+            components.append(self.rt_zones[zone_name].to_array())
+
+        return np.concatenate(components)
+
+    @classmethod
+    def rt_params_from_array(
+        cls: type[Model], arr: NDArray, verbose: bool = False
+    ) -> dict[str, RtParameters]:
+        num_zones: int = cls.get_num_zones()
+        zone_names: list[str] = cls.get_zone_names()
+
+        if arr.size % num_zones != 0:
+            raise ValueError(
+                f"Parameter array is incorrect size, must have be multiple of {cls.get_num_zones()}"
+            )
+
+        params_per_zone: int = arr.size // num_zones
+
+        # param_arr: NDArray = arr.reshape((num_zones, params_per_zone))
+        param_arr = np.full((num_zones, params_per_zone), fill_value=np.nan)
+        for i in range(num_zones):
+            zone_param_arr = arr[i * params_per_zone : (i + 1) * params_per_zone]
+            if verbose:
+                print(f"Parameters for {zone_names[i]}: {zone_param_arr}")
+            param_arr[i] = zone_param_arr
+
+        zone_params: dict[str, RtParameters] = {}
+        for row_i, zone_name_i in zip(param_arr, zone_names, strict=True):
+            zone_params[zone_name_i] = RtParameters.from_array(row_i)
+
+        return zone_params
+
+    @classmethod
+    def rt_zones_from_array(
+        cls: type[Model],
+        arr: NDArray,
+        network: ReactionNetwork,
+        config: list[RtZoneConfiguration],
+    ) -> dict[str, RtZone]:
+        params_per_zone: int = 3 + network.num_mineral_parameters
+
+        if arr.size % params_per_zone != 0:
+            raise ValueError(
+                f"Wrong size vector passed, expected multiple of {params_per_zone}, got {arr.size}"
+            )
+
+        num_zones: int = len(config)
+
+        params = arr.reshape((num_zones, params_per_zone))
+
+        rt_zones: dict[str, RtZone] = {
+            name_i: RtZone.from_array(
+                row,
+                network,
+                do_reactions=config_i.do_reactions,
+                do_speciation=config_i.do_speciation,
+                name=name_i,
+            )
+            for row, config_i, name_i in zip(
+                params, config, cls.get_zone_names(), strict=True  # type: ignore
+            )
+        }
+
+        return rt_zones
+
+    def update_rt_params(self, rt_params: dict[str, RtParameters]) -> Model:
+        """
+        Create a new model by just updating the reactive transport zones
+        """
+        new_hydro_zones: dict[str, HydrologicZone] = {
+            name: type(zone).from_array(zone.param_list())  # type: ignore
+            for name, zone in self.__zones.items()
+        }
+        scales = deepcopy(self.scales)
+        lapse_rates = deepcopy(self.lapse_rates)
+        network = deepcopy(self.network)
+
+        rt_configurations: dict[str, RtZoneConfiguration] = self.zone_configurations
+
+        return type(self)(
+            zones=new_hydro_zones,
+            scales=scales,
+            lapse_rates=lapse_rates,
+            network=network,
+            rt_params=rt_params,
+            rt_configuration=rt_configurations,
+        )
+
+    @property
+    def zone_configurations(self) -> dict[str, RtZoneConfiguration]:
+        return self._zone_configs
 
     def construct_hydro_forcing_matrix(
         self,
@@ -1819,6 +2038,7 @@ class Model:
         ds: Iterable[RtForcing],
         dt_days: float,
         verbose: bool = False,
+        failed_dir: Optional[str] = None,
     ) -> list[RtStep]:
         num_zones: int = len(model)
         zones: list[RtZone] = list(model.values())
@@ -1853,13 +2073,13 @@ class Model:
 
                 if verbose:
                     print(f"Mass entering zone '{zone.name}': \n{mass_in=}")
-                    print(f"Lateral component: {lat_mass_in}")
-                    print(f"Vertical component: {vert_mass_in}")
+                    print(f"Lateral component entering: {lat_mass_in}")
+                    print(f"Vertical component entering: {vert_mass_in}")
 
             else:  # For surface zones, the incoming precipitation provides the mass flux
                 mass_in = d_i.conc_in * d_i.hydro_step.q_in
 
-            if d_i.hydro_step.q_in > 0:
+            if d_i.hydro_step.q_in > 1e-6:
                 conc_in = mass_in / d_i.hydro_step.q_in
             else:
                 conc_in = np.zeros_like(mass_in)
@@ -1869,7 +2089,12 @@ class Model:
                 print(f"Incoming concentration to zone {i}: {conc_in}")
 
             try:
-                step = zone.step(s_i, d_i, dt_days)
+                step = zone.step(
+                    s_i,
+                    d_i,
+                    dt_days,
+                    failed_dir=failed_dir,
+                )
             except Exception as e:
                 print(f"Failed on zone {i} with values:")
                 print(f"{s_i=}")
@@ -1880,11 +2105,13 @@ class Model:
             vert_mass[i] = step.vert_mass
             steps.append(step)
             if verbose:
+                print(f"Lateral mass transfer outwards: {step.lat_mass}")
+                print(f"Vertical mass transfer outwards: {step.vert_mass}")
                 print(
-                    f"Finished zone '{zone.name}', outgoing concentration: {np.array2string(step.state, formatter={'all': lambda x: f'{x:.2e}'})}"
+                    f"Finished zone '{zone.name}', final concentration: {np.array2string(step.state, formatter={'all': lambda x: f'{x:.2e}'})}"
                 )
-                print(f"Lateral mass transfer matrix after zone {i}: \n{lat_mass=}")
-                print(f"Vertical mass transfer matrix after zone {i}: \n{vert_mass=}")
+                # print(f"Lateral mass transfer matrix after zone {i}: \n{lat_mass=}")
+                # print(f"Vertical mass transfer matrix after zone {i}: \n{vert_mass=}")
 
                 print("\n\n")
         if verbose:
@@ -1894,22 +2121,34 @@ class Model:
 
     def run_rt_model(
         self,
-        rt_zones: dict[str, RtZone],
         hydro_sim_df: DataFrame,
         forc: ForcingData | Iterable[ForcingData],
         precip_conc: NDArray,
-        init_conc: NDArray,
+        mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
+        init_conc: Optional[NDArray],
         meas_river_conc: Optional[DataFrame] = None,
         verbose: bool = False,
+        return_partial: bool = False,
+        failed_dir: Optional[str] = None,
+        objective_functions: list[
+            tuple[str, Callable[[Series, Series], float]]
+        ] = DEFAULT_OBJECTIVE_FUNCTIONS,
     ) -> RtModelResults:
-        """Run the reactive transport simulation forwards"""
+        """Run the reactive transport simulation forwards
+        `mineral_conc` is a dictionary containing the mineral volume fractions (0,porosity) of the minerals
+        of each of the zones
+        """
+        zones_list: list[RtZone] = list(self.rt_zones.values())
+
         rt_forcing = self.construct_rt_forcing_matrix(
             hydro_sim_df=hydro_sim_df,
             forc=forc,
             precip_conc=precip_conc,
-            model_rt_params=rt_zones,
+            model_rt_params=self.rt_zones,
         )
+
         dates: NDArray[np.object_] = hydro_sim_df.index.to_numpy()
+        num_steps: int = dates.size
         time_delta_nanoseconds: NDArray[np.int64] = (
             dates[1:] - dates[:-1]
         )  # Time deltas are calculated in nanoseconds
@@ -1920,12 +2159,28 @@ class Model:
             time_delta_seconds / 86_400.0
         ).tolist()  # Now, need the time delta int terms of days
 
-        state: NDArray = init_conc
+        # Construct the initial concentrations
+        if init_conc is None:
+            init_conc_rows = [
+                self.network.get_default_aqueous_initial_state()
+                for _zone in self.zone_names
+            ]
+            init_conc = np.vstack(init_conc_rows)
+
+        aqueous_init_state: NDArray = init_conc
+        mineral_init_state: NDArray = rt_minerals_to_array(
+            mineral_conc=mineral_conc,
+            mineral_order=self.network.mineral_species_names,
+            zone_order=self.zone_names,
+        )
+
+        state: NDArray = np.hstack([aqueous_init_state, mineral_init_state])
 
         # Run the model forwards
         steps: NDArray[np.object_] = np.empty(
-            (self.num_zones(), len(dates)), dtype=np.object_
+            (self.num_zones, len(dates)), dtype=np.object_
         )
+        final_completed: int = len(dates)
         try:
             for i, (ds_for_step, dt_days_i) in enumerate(
                 zip(rt_forcing.T, time_step_days, strict=True)
@@ -1933,7 +2188,12 @@ class Model:
                 if verbose:
                     print(f"Starting step {i}")
                 step: list[RtStep] = self.step_rt_model(
-                    rt_zones, state, ds_for_step.tolist(), dt_days_i, verbose=verbose
+                    self.rt_zones,
+                    state,
+                    ds_for_step.tolist(),
+                    dt_days_i,
+                    verbose=verbose,
+                    failed_dir=failed_dir,
                 )
                 for j, zone_step in enumerate(step):
                     steps[j, i] = zone_step
@@ -1943,12 +2203,234 @@ class Model:
                 if verbose:
                     print(f"Finished step {i}")
         except Exception as e:
-            print(f"Failed on step {i} with error: {e}")
-            return steps
+            print(f"Failed on step {i} with error: {e}")  # type: ignore
+            if return_partial:
+                final_completed = i  # type: ignore
+            else:
+                raise e
 
         # Construct an output dataframe
+        species_names: list[str] = zones_list[0].all_species
+        mineral_names: list[str] = zones_list[0].mineral_species
+        zone_names: list[str] = self.zone_names
+        data_cols: dict[str, NDArray] = {}
 
-        return None
+        # Get the concentrations of each species
+        for zone_id, zone_name in enumerate(zone_names):
+            for species_id, species_name in enumerate(species_names):
+                conc: NDArray = np.empty(num_steps, dtype=np.float64)
+                mass_in: NDArray = np.empty(num_steps, dtype=np.float64)
+                lat_mass: NDArray = np.empty(num_steps, dtype=np.float64)
+                lat_conc: NDArray = np.empty(num_steps, dtype=np.float64)
+                vert_mass: NDArray = np.empty(num_steps, dtype=np.float64)
+                vert_conc: NDArray = np.empty(num_steps, dtype=np.float64)
+                for i in range(final_completed):
+                    single_step: RtStep = steps[zone_id, i]  # type: ignore
+                    conc[i] = single_step.state[species_id]
+                    mass_in[i] = single_step.mass_in[species_id]
+                    lat_mass[i] = single_step.lat_mass[species_id]
+                    lat_conc[i] = single_step.lat_conc[species_id]
+                    vert_mass[i] = single_step.vert_mass[species_id]
+                    vert_conc[i] = single_step.vert_conc[species_id]
+
+                col_name: str = f"{species_name}_{zone_name}"
+                data_cols[col_name] = conc
+                data_cols[f"{species_name}_{zone_name}_lat_mass"] = lat_mass
+                data_cols[f"{species_name}_{zone_name}_lat_conc"] = lat_conc
+                data_cols[f"{species_name}_{zone_name}_vert_mass"] = vert_mass
+                data_cols[f"{species_name}_{zone_name}_vert_conc"] = vert_conc
+
+            # Get the mineral species
+            for species_id, species_name in enumerate(mineral_names):
+                conc = np.empty(num_steps, dtype=np.float64)
+                for i in range(final_completed):
+                    single_step: RtStep = steps[zone_id, i]  # type: ignore
+                    conc[i] = single_step.mineral_rates[species_id]
+
+                col_name = f"{species_name}_rate_{zone_name}"
+                data_cols[col_name] = conc
+
+        res_df: DataFrame = DataFrame(data=data_cols, index=dates)
+
+        # Quantify the river concentrations
+        river_zone_ids = self.get_river_zone_ids()
+        river_zone_names: list[str] = [self.zone_names[i] for i in river_zone_ids]
+        q_components: dict[str, Series] = {
+            n: hydro_sim_df[f"q_lat_{n}"] for n in river_zone_names
+        }
+        q_sim: Series = hydro_sim_df["sim_streamflow_mmd"]
+
+        for spec_name in self.network.species_names:
+            comp_concs: dict[str, Series] = {}
+            for n in river_zone_names:
+                comp_concs[n] = res_df[f"{spec_name}_{n}"]
+
+            weighted_comps = (
+                sum([q_components[n] * comp_concs[n] for n in river_zone_names]) / q_sim
+            )
+            res_df[f"{spec_name}_riv"] = weighted_comps
+
+        # Calculate the objective functions
+        if meas_river_conc is not None:
+            test_species: list[str] = list(meas_river_conc.columns)  # type: ignore
+            obj_df_cols: list[str] = [x[0] for x in objective_functions]
+            obj_df_index: list[str] = test_species
+            data = np.full((len(obj_df_index), len(obj_df_cols)), fill_value=np.nan)
+
+            for j, (_obj_name, obj_func) in enumerate(objective_functions):
+                for i, spec in enumerate(test_species):
+                    sim_col_name: str = f"{spec}_riv"
+                    c_meas: Series = meas_river_conc[spec]
+                    c_sim: Series = res_df[sim_col_name]
+                    data[i, j] = obj_func(c_meas, c_sim)
+
+            obj_df = DataFrame(columns=obj_df_cols, index=obj_df_index, data=data)
+        else:
+            obj_df = None
+
+        rt_sim_res: RtModelResults = {
+            "hydro_simulation": hydro_sim_df,
+            "rt_simulation": res_df,
+            "objective_functions": obj_df,
+        }
+
+        return rt_sim_res
+
+    def run_both_models(
+        self,
+        forc: ForcingData | list[ForcingData],
+        precip_conc: NDArray,
+        mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
+        init_conc: Optional[NDArray | Series] = None,
+        init_hydro_state: Optional[NDArray[f64]] = None,
+        meas_streamflow: Optional[Series] = None,
+        average_elevation: Optional[float] = None,
+        elevations: Optional[list[float]] = None,
+        check_water_balance: bool = False,
+        meas_river_conc: Optional[DataFrame] = None,
+        objective_functions: Optional[
+            list[tuple[str, Callable[[Series, Series], float]]]
+        ] = None,
+        verbose: bool = False,
+    ) -> ModelResults:
+        if verbose:
+            print("Starting hydrologic simulation")
+
+        hydro_res = self.run_hydro_model(
+            forc=forc,
+            init_state=init_hydro_state,
+            meas_streamflow=meas_streamflow,
+            average_elevation=average_elevation,
+            elevations=elevations,
+            check_water_balance=check_water_balance,
+            objective_functions=objective_functions,
+        )
+
+        if verbose:
+            print("Finished hydrologic model simulation")
+            print("Starting reactive transport simulation")
+
+        rt_res: RtModelResults = self.run_rt_model(
+            hydro_sim_df=hydro_res["simulation"],
+            forc=forc,
+            mineral_conc=mineral_conc,
+            precip_conc=precip_conc,
+            init_conc=init_conc,  # type: ignore
+            meas_river_conc=meas_river_conc,
+            verbose=verbose,
+            return_partial=False,
+            failed_dir=None,
+        )
+
+        return {
+            "hydro_sim_df": hydro_res["simulation"],
+            "hydro_obj_funcs": hydro_res["objective_functions"],
+            "rt_sim_df": rt_res["rt_simulation"],
+            "rt_obj_funcs": rt_res["objective_functions"],
+        }
+
+    @classmethod
+    def from_array(
+        cls: type[Model],
+        arr: NDArray,
+        network: ReactionNetwork,
+        config: dict[str, RtZoneConfiguration],
+        verbose: bool = False,
+    ) -> Model:
+        """
+        Creates a new model instance from a single array containing both
+        hydrologic and reactive transport parameters.
+
+        Args:
+            arr (NDArray): A flat array of all parameter values, with
+                hydrologic parameters first, followed by reactive transport
+                parameters.
+            network (ReactionNetwork): The reaction network for the RT model.
+            config (dict[str, RtZoneConfiguration]): A dictionary of RT configurations,
+                one for each zone in order.
+
+        Returns:
+            Model: A new, fully parameterized model instance.
+        """
+        # Determine the number of reactive transport (RT) parameters.
+        # Each zone has 3 base RT params + one per mineral in the network.
+        num_zones = cls.get_num_zones()
+        num_rt_params_per_zone = 3 + network.num_mineral_parameters
+        num_rt_params = num_zones * num_rt_params_per_zone
+        num_hydro_params: int = cls.get_num_parameters()
+
+        if verbose:
+            print(f"Number of zones in the model: {num_zones}")
+            print(
+                f"Number of reactive transport parameters per zone: {num_rt_params_per_zone}"
+            )
+            print(f"Number of hydrological parameters: {num_hydro_params}")
+            print(f"Total number of reactive transport parameters: {num_rt_params}")
+
+        # Split the main array into hydrologic and RT parts.
+        # Slicing from the end is safer than calculating the hydro param count.
+        hydro_params_arr = arr[0:num_hydro_params]
+        rt_params_arr = arr[num_hydro_params : num_rt_params + num_hydro_params]
+
+        if verbose:
+            print(f"Hydrological parameters: {hydro_params_arr}")
+            print(f"Reactive transport parameters: {rt_params_arr}")
+
+        # Create the base hydrologic model and the RT parameters separately.
+        hydro_mod: Model = cls.hydro_from_array(hydro_params_arr)
+        rt_params: dict[str, RtParameters] = cls.rt_params_from_array(
+            rt_params_arr, verbose=verbose
+        )
+
+        if verbose:
+            print("Reactive transport parameters for each zone:")
+            for key, val in rt_params.items():
+                print(f"{key}: {val}")
+
+        # The model constructor expects a dictionary for RT configuration,
+        # so we convert the input list.
+
+        # Construct the final model using components from the hydrologic model
+        # and the newly created RT components.
+        return cls(
+            zones=hydro_mod.hydro_zones,
+            scales=hydro_mod.scales,
+            lapse_rates=hydro_mod.lapse_rates,
+            network=network,
+            rt_params=rt_params,
+            rt_configuration=config,
+        )
+
+    def to_array(self) -> NDArray:
+        """Convert this model and turn it into a numpy array"""
+        return np.concat([self.hydro_to_array(), self.rt_to_array()])
+
+    @property
+    def network(self) -> ReactionNetwork:
+        if self._has_rt:
+            return self._network
+        else:
+            raise ValueError("Model does not have reactive-transport capabilities")
 
 
 @dataclass(frozen=True)
@@ -2023,7 +2505,7 @@ def run_hydro_model(
         raise TypeError("Forcing data is the wrong type")
 
     num_steps: Final[int] = len(dates)  # Number of steps
-    num_zones: Final[int] = model.num_zones()
+    num_zones: Final[int] = model.get_num_zones()
 
     hydro_forcing = model.construct_hydro_forcing_matrix(forc)
 
@@ -2050,7 +2532,7 @@ def run_hydro_model(
 
         try:
             # Convert state array to list for the generic step method
-            step_res: ModelStep = model.step(
+            step_res: ModelStep = model.step_hydro_model(
                 list(state), ds_for_step, dt, check_water_balance=check_water_balance  # type: ignore
             )
             storages[t_idx] = np.array(step_res.state)
@@ -2085,92 +2567,10 @@ def run_hydro_model(
             :, i, 6
         ]  # Vertical (external)
 
-    col_names: list[str] = model.get_column_names()
+    col_names: list[str] = model.get_hydro_column_names()
 
     out_df: DataFrame = DataFrame(data=full_array, index=dates, columns=col_names)
     return out_df
-
-
-def run_reactive_transport_model(
-    model: Model[RtZone],  # type: ignore
-    init_state: NDArray[f64],
-    hydro_results,
-    rt_forcing: list[
-        ForcingData
-    ],  # Assuming ForcingData contains solute concentrations
-    dates: Series[datetime.date],
-    dt: float,
-) -> DataFrame:
-    """Runs a complete reactive transport simulation.
-
-    This function simulates the movement and reaction of chemical species through
-    the domain defined by the model. It uses the results from a prior
-    hydrologic model run to define the flow paths and water volumes.
-
-    Args:
-        model: The configured `Model[ReactiveTransportZone]` instance to run.
-        init_state: A 2D array of initial chemical concentrations for each zone
-            and each species, with shape (num_zones, num_species).
-        hydro_results: A `HydroModelResults` object containing the time series
-            of states (e.g., storage) and fluxes from the hydrologic model run.
-        rt_forcing: A list of `ForcingData` objects, one for each forcing
-            source, containing the time series of solute concentrations in
-            precipitation or other inputs.
-        dates: A pandas Series of dates for the output DataFrame index.
-        dt: The time step duration in days.
-
-    Returns:
-        A pandas DataFrame containing the time series of concentrations for
-        all species in all zones.
-    """
-    # 1. Get dimensions and validate inputs
-    # num_steps = len(dates)
-    # num_zones = len(model)
-    # num_species = init_state.shape[1]
-
-    # 2. Prepare chemical forcing data
-    # Similar to run_hydro_model, distribute the chemical forcing (e.g., solute
-    # concentrations in rain) from the sources to each individual zone for all
-    # time steps. This will create a `zone_concentration_series` array with
-    # shape (num_steps, num_zones, num_species).
-
-    # 3. Initialize storage for results
-    # concentrations = np.full((num_steps, num_zones, num_species), np.nan)
-
-    # 4. Set initial state
-    # state = init_state  # Shape: (num_zones, num_species)
-
-    # 5. Loop over each time step
-    # for t_idx in range(num_steps):
-    #     # a. Extract hydrologic data for the current step from hydro_results
-    #     #    - Get water volume/storage for each zone.
-    #     #    - Get water fluxes (lateral, vertical, forcing) for each zone.
-
-    #     # b. Construct the forcing object (`ds`) for each zone for the current step
-    #     #    This will be a list of `RtForcing` objects, one for each zone.
-    #     #    Each `RtForcing` object needs to be populated with the hydrologic
-    #     #    data from (a) and the chemical forcing data from step 2.
-    #     ds_for_step: list[RtForcing] = []
-
-    #     # c. Step the reactive transport model
-    #     #    The `state` here is a list of 1D arrays, where each array holds
-    #     #    the concentrations for one zone.
-    #     # step_res: ModelStep = model.step(list(state), ds_for_step, dt)
-
-    #     # d. Store the new concentrations from step_res
-    #     # concentrations[t_idx] = np.array(step_res.state)
-
-    #     # e. Update the state for the next iteration
-    #     # state = np.array(step_res.state)
-
-    # 6. Format and return results
-    #    - Create a pandas DataFrame from the `concentrations` array.
-    #    - Name the columns appropriately to identify the zone and species
-    #      (e.g., "z0_Cl", "z0_Na", "z1_Cl", etc.).
-    #    - Set the DataFrame index to `dates`.
-    #    - Return the DataFrame.
-
-    raise NotImplementedError("Outline complete. Implementation pending.")
 
 
 # ==== Defined hydrologic models ==== #
@@ -2184,6 +2584,9 @@ class HbvModel(Model):
         [GroundZoneB(name="deep")],
     ]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
     def __repr__(self) -> str:
         lines = [
             "HbvModel(",
@@ -2195,10 +2598,10 @@ class HbvModel(Model):
             f"\tk0={round(self['surface'].k0, 4)},",  # type: ignore
             f"\tthr={round(self['surface'].thr, 2)},",  # type: ignore
             f"\tk1={round(self['shallow'].k, 4)},",  # type: ignore
-            f"\tk1={round(self['shallow'].alpha, 2)},",  # type: ignore
+            f"\tshallow_alpha={round(self['shallow'].alpha, 2)},",  # type: ignore
             f"\tperc={round(self['shallow'].perc, 2)},",  # type: ignore
             f"\tk2={round(self['deep'].k, 4)},",  # type: ignore
-            f"\tk2={round(self['deep'].alpha, 2)},",  # type: ignore
+            f"\tdeep_alpha={round(self['deep'].alpha, 2)},",  # type: ignore
             ")",
         ]
 

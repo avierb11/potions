@@ -1,8 +1,9 @@
-from typing import Callable, Literal, TypeVar, TypedDict
+from typing import Callable, Final, Iterable, Literal, Optional, TypeVar, TypedDict
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
+from scipy.optimize import approx_fprime
 
 from .common_types import ForcingData
 
@@ -19,6 +20,7 @@ NumSec = TypeVar("NumSec", bound=int)  # Number of secondary aqueous species
 NumSpec = TypeVar(
     "NumSpec", bound=int
 )  # Number of species in the model - mineral and aqueous
+ZERO_CONC: Final[float] = 1e-20
 
 
 class HydroModelResults(TypedDict):
@@ -37,7 +39,7 @@ class HydroModelResults(TypedDict):
 class RtModelResults(TypedDict):
     rt_simulation: DataFrame
     hydro_simulation: DataFrame
-    objective_functions: Series
+    objective_functions: Optional[DataFrame]
 
 
 def objective_function(
@@ -183,6 +185,9 @@ def find_root_multi(
     f_x: NDArray = f(x)
     err: float = (f_x**2).mean()
 
+    def j(x: NDArray) -> NDArray:
+        return approx_fprime(x, f)  # type: ignore
+
     if debug:
         print(f"Initial f(x): {f_x}")
         print(f"Initial error: {err}")
@@ -191,9 +196,11 @@ def find_root_multi(
         if err <= tol:
             return x
 
-        jac_x: NDArray = jac(f, x, dx=dx)
-        step: NDArray = np.linalg.solve(jac_x, f_x)
-        x -= step
+        # jac_x: NDArray = jac(f, x, dx=dx)
+        jac_x: NDArray = approx_fprime(x, f)  # type: ignore
+        step: NDArray = np.linalg.solve(j(x), f(x))
+        x_new = x - step
+        x = x_new
         f_x = f(x)
         err = (f_x**2).mean()
         if np.isnan(err):
@@ -214,6 +221,42 @@ def find_root_multi(
             print()
 
     raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")
+
+
+def rt_minerals_to_array(
+    mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
+    mineral_order: list[str],
+    zone_order: list[str],
+) -> NDArray:
+    rows: list[np.ndarray] = []
+
+    if isinstance(mineral_conc, (np.ndarray, list, tuple)):
+        rows = [x_i for x_i in mineral_conc]
+        for row in rows:
+            if len(row) != len(mineral_order):
+                raise ValueError(
+                    f"When passing array-like object as `mineral_conc`, the array must have shape ({len(zone_order)}, {len(mineral_order)})"
+                )
+    elif isinstance(mineral_conc, dict):
+        if set(mineral_conc.keys()) != set(zone_order):
+            raise ValueError(f"Must pass all zones in model: need each of {zone_order}")
+        else:
+            for zone in zone_order:
+                zm = mineral_conc[zone]
+                if isinstance(zm, dict):
+                    vals: list[float] = []
+                    for min_name in mineral_order:
+                        if min_name not in zm:
+                            raise ValueError(
+                                f"Zone '{zone}' is missing mineral species '{min_name}'"
+                            )
+                        else:
+                            vals.append(zm[min_name])
+                        rows.append(np.array(vals))
+                elif isinstance(zm, (np.ndarray, list, tuple, Series)):
+                    rows.append(np.array([x_i for x_i in zm]))
+
+    return np.vstack(rows)
 
 
 # ======================== #

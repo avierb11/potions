@@ -53,7 +53,6 @@ def test_Model_connection_matrices_simple_3_box() -> None:
 
 def test_Model_connection_matrix_mixed_sizes() -> None:
     zone: GroundZone = GroundZone(0.0, 0.0, 0.0)
-    layer: Layer = Layer([zone, zone])
 
     scales = [[0.6, 0.4]]
 
@@ -173,7 +172,7 @@ def test_3_box_simple_model_steady_state() -> None:
     const_forcing = HydroForcing(precip=1.0, temp=25.0, pet=1.0, q_in=0.0)
     forcing: list[HydroForcing] = [const_forcing] * len(model.flat_model)
 
-    state: NDArray[f64] = model.default_init_state()
+    state: NDArray[f64] = model.default_hydro_init_state()
     error: float = 1e10
 
     num_steps: int = 1_000
@@ -181,7 +180,7 @@ def test_3_box_simple_model_steady_state() -> None:
 
     start = time.time()
     for i in range(num_steps):
-        model_step: ModelStep = model.step(np.array(state), forcing, 1.0)
+        model_step: ModelStep = model.step_hydro_model(np.array(state), forcing, 1.0)
         new_state = np.array(model_step.state)
         new_error = abs(new_state - state).sum()
         state = new_state
@@ -215,7 +214,7 @@ def test_3_box_simple_model_steady_state_v2() -> None:
     forc_arg: list[ForcingData] = [forcing_data_item]
 
     # Initial state
-    init_state: NDArray[f64] = model.default_init_state()
+    init_state: NDArray[f64] = model.default_hydro_init_state()
 
     start_time = time.time()
     output_df: DataFrame = run_hydro_model(model, init_state, forc_arg, dates_series)
@@ -224,15 +223,16 @@ def test_3_box_simple_model_steady_state_v2() -> None:
     rate = num_steps / dur if dur > 0 else float("inf")
 
     # Assertions
-    assert output_df.shape == (num_steps, len(model.flat_model) * 5), (
-        f"Output DataFrame shape mismatch. Expected: ({num_steps}, {len(model.flat_model) * 5}), Got: {output_df.shape}"
-    )
+    assert output_df.shape == (
+        num_steps,
+        len(model.flat_model) * 5,
+    ), f"Output DataFrame shape mismatch. Expected: ({num_steps}, {len(model.flat_model) * 5}), Got: {output_df.shape}"
 
     # Check for NaNs in the last row of state variables
     state_cols = [col for col in output_df.columns if col.startswith("s_")]
-    assert not output_df[state_cols].iloc[-1].isnull().any(), (
-        "NaNs found in final states."
-    )
+    assert (
+        not output_df[state_cols].iloc[-1].isnull().any()
+    ), "NaNs found in final states."
 
     # Check for convergence (state change near the end is small)
     convergence_check_period = 20
@@ -240,6 +240,6 @@ def test_3_box_simple_model_steady_state_v2() -> None:
         for state_col in state_cols:
             s_end: f64 = output_df[state_col].iloc[-1]
             s_prev: f64 = output_df[state_col].iloc[-1 - convergence_check_period]
-            assert abs(s_end - s_prev) < 1e-3, (
-                f"State {state_col} did not converge. End: {s_end:.4f}, Prev: {s_prev:.4f}"
-            )
+            assert (
+                abs(s_end - s_prev) < 1e-3
+            ), f"State {state_col} did not converge. End: {s_end:.4f}, Prev: {s_prev:.4f}"
