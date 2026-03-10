@@ -5,11 +5,14 @@
 # cython: profile=False
 # cython: linetrace=False
 import numpy as np
-from scipy.optimize import approx_fprime
 import cython  # type: ignore
 from typing import Callable
+from scipy.optimize import approx_fprime
 
-from potions.common_types_compiled import HydroForcing
+from .common_types_compiled import HydroForcing
+
+if not cython.compiled:
+    print("WARNING: 'potions.math' is not compiled and may be slower as a result")
 
 
 @cython.ccall
@@ -205,12 +208,12 @@ def find_root_multi(
         f_x = f(x)
         err = (f_x**2).mean()
         if np.isnan(err):
-            print("Rootfinding error: the calculated error is NaN. Values:")
-            print(f"{x_0=}")
-            print(f"{x=}")
-            print(f"{f_x=}")
-            print(f"{jac_x=}")
-            print(f"{step=}")
+            # print("Rootfinding error: the calculated error is NaN. Values:")
+            # print(f"{x_0=}")
+            # print(f"{x=}")
+            # print(f"{f_x=}")
+            # print(f"{jac_x=}")
+            # print(f"{step=}")
             raise ValueError("NaN value encountered in rootfinding")
 
         if debug:
@@ -222,3 +225,32 @@ def find_root_multi(
             print()
 
     raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")
+
+
+@cython.boundscheck(False)  # Deactivate bounds checking
+@cython.wraparound(False)  # Deactivate negative indexing
+@cython.cdivision(True)  # Deactivate zero-division checks for speed
+@cython.ccall  # Equivalent to cpdef: C-speed with Python access
+def fast_matvec(
+    matrix: cython.double[:, :], vector: cython.double[:], out: cython.double[:]  # type: ignore
+) -> cython.void:  # type: ignore
+    """
+    Performs out = matrix * vector.
+    Inputs must be memoryviews (e.g., NumPy arrays).
+    """
+
+    # Declare C types for all local variables
+    i: cython.int
+    j: cython.int
+    m: cython.int = matrix.shape[0]  # type: ignore
+    n: cython.int = matrix.shape[1]  # type: ignore
+    dot_product: cython.double
+
+    # 'prange' enables OpenMP parallelism and releases the GIL
+    # 'nogil=True' ensures no Python objects are accessed inside the loop
+    for i in range(m):
+        dot_product = 0.0
+        for j in range(n):
+            # Accessing memoryviews directly avoids Python attribute lookups
+            dot_product += matrix[i, j] * vector[j]  # type: ignore
+        out[i] = dot_product  # type: ignore

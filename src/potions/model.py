@@ -54,6 +54,7 @@ from .reactive_transport import (
     get_hydro_steps,
 )
 from .utils import (
+    DO_LOGGING,
     HydroModelResults,
     RtModelResults,
     log_probability,
@@ -2204,7 +2205,8 @@ class Model:
                 if verbose:
                     print(f"Finished step {i}")
         except Exception as e:
-            print(f"Failed on step {i} with error: {e}")  # type: ignore
+            if DO_LOGGING:
+                print(f"Failed on step {i} with error: {e}")  # type: ignore
             if return_partial:
                 final_completed = i  # type: ignore
             else:

@@ -1,5 +1,6 @@
 # setup.py
 from Cython.Build import cythonize
+import numpy as np
 from setuptools import setup
 from setuptools.extension import Extension
 
@@ -21,12 +22,24 @@ extensions = [
         define_macros=[("CYTHON_PROFILE", "1")],
     ),
     Extension(
-        "potions.reactive_transport",  # the module name in python
+        "potions.reactive_transport.kinetic_structures",  # the module name in python
         [
-            "src/potions/reactive_transport/__init__.py",
-            "src/potions/reactive_transport/database.py",
             "src/potions/reactive_transport/kinetic_structures.py",
+        ],  # the cython source
+        include_dirs=["."],
+        define_macros=[("CYTHON_PROFILE", "1")],
+    ),
+    Extension(
+        "potions.reactive_transport.reaction_network",  # the module name in python
+        [
             "src/potions/reactive_transport/reaction_network.py",
+        ],  # the cython source
+        include_dirs=["."],
+        define_macros=[("CYTHON_PROFILE", "1")],
+    ),
+    Extension(
+        "potions.reactive_transport.rt_zone",  # the module name in python
+        [
             "src/potions/reactive_transport/rt_zone.py",
         ],  # the cython source
         include_dirs=["."],
@@ -41,6 +54,7 @@ for ext in extensions:
 setup(
     name="potions-model",
     ext_modules=cythonize(extensions, build_dir="compiled", annotate=True),
+    include_dirs=[np.get_include()],
     # script_args=["build_ext", "--inplace"], # This may not be neccesary depending on system
     zip_safe=False,
 )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from typing import Optional
+import cython  # type: ignore
 
 import numpy as np
 from numpy.linalg import LinAlgError
@@ -28,6 +29,11 @@ from .kinetic_structures import (
 from .reaction_network import (
     ReactionNetwork,
 )
+
+if not cython.compiled:
+    print(
+        "WARNING: 'potions.reactive_transport.rt_zone' is not compiled and may be slower as a result"
+    )
 
 setup_logging("rt_zone.py")
 

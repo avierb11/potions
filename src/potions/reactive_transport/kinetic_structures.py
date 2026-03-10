@@ -22,6 +22,11 @@ setup_logging("kinetic_structures.py")
 PARAMETERS_PER_MINERAL: Final[int] = 5
 # =================== #
 
+if not cython.compiled:
+    print(
+        "WARNING: 'potions.reactive_transport.kinetic_structures' is not compiled and may be slower as a result"
+    )
+
 
 @cython.final
 @cython.cclass
@@ -58,10 +63,10 @@ class MonodParameters:
                                The columns follow the same order as `monod_mat`.
     """
 
-    monod_mat: DataFrame
-    inhib_mat: DataFrame
-    monod_mat_np: cython.double[:, :]  # type: ignore
-    inhib_mat_np: cython.double[:, :]  # type: ignore
+    monod_mat: DataFrame = cython.declare(object, visibility="public")  # type: ignore
+    inhib_mat: DataFrame = cython.declare(object, visibility="public")  # type: ignore
+    monod_mat_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
+    inhib_mat_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
 
     def __init__(self, monod_mat: DataFrame, inhib_mat: DataFrame):
         self.monod_mat = monod_mat
@@ -208,14 +213,20 @@ class TstParameters:
     """
 
     # Python types
-    stoich: DataFrame  # Stoichiometry of the mineral reactions
-    dep: DataFrame  # Dependence of the rate law on other species concentrations (typically pH through H+ or OH- dependence)
-    min_eq_const: Series  # Vector of equilibrium constants
+    stoich: DataFrame = cython.declare(
+        object, visibility="public"
+    )  # Stoichiometry of the mineral reactions # type: ignore
+    dep: DataFrame = cython.declare(
+        object, visibility="public"
+    )  # Dependence of the rate law on other species concentrations (typically pH through H+ or OH- dependence) # type: ignore
+    min_eq_const: Series = cython.declare(
+        object, visibility="public"
+    )  # Vector of equilibrium constants # type: ignore
 
     # Cython types
-    stoich_np: cython.float[:, :]  # type: ignore
-    dep_np: cython.float[:, :]  # type: ignore
-    min_eq_const_np: cython.float[:]  # type: ignore
+    stoich_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
+    dep_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
+    min_eq_const_np: cython.double[:] = cython.declare(cython.double[:], visibility="public")  # type: ignore
 
     def __init__(self, stoich: DataFrame, dep: DataFrame, min_eq_const: Series):
         # Python types
@@ -390,20 +401,40 @@ class EquilibriumParameters:
     """
 
     # Pandas types
-    stoich: DataFrame  # Matrix describing the stoichiometry of the secondary species
-    log_eq_consts: Series  # Vector of the equilibrium constants for the secondary species in log10 scale
-    total: DataFrame  # Matrix describing the mass and charge balance of the species
-    stoich_null_space: NDArray
-    log10_k_w: NDArray
-    x_particular: NDArray
+    stoich: DataFrame = cython.declare(
+        object, visibility="public"
+    )  # Matrix describing the stoichiometry of the secondary species # type: ignore
+    log_eq_consts: Series = cython.declare(
+        object, visibility="public"
+    )  # Vector of the equilibrium constants for the secondary species in log10 scale # type: ignore
+    total: DataFrame = cython.declare(
+        object, visibility="public"
+    )  # Matrix describing the mass and charge balance of the species # type: ignore
+    stoich_null_space: NDArray = cython.declare(
+        object, visibility="public"
+    )  # type: ignore
+    log10_k_w: NDArray = cython.declare(object, visibility="public")  # type: ignore
+    x_particular: NDArray = cython.declare(object, visibility="public")  # type: ignore
 
     # C types
-    stoich_np: cython.double[:, :]  # type: ignore
-    log_eq_consts_np: cython.double[:]  # type: ignore
-    total_np: cython.double[:, :]  # type: ignore
-    stoich_null_space_np: cython.double[:, :]  # type: ignore
-    log10_k_w_np: cython.double[:]  # type: ignore
-    x_particular_np: cython.double[:]  # type: ignore
+    stoich_np: cython.double[:, :] = cython.declare(  # type: ignore
+        cython.double[:, :], visibility="public"  # type: ignore
+    )  # type: ignore
+    log_eq_consts_np: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    total_np: cython.double[:, :] = cython.declare(  # type: ignore
+        cython.double[:, :], visibility="public"  # type: ignore
+    )  # type: ignore
+    stoich_null_space_np: cython.double[:, :] = cython.declare(  # type: ignore
+        cython.double[:, :], visibility="public"  # type: ignore
+    )  # type: ignore
+    log10_k_w_np: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    x_particular_np: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
 
     def __init__(self, stoich: DataFrame, log_eq_consts: Series, total: DataFrame):
         # Solve the python versions
@@ -424,7 +455,7 @@ class EquilibriumParameters:
 
     @cython.ccall
     def conc_func(self, x_free: np.ndarray) -> np.ndarray:
-        return 10 ** (self.stoich_null_space @ x_free + self.x_particular)
+        return 10.0 ** (self.stoich_null_space_np @ x_free + self.x_particular_np)
 
     @cython.ccall
     def residual_func(self, x_free: np.ndarray, c_tot: np.ndarray) -> np.ndarray:
@@ -626,17 +657,37 @@ class ZoneDimensions:
 
 @cython.cclass
 class MineralParameters:
-    sw_threshold: NDArray  # The soil water threshold
-    sw_exp: NDArray  # The soil water exponent
-    n_alpha: NDArray  # The water table depth factor
-    q_10: NDArray  # The temperature factor range
-    ssa: NDArray  # The specific surface area in units of g/mol
+    sw_threshold: NDArray = cython.declare(  # type: ignore
+        object, visibility="public"
+    )  # The soil water threshold
+    sw_exp: NDArray = cython.declare(  # type: ignore
+        object, visibility="public"
+    )  # The soil water exponent
+    n_alpha: NDArray = cython.declare(  # type: ignore
+        object, visibility="public"
+    )  # The water table depth factor
+    q_10: NDArray = cython.declare(  # type: ignore
+        object, visibility="public"
+    )  # The temperature factor range
+    ssa: NDArray = cython.declare(  # type: ignore
+        object, visibility="public"
+    )  # The specific surface area in units of g/mol
 
-    sw_threshold_cy: cython.float[:]  # type: ignore
-    sw_exp_cy: cython.float[:]  # type: ignore
-    n_alpha_cy: cython.float[:]  # type: ignore
-    q_10_cy: cython.float[:]  # type: ignore
-    ssa_cy: cython.float[:]  # type: ignore
+    sw_threshold_cy: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    sw_exp_cy: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    n_alpha_cy: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    q_10_cy: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
+    ssa_cy: cython.double[:] = cython.declare(  # type: ignore
+        cython.double[:], visibility="public"  # type: ignore
+    )  # type: ignore
 
     def __init__(
         self,
@@ -822,11 +873,11 @@ class MineralParameters:
             q_10s.append(m.q_10)
             ssas.append(m.ssa)
         return MineralParameters(
-            sw_threshold=np.array(sw_thrs),
-            sw_exp=np.array(sw_exps),
-            n_alpha=np.array(n_alphas),
-            q_10=np.array(q_10s),
-            ssa=np.array(ssas),
+            sw_threshold=np.array(sw_thrs, dtype=np.float64),
+            sw_exp=np.array(sw_exps, dtype=np.float64),
+            n_alpha=np.array(n_alphas, dtype=np.float64),
+            q_10=np.array(q_10s, dtype=np.float64),
+            ssa=np.array(ssas, dtype=np.float64),
         )
 
     def __eq__(self, other: object) -> bool:

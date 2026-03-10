@@ -17,6 +17,9 @@ from .common_types_compiled import HydroForcing, HydroStep
 from .math import bisect, find_root
 from .utils import setup_logging
 
+if not cython.compiled:
+    print("WARNING: 'potions.hydro' is not compiled and performance will suffer")
+
 setup_logging(__file__)
 
 """
