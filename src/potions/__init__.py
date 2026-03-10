@@ -63,9 +63,8 @@ __all__ = [
     "RtZoneConfiguration",
     "ModelResults",
 ]
-
-from .common_types import ChemicalState, LapseRateParameters, RtForcing
-from .common_types_compiled import HydroForcing, HydroStep
+from .common_types import ChemicalState, LapseRateParameters
+from .common_types_compiled import HydroForcing, HydroStep, RtForcing
 from .hydro import (
     GroundZone,
     GroundZoneB,
@@ -116,5 +115,8 @@ from .reactive_transport import (
 )
 from .utils import (
     objective_function,
+)
+
+from .math import (
     find_root_multi,
 )

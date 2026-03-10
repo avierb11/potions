@@ -1,6 +1,7 @@
 from __future__ import annotations
-import os
-from typing import Optional, Final, Callable, Iterable
+from functools import partial
+import logging
+from typing import Final, Callable, Iterable
 from dataclasses import dataclass
 from pandas import DataFrame, Series
 import numpy as np
@@ -8,18 +9,22 @@ from numpy.typing import NDArray
 import scipy.linalg as la
 from scipy.optimize import fsolve
 
+from cython.cimports.libc.math import isnan, pow, log10, fabs, exp  # type: ignore
+import cython  # type: ignore
 
-from ..common_types import RtForcing, Vector
-from .database import PrimaryAqueousSpecies, SecondarySpecies, ExchangeReaction
-from ..utils import find_root_multi
+from ..common_types_compiled import RtForcing
+from ..math import find_root_multi
+from ..utils import DO_LOGGING, setup_logging
 
+setup_logging("kinetic_structures.py")
 
 # ==== Constants ==== #
 PARAMETERS_PER_MINERAL: Final[int] = 5
 # =================== #
 
 
-@dataclass(frozen=True)
+@cython.final
+@cython.cclass
 class MonodParameters:
     """
     A class containing the Monod parameters for a reaction network in a reactive transport model.
@@ -55,8 +60,19 @@ class MonodParameters:
 
     monod_mat: DataFrame
     inhib_mat: DataFrame
+    monod_mat_np: cython.double[:, :]  # type: ignore
+    inhib_mat_np: cython.double[:, :]  # type: ignore
 
-    def rate(self, chms: NDArray) -> NDArray:
+    def __init__(self, monod_mat: DataFrame, inhib_mat: DataFrame):
+        self.monod_mat = monod_mat
+        self.inhib_mat = inhib_mat
+        self.monod_mat_np = monod_mat.to_numpy()  # type: ignore
+        self.inhib_mat_np = inhib_mat.to_numpy()  # type: ignore
+
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def rate(self, chms: np.ndarray) -> np.ndarray:
         """
         Calculate the rate of reaction using Monod kinetics based on the concentration of species.
 
@@ -84,14 +100,39 @@ class MonodParameters:
             >>> print(rates)
             [0.6, 0.4]  # Example output: reaction rates for two minerals
         """
-        monod = np.zeros(self.monod_mat.shape[0], dtype=np.float64)
-        inhib = np.zeros(self.inhib_mat.shape[0], dtype=np.float64)
 
-        for i, row in enumerate(self.monod_mat.values):
-            monod[i] = np.nanprod(chms / (row + chms))
+        n_minerals: cython.int = self.monod_mat_np.shape[0]  # type: ignore
+        n_species: cython.int = self.monod_mat_np.shape[1]  # type: ignore
+        monod = np.zeros(n_minerals, dtype=np.float64)  # type: ignore
+        inhib = np.zeros(n_minerals, dtype=np.float64)  # type: ignore
 
-        for i, row in enumerate(self.inhib_mat.values):
-            inhib[i] = np.nanprod(row / (row + chms))
+        # Memoryviews
+        monod_mv: cython.double[:] = monod  # type: ignore
+        inhib_mv: cython.double[:] = inhib  # type: ignore
+        chms_mv: cython.double[:] = chms  # type: ignore
+
+        i: cython.int
+        j: cython.int
+        val: cython.double
+        prod: cython.double
+
+        # --- Calculate Monod term ---
+        for i in range(n_minerals):
+            prod = 1.0
+            for j in range(n_species):
+                val = self.monod_mat_np[i, j]  # type: ignore
+                if not isnan(val):
+                    prod *= chms_mv[j] / (val + chms_mv[j])  # type: ignore
+            monod_mv[i] = prod  # type: ignore
+
+        # --- Calculate Inhibition term ---
+        for i in range(n_minerals):
+            prod = 1.0
+            for j in range(n_species):
+                val = self.inhib_mat_np[i, j]  # type: ignore
+                if not isnan(val):
+                    prod *= val / (val + chms_mv[j])  # type: ignore
+            inhib_mv[i] = prod  # type: ignore
 
         return monod * inhib
 
@@ -125,7 +166,8 @@ class MonodParameters:
             return bool(monod_are_equal and inhib_are_equal)
 
 
-@dataclass(frozen=True)
+@cython.final
+@cython.cclass
 class TstParameters:
     """
     The Transition-State Theory (TST) parameters, containing two matrices of shape
@@ -165,11 +207,31 @@ class TstParameters:
                               direction of the reaction.
     """
 
+    # Python types
     stoich: DataFrame  # Stoichiometry of the mineral reactions
     dep: DataFrame  # Dependence of the rate law on other species concentrations (typically pH through H+ or OH- dependence)
     min_eq_const: Series  # Vector of equilibrium constants
 
-    def rate(self, chms: NDArray) -> NDArray:
+    # Cython types
+    stoich_np: cython.float[:, :]  # type: ignore
+    dep_np: cython.float[:, :]  # type: ignore
+    min_eq_const_np: cython.float[:]  # type: ignore
+
+    def __init__(self, stoich: DataFrame, dep: DataFrame, min_eq_const: Series):
+        # Python types
+        self.stoich = stoich
+        self.dep = dep
+        self.min_eq_const = min_eq_const
+
+        # Cython types
+        self.stoich_np = stoich.to_numpy()  # type: ignore
+        self.dep_np = dep.to_numpy()  # type: ignore
+        self.min_eq_const_np = min_eq_const.to_numpy()  # type: ignore
+
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def rate(self, chms_in: np.ndarray) -> np.ndarray:
         """
         Calculate the rate of reaction using Transition-State Theory (TST) kinetics.
 
@@ -197,15 +259,53 @@ class TstParameters:
             >>> print(rates)
             [0.2, 0.1]  # Example output: reaction rates for two minerals
         """
-        log_conc: NDArray = np.log10(chms)
+        n_minerals: cython.int = self.stoich_np.shape[0]  # type: ignore
+        n_species: cython.int = self.stoich_np.shape[1]  # type: ignore
+        i: cython.int
+        j: cython.int
 
-        log_dep: NDArray = self.dep.values @ log_conc
-        log_iap: NDArray = self.stoich.values @ log_conc
+        # --- 2. Allocate output arrays and create memoryviews for fast access ---
+        rate_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
+        rate_mv: cython.double[:] = rate_out  # type: ignore
 
-        dep: NDArray = 10**log_dep
-        iap: NDArray = 10**log_iap
+        log_conc_arr: np.ndarray = np.empty(n_species, dtype=np.float64)
+        log_conc_mv: cython.double[:] = log_conc_arr  # type: ignore
 
-        return dep * (1.0 - iap / self.min_eq_const)
+        chms_mv: cython.double[:] = chms_in  # type: ignore
+
+        # --- 3. Pre-calculate log10 of concentrations in a C loop ---
+        # Replaces: log_conc: NDArray = np.log10(chms)
+        for j in range(n_species):
+            log_conc_mv[j] = log10(chms_mv[j])  # type: ignore
+
+        # --- 4. Main loop over each mineral ---
+        log_dep_i: cython.double
+        log_iap_i: cython.double
+        dep_val: cython.double
+        stoich_val: cython.double
+
+        for i in range(n_minerals):
+            log_dep_i = 0.0
+            log_iap_i = 0.0
+
+            # --- 5. Inner loop to calculate dot products (matrix-vector multiply) ---
+            # Replaces: log_dep = self.dep_np @ log_conc and log_iap = self.stoich_np @ log_conc
+            for j in range(n_species):
+                dep_val = self.dep_np[i, j]  # type: ignore
+                if not isnan(dep_val):
+                    log_dep_i += dep_val * log_conc_mv[j]  # type: ignore
+
+                stoich_val = self.stoich_np[i, j]  # type: ignore
+                if not isnan(stoich_val):
+                    log_iap_i += stoich_val * log_conc_mv[j]  # type: ignore
+
+            # --- 6. Calculate the final rate for the current mineral ---
+            # Replaces: dep = 10**log_dep, iap = 10**log_iap, and the final calculation
+            rate_mv[i] = pow(10.0, log_dep_i) * (  # type: ignore
+                1.0 - pow(10.0, log_iap_i) / self.min_eq_const_np[i]  # type: ignore
+            )
+
+        return rate_out
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TstParameters):
@@ -224,7 +324,8 @@ class TstParameters:
             )
 
 
-@dataclass(frozen=True)
+@cython.final
+@cython.cclass
 class EquilibriumParameters:
     """
     Container class for equilibrium parameters used in aqueous chemical equilibrium calculations.
@@ -288,132 +389,49 @@ class EquilibriumParameters:
     - Total concentrations are used to solve for the actual equilibrium distribution
     """
 
+    # Pandas types
     stoich: DataFrame  # Matrix describing the stoichiometry of the secondary species
     log_eq_consts: Series  # Vector of the equilibrium constants for the secondary species in log10 scale
     total: DataFrame  # Matrix describing the mass and charge balance of the species
+    stoich_null_space: NDArray
+    log10_k_w: NDArray
+    x_particular: NDArray
 
-    @staticmethod
-    def from_species(
-        species: Series,
-        primary: list[PrimaryAqueousSpecies],
-        secondary: list[SecondarySpecies],
-        exchange: list[ExchangeReaction],
-    ) -> EquilibriumParameters:
-        """
-        Construct the equilibrium parameters from the database species information.
+    # C types
+    stoich_np: cython.double[:, :]  # type: ignore
+    log_eq_consts_np: cython.double[:]  # type: ignore
+    total_np: cython.double[:, :]  # type: ignore
+    stoich_null_space_np: cython.double[:, :]  # type: ignore
+    log10_k_w_np: cython.double[:]  # type: ignore
+    x_particular_np: cython.double[:]  # type: ignore
 
-        This static method creates an EquilibriumParameters object by processing
-        the database information about primary and secondary species, as well as
-        exchange reactions to build the stoichiometric matrices and equilibrium
-        constant vectors needed for equilibrium calculations.
+    def __init__(self, stoich: DataFrame, log_eq_consts: Series, total: DataFrame):
+        # Solve the python versions
+        self.stoich = stoich
+        self.log_eq_consts = log_eq_consts
+        self.total = total
+        self.stoich_null_space = la.null_space(self.stoich.values)
+        self.log10_k_w = self.log_eq_consts.to_numpy()
+        self.x_particular = la.pinv(self.stoich) @ self.log10_k_w
 
-        Parameters
-        ----------
-        species : pandas.Series
-            Series containing species information from the database
-        primary : list of PrimaryAqueousSpecies
-            List of primary aqueous species in the system
-        secondary : list of SecondarySpecies
-            List of secondary species formed from primary species
-        exchange : list of ExchangeReaction
-            List of exchange reactions that define the relationships between
-            species in the system
+        # Create the stoichiometry matrices
+        self.stoich_np = stoich.to_numpy()  # type: ignore
+        self.log_eq_consts_np = log_eq_consts.to_numpy()  # type: ignore
+        self.total_np = total.to_numpy()  # type: ignore
+        self.stoich_null_space_np = self.stoich_null_space  # type: ignore
+        self.log10_k_w_np = self.log10_k_w  # type: ignore
+        self.x_particular_np = self.x_particular  # type: ignore
 
-        Returns
-        -------
-        EquilibriumParameters
-            Initialized EquilibriumParameters object with stoichiometry and
-            equilibrium constants set up for equilibrium calculations
+    @cython.ccall
+    def conc_func(self, x_free: np.ndarray) -> np.ndarray:
+        return 10 ** (self.stoich_null_space @ x_free + self.x_particular)
 
-        Raises
-        ------
-        NotImplementedError
-            This method is not yet implemented and raises an exception when called
+    @cython.ccall
+    def residual_func(self, x_free: np.ndarray, c_tot: np.ndarray) -> np.ndarray:
+        return c_tot - self.total_np @ self.conc_func(x_free)
 
-        Notes
-        -----
-        This method serves as the factory constructor for the EquilibriumParameters
-        class. It processes the database information to build the mathematical
-        framework needed for solving aqueous chemical equilibrium problems.
-        """
-        raise NotImplementedError()
-
-    @property
-    def stoich_null_space(self) -> NDArray:
-        """
-        Return the null space of the stoichiometry matrix.
-
-        The null space represents the degrees of freedom in the equilibrium system.
-        Any vector in the null space corresponds to a valid set of concentrations
-        that satisfy the stoichiometric constraints.
-
-        Returns
-        -------
-        numpy.ndarray
-            Matrix whose columns form a basis for the null space of the stoichiometry
-            matrix. Each column represents an independent degree of freedom in the
-            equilibrium system.
-
-        Notes
-        -----
-        The null space is computed using linear algebra operations and provides
-        the mathematical foundation for solving the equilibrium problem. It
-        represents the space of all possible concentration distributions that
-        satisfy the stoichiometric constraints.
-        """
-        return la.null_space(self.stoich)
-
-    @property
-    def log10_k_w(self) -> NDArray:
-        """
-        Return a vector of the equilibrium constants in base-10 logarithm.
-
-        This property provides the equilibrium constants in logarithmic scale,
-        which is more numerically stable for calculations involving very large
-        or very small equilibrium constants.
-
-        Returns
-        -------
-        numpy.ndarray
-            Vector of equilibrium constants in base-10 logarithmic scale,
-            corresponding to the secondary species in the system.
-
-        Notes
-        -----
-        The logarithmic representation is used throughout the equilibrium
-        calculations to avoid numerical overflow or underflow issues that
-        could occur with direct exponential representations of equilibrium
-        constants.
-        """
-        return self.log_eq_consts.to_numpy()
-
-    @property
-    def x_particular(self) -> NDArray:
-        """
-        Return a vector of the particular solution of the null space of the stoichiometry.
-
-        This particular solution represents a specific equilibrium concentration
-        distribution that satisfies the stoichiometric constraints. It is used
-        as a reference point in the equilibrium calculation.
-
-        Returns
-        -------
-        numpy.ndarray
-            Vector representing a particular solution to the equilibrium problem,
-            derived from the pseudo-inverse of the stoichiometry matrix and the
-            logarithmic equilibrium constants.
-
-        Notes
-        -----
-        The particular solution is computed as: x_particular = pinv(stoich) @ log10_k_w
-        This provides a reference equilibrium state that can be combined with
-        the null space to find all possible equilibrium solutions.
-        """
-        return la.pinv(self.stoich) @ self.log10_k_w
-
-    def solve_equilibrium(
-        self, chms: NDArray, debug: bool = False, failed_dir: Optional[str] = None
-    ) -> NDArray:
+    @cython.ccall
+    def solve_equilibrium(self, chms: np.ndarray, verbose: bool = False) -> NDArray:
         """
         Solve for the equilibrium concentrations of all of the species.
 
@@ -453,66 +471,40 @@ class EquilibriumParameters:
         where c_eq represents equilibrium concentrations and tot_conc represents
         total concentrations.
         """
-        c_tot: Final[NDArray] = (
-            self.total.values @ chms
-        )  # Total concentrations in the system
+        c_tot: np.ndarray = self.total_np @ chms
 
         # Set the charge balance value to zero (in case there is an error)
         if "Charge" in self.total.index:
-            charge_ind: int = self.total.index.tolist().index("Charge")  # type: ignore
+            charge_ind: cython.int = self.total.index.tolist().index("Charge")  # type: ignore
             c_tot[charge_ind] = 0.0
 
-        if debug:
+        if verbose:
             print(f"{c_tot=}")
 
-        def conc(tot_conc: NDArray) -> NDArray:
-            """
-            Return a vector of the aqueous concentrations in base-10 logarithm.
+        # Create a callable for the root-finder with c_tot "frozen"
+        f_to_solve = partial(self.residual_func, c_tot=c_tot)
 
-            Parameters
-            ----------
-            tot_conc : numpy.ndarray
-                Vector of total concentrations
-
-            Returns
-            -------
-            numpy.ndarray
-                Vector of logarithmic aqueous concentrations
-            """
-            return 10 ** (self.stoich_null_space @ tot_conc + self.x_particular)
-
-        def f(tot_conc: NDArray) -> NDArray:
-            return c_tot - self.total.values @ conc(tot_conc)
+        # After some testing, it seems like having a standard initial guess of zero is generally
+        # good across a range of concentrations for faster convergence.
+        initial_guess = np.zeros_like(c_tot)
 
         try:
-            sol = find_root_multi(f, c_tot)
+            sol: np.ndarray = find_root_multi(f_to_solve, initial_guess)
         except Exception as _e:
-            print("Failed to find root with `find_root_multi`, trying my `fsolve`")
-            if failed_dir is not None:
-                os.makedirs(failed_dir, exist_ok=True)
-                my_function_path: str = os.path.join(
-                    failed_dir, "my_function_failed.txt"
+            if DO_LOGGING:
+                logging.warning(
+                    f"Equilibrium speciation error (find_root_multi): {','.join(chms.astype(str))}"
                 )
-                if os.path.exists(my_function_path):
-                    file = open(my_function_path, "a")
-                else:
-                    file = open(my_function_path, "a+")
-                file.write(",".join(map(str, chms.tolist())) + "\n")
             try:
-                sol = fsolve(f, c_tot)
+                sol = fsolve(f_to_solve, initial_guess)
             except Exception as e2:
-                print("Failed to find root with `fsolve` :(")
-                if failed_dir is not None:
-                    os.makedirs(failed_dir, exist_ok=True)
-                    fsolve_path: str = os.path.join(failed_dir, "fsolve_failed.txt")
-                    if os.path.exists(fsolve_path):
-                        file = open(fsolve_path, "a")
-                    else:
-                        file = open(fsolve_path, "a+")
-                    file.write(",".join(map(str, chms.tolist())) + "\n")
+                if DO_LOGGING:
+                    logging.warning(
+                        f"Equilibrium speciation error (fsolve): {','.join(chms.astype(str))}"
+                    )
                 raise e2
 
-        new_conc: NDArray = conc(sol)
+        new_conc: np.ndarray = self.conc_func(sol)
 
         return new_conc
 
@@ -632,13 +624,40 @@ class ZoneDimensions:
         return not (self == other)
 
 
-@dataclass(frozen=True)
+@cython.cclass
 class MineralParameters:
     sw_threshold: NDArray  # The soil water threshold
     sw_exp: NDArray  # The soil water exponent
     n_alpha: NDArray  # The water table depth factor
     q_10: NDArray  # The temperature factor range
     ssa: NDArray  # The specific surface area in units of g/mol
+
+    sw_threshold_cy: cython.float[:]  # type: ignore
+    sw_exp_cy: cython.float[:]  # type: ignore
+    n_alpha_cy: cython.float[:]  # type: ignore
+    q_10_cy: cython.float[:]  # type: ignore
+    ssa_cy: cython.float[:]  # type: ignore
+
+    def __init__(
+        self,
+        sw_threshold: np.ndarray,
+        sw_exp: np.ndarray,
+        n_alpha: np.ndarray,
+        q_10: np.ndarray,
+        ssa: np.ndarray,
+    ):
+        self.sw_threshold = sw_threshold
+        self.sw_exp = sw_exp
+        self.n_alpha = n_alpha
+        self.q_10 = q_10
+        self.ssa = ssa
+
+        # Cython types
+        self.sw_threshold_cy = sw_threshold  # type: ignore
+        self.sw_exp_cy = sw_exp  # type: ignore
+        self.n_alpha_cy = n_alpha  # type: ignore
+        self.q_10_cy = q_10  # type: ignore
+        self.ssa_cy = ssa  # type: ignore
 
     def to_array(self) -> NDArray:
         combined_arr = np.vstack(
@@ -671,51 +690,119 @@ class MineralParameters:
             ssa=param_arr[4],
         )
 
-    def soil_water_factor(self, forc: RtForcing) -> Vector:
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def soil_water_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on the soil moisture
         """
-        greater_mask: NDArray = forc.s_w >= self.sw_threshold
-        less_mask: NDArray = ~greater_mask
+        n_minerals: cython.int = self.sw_threshold_cy.shape[0]  # type: ignore
+        arr_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
+        arr_mv: cython.double[:] = arr_out  # type: ignore
+        i: cython.int
 
-        less: NDArray = (forc.s_w / self.sw_threshold) ** self.sw_exp
-        greater: NDArray = ((1 - forc.s_w) / (1 - self.sw_threshold)) ** self.sw_exp
+        # This loop replaces the NumPy boolean masking for better performance
+        for i in range(n_minerals):
+            if forc.s_w >= self.sw_threshold_cy[i]:  # type: ignore
+                arr_mv[i] = pow(  # type: ignore
+                    (1.0 - forc.s_w) / (1.0 - self.sw_threshold_cy[i]),  # type: ignore
+                    self.sw_exp_cy[i],  # type: ignore
+                )
+            else:
+                arr_mv[i] = pow(forc.s_w / self.sw_threshold_cy[i], self.sw_exp_cy[i])  # type: ignore
+        return arr_out
 
-        arr: NDArray = greater_mask * greater + less_mask * less
-
-        return arr
-
-    def temperature_factor(self, forc: RtForcing) -> Vector:
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def temperature_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on temperature
         """
-        return self.q_10 ** ((forc.hydro_forc.temp - 20.0) / 10.0)  # type: ignore
+        n_minerals: cython.int = self.q_10_cy.shape[0]  # type: ignore
+        arr_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
+        arr_mv: cython.double[:] = arr_out  # type: ignore
+        i: cython.int
 
-    def water_table_factor(self, forc: RtForcing) -> Vector:
+        # This loop replaces the vectorized NumPy power operation
+        for i in range(n_minerals):
+            arr_mv[i] = pow(self.q_10_cy[i], (forc.hydro_forc.temp - 20.0) / 10.0)  # type: ignore
+        return arr_out
+
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def water_table_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on the water table
         """
-        fzw_mask: NDArray = self.n_alpha == 0
+        n_minerals: cython.int = self.n_alpha_cy.shape[0]  # type: ignore
+        arr_out: np.ndarray = np.ones(n_minerals, dtype=np.float64)  # type: ignore
+        arr_mv: cython.double[:] = arr_out  # type: ignore
+        i: cython.int
+        n_alpha_i: cython.double
 
-        n_alpha_vals: NDArray = np.ones_like(fzw_mask, dtype=np.float64)
-        # second_term: NDArray = np.exp(
-        #     -abs(self.n_alpha) * forc.z_w ** (self.n_alpha / abs(self.n_alpha))
-        # )
+        # This loop is the C-optimized version of your original loop
+        for i in range(n_minerals):
+            n_alpha_i = self.n_alpha_cy[i]  # type: ignore
+            if n_alpha_i != 0.0:
+                arr_mv[i] = exp(  # type: ignore
+                    -fabs(n_alpha_i) * pow(forc.z_w, (n_alpha_i / fabs(n_alpha_i)))  # type: ignore
+                )
+        return arr_out
 
-        # n_alpha_vals[~fzw_mask] = second_term
-        for i, n_alpha_i in enumerate(self.n_alpha):
-            if n_alpha_i != 0:
-                n_alpha_vals[i] = np.exp(
-                    -abs(n_alpha_i) * forc.z_w ** (n_alpha_i / abs(n_alpha_i))
+    @cython.ccall
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def factor(self, forc: RtForcing) -> np.ndarray:
+        """
+        Calculate the auxiliary factor for each function.
+
+        This optimized version combines the logic from soil_water_factor,
+        temperature_factor, and water_table_factor into a single loop
+        to avoid creating intermediate arrays.
+        """
+        n_minerals: cython.int = self.ssa_cy.shape[0]  # type: ignore
+        factor_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
+        factor_mv: cython.double[:] = factor_out  # type: ignore
+
+        i: cython.int
+        sw_factor: cython.double
+        temp_factor: cython.double
+        wt_factor: cython.double
+        n_alpha_i: cython.double
+
+        for i in range(n_minerals):
+            # --- 1. soil_water_factor logic ---
+            if forc.s_w >= self.sw_threshold_cy[i]:  # type: ignore
+                sw_factor = pow(
+                    (1.0 - forc.s_w) / (1.0 - self.sw_threshold_cy[i]),  # type: ignore
+                    self.sw_exp_cy[i],  # type: ignore
+                )
+            else:
+                sw_factor = pow(
+                    forc.s_w / self.sw_threshold_cy[i], self.sw_exp_cy[i]  # type: ignore
                 )
 
-        return n_alpha_vals
+            # --- 2. temperature_factor logic ---
+            temp_factor = pow(
+                self.q_10_cy[i], (forc.hydro_forc.temp - 20.0) / 10.0  # type: ignore
+            )
 
-    def factor(self, forc: RtForcing) -> Vector:
-        """
-        Calculate the auxiliary factor for each function
-        """
-        return self.soil_water_factor(forc) * self.temperature_factor(forc) * self.water_table_factor(forc)  # type: ignore
+            # --- 3. water_table_factor logic ---
+            n_alpha_i = self.n_alpha_cy[i]  # type: ignore
+            if n_alpha_i == 0.0:
+                wt_factor = 1.0
+            else:
+                wt_factor = exp(
+                    -fabs(n_alpha_i) * pow(forc.z_w, n_alpha_i / fabs(n_alpha_i))
+                )
+
+            # --- 4. Combine all factors ---
+            factor_mv[i] = sw_factor * temp_factor * wt_factor  # type: ignore
+
+        return factor_out
 
     @staticmethod
     def from_mineral_parameters(

@@ -4,7 +4,8 @@
 # cython: wraparound=False
 # cython: profile=False
 # cython: linetrace=False
-
+import numpy as np
+from scipy.optimize import approx_fprime
 import cython  # type: ignore
 from typing import Callable
 
@@ -172,3 +173,52 @@ def bisect(
         )
 
     return x_m
+
+
+@cython.ccall
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def find_root_multi(
+    f: Callable[[np.ndarray], np.ndarray],
+    x_0: np.ndarray,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+    debug: bool = False,
+) -> np.ndarray:
+    x: np.ndarray = x_0.copy()
+    f_x: np.ndarray = f(x)
+    err: float = (f_x**2).mean()
+
+    if debug:
+        print(f"Initial f(x): {f_x}")
+        print(f"Initial error: {err}")
+
+    i: cython.int
+    for i in range(max_iter):
+        if err <= tol:
+            return x
+
+        jac_x: np.ndarray = approx_fprime(x, f)  # type: ignore
+        step: np.ndarray = np.linalg.solve(jac_x, f_x)
+        x_new: np.ndarray = x - step
+        x = x_new
+        f_x = f(x)
+        err = (f_x**2).mean()
+        if np.isnan(err):
+            print("Rootfinding error: the calculated error is NaN. Values:")
+            print(f"{x_0=}")
+            print(f"{x=}")
+            print(f"{f_x=}")
+            print(f"{jac_x=}")
+            print(f"{step=}")
+            raise ValueError("NaN value encountered in rootfinding")
+
+        if debug:
+            print("-" * 10)
+            print(f"Step {i}")
+            print(f"f(x): {f_x}")
+            print(f"Jacobian matrix: \n{jac_x}")
+            print(f"Error: {err}")
+            print()
+
+    raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")

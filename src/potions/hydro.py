@@ -15,6 +15,9 @@ from numpy.typing import NDArray
 
 from .common_types_compiled import HydroForcing, HydroStep
 from .math import bisect, find_root
+from .utils import setup_logging
+
+setup_logging(__file__)
 
 """
 Things to add in

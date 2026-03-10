@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import datetime
 import itertools
 import operator
@@ -32,7 +31,8 @@ from numpy import float64 as f64
 from numpy.typing import ArrayLike, NDArray
 from pandas import DataFrame, Index, Series, Timestamp
 
-from .common_types import ForcingData, LapseRateParameters, RtForcing
+from .common_types import ForcingData, LapseRateParameters
+from .common_types_compiled import RtForcing
 from .hydro import (  # Still needed for run_hydro_model
     GroundZone,
     GroundZoneB,
@@ -60,6 +60,9 @@ from .utils import (
     objective_function,
     rt_minerals_to_array,
 )
+from .utils import setup_logging
+
+setup_logging(__file__)
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 ZoneType = TypeVar("ZoneType", bound=Zone)
@@ -2083,7 +2086,7 @@ class Model:
                 conc_in = mass_in / d_i.hydro_step.q_in
             else:
                 conc_in = np.zeros_like(mass_in)
-            d_i.conc_in = conc_in
+            d_i.conc_in = conc_in  # type: ignore
 
             if verbose:
                 print(f"Incoming concentration to zone {i}: {conc_in}")
@@ -2096,10 +2099,10 @@ class Model:
                     failed_dir=failed_dir,
                 )
             except Exception as e:
-                print(f"Failed on zone {i} with values:")
-                print(f"{s_i=}")
-                print(f"{d_i=}")
-                print(f"{dt_days=}")
+                # print(f"Failed on zone {i} with values:")
+                # print(f"{s_i=}")
+                # print(f"{d_i=}")
+                # print(f"{dt_days=}")
                 raise e
             lat_mass[i] = step.lat_mass
             vert_mass[i] = step.vert_mass
@@ -2110,8 +2113,6 @@ class Model:
                 print(
                     f"Finished zone '{zone.name}', final concentration: {np.array2string(step.state, formatter={'all': lambda x: f'{x:.2e}'})}"
                 )
-                # print(f"Lateral mass transfer matrix after zone {i}: \n{lat_mass=}")
-                # print(f"Vertical mass transfer matrix after zone {i}: \n{vert_mass=}")
 
                 print("\n\n")
         if verbose:

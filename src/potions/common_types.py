@@ -6,7 +6,6 @@ from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import Series
 
-from .common_types_compiled import HydroStep, HydroForcing
 
 # ==== Types ==== #
 M = TypeVar("M", bound=int)
@@ -93,19 +92,3 @@ class ChemicalState:
         Get a vector of aqueous concentrations, including primary and secondary
         """
         return np.concatenate([self.prim_aq_conc, self.sec_conc])  # type: ignore
-
-
-@dataclass
-class RtForcing:
-    """Contains the hydrologic and chemical drivers for a reactive transport step."""
-
-    conc_in: NDArray  # The flow-weighted concentration of speices into this zone
-    hydro_step: HydroStep
-    hydro_forc: HydroForcing
-    s_w: float  # Fraction of soil taken up by water, ranges from [0,1], with 1 indicating all porosity is filled
-    z_w: float  # Depth of the water table
-
-    @property
-    def q_out(self) -> float:
-        """The total flux of water out of this zone"""
-        return self.hydro_step.lat_flux_ext + self.hydro_step.vert_flux_ext

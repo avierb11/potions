@@ -281,7 +281,7 @@ class ReactionNetwork:
                 log10_rate_consts.append(
                     self.mineral_kinetics.tst_reactions[m.name].rate_constant
                 )
-        return 10 ** np.array(log10_rate_consts)
+        return 10.0 ** np.array(log10_rate_consts)
 
     @property
     def num_minerals(self) -> int:

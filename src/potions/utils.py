@@ -1,11 +1,47 @@
+import logging
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from multiprocessing import Pool
+import os
 from typing import Callable, Final, Iterable, Literal, Optional, TypeVar, TypedDict
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
-from scipy.optimize import approx_fprime
 
 from .common_types import ForcingData
+
+# ==== Logger ==== #
+DO_LOGGING = os.environ.get("POTIONSLOGGING") is not None
+NOW: Final[datetime] = datetime.now()
+NOW_TS: Final[str] = NOW.strftime("%Y%m%d_%H%M%S")
+LOGGING_DIR: Final[str] = "./.potions_logs"
+LOG_FILE_PATH: Final[str] = os.path.join(LOGGING_DIR, f"{NOW_TS}.log")
+
+
+def setup_logging(file_path) -> None:
+    if DO_LOGGING:
+        if not os.path.exists(LOGGING_DIR):
+            os.makedirs(LOGGING_DIR)
+            with open(LOG_FILE_PATH, "w+"):
+                pass
+        handler = RotatingFileHandler(
+            filename=LOG_FILE_PATH,
+            maxBytes=10 * 1024 * 1024,
+        )
+
+        logging.basicConfig(
+            filename=LOG_FILE_PATH,
+            level=logging.INFO,
+            format=f"{os.path.basename(file_path)}: %(message)s",
+        )
+
+        logging.getLogger().addHandler(handler)
+    else:
+        return
+
+
+# ================ #
 
 # ==== Types ==== #
 
@@ -156,73 +192,6 @@ def log_probability(
         return -np.inf, [np.nan, np.nan, np.nan, np.nan, np.nan]
 
 
-def jac(
-    f: Callable[[np.ndarray], np.ndarray], x: np.ndarray, dx: float = 1e-3
-) -> np.ndarray:
-    """Numerically estimate the jacobian matrix using a finite difference approximation"""
-    jac_mat = np.zeros((x.size, x.size), dtype=np.float64)
-
-    for i, _x_i in enumerate(x):
-        x_up = x.copy()
-        x_dn = x.copy()
-        x_up[i] += dx
-        x_dn[i] -= dx
-
-        jac_mat[:, i] = (f(x_up) - f(x_dn)) / (2 * dx)
-
-    return jac_mat
-
-
-def find_root_multi(
-    f: Callable[[NDArray], NDArray],
-    x_0: NDArray,
-    dx: float = 1e-3,
-    max_iter: int = 25,
-    tol: float = 1e-6,
-    debug: bool = False,
-) -> NDArray:
-    x: NDArray = x_0.copy()
-    f_x: NDArray = f(x)
-    err: float = (f_x**2).mean()
-
-    def j(x: NDArray) -> NDArray:
-        return approx_fprime(x, f)  # type: ignore
-
-    if debug:
-        print(f"Initial f(x): {f_x}")
-        print(f"Initial error: {err}")
-
-    for i in range(max_iter):
-        if err <= tol:
-            return x
-
-        # jac_x: NDArray = jac(f, x, dx=dx)
-        jac_x: NDArray = approx_fprime(x, f)  # type: ignore
-        step: NDArray = np.linalg.solve(j(x), f(x))
-        x_new = x - step
-        x = x_new
-        f_x = f(x)
-        err = (f_x**2).mean()
-        if np.isnan(err):
-            print("Rootfinding error: the calculated error is NaN. Values:")
-            print(f"{x_0=}")
-            print(f"{x=}")
-            print(f"{f_x=}")
-            print(f"{jac_x=}")
-            print(f"{step=}")
-            raise ValueError("NaN value encountered in rootfinding")
-
-        if debug:
-            print("-" * 10)
-            print(f"Step {i}")
-            print(f"f(x): {f_x}")
-            print(f"Jacobian matrix: \n{jac_x}")
-            print(f"Error: {err}")
-            print()
-
-    raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")
-
-
 def rt_minerals_to_array(
     mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
     mineral_order: list[str],
@@ -257,6 +226,51 @@ def rt_minerals_to_array(
                     rows.append(np.array([x_i for x_i in zm]))
 
     return np.vstack(rows)
+
+
+def _run_twice(
+    f: Callable[[NDArray], float], x1: NDArray, x2: NDArray
+) -> tuple[float, float]:
+    return (f(x1), f(x2))
+
+
+def parallel_numerical_gradient(
+    f: Callable[[NDArray], float],
+    x: NDArray,
+    num_threads: Optional[int] = None,
+    rel_dx: float = 1e-2,
+    dx: float = 1e-6,
+) -> NDArray:
+    """Calculate the gradient of the function in parallel"""
+    dxs_list: list[float] = []
+    args: list[tuple[Callable, NDArray, NDArray]] = []
+
+    for i, x_i in enumerate(x):
+        dx_i: float
+        if abs(x_i) <= 1e-8:
+            dx_i = dx
+        else:
+            dx_i = abs(rel_dx * x_i)
+
+        dxs_list.append(dx_i)
+        xs_dn: NDArray = x.copy()
+        xs_dn[i] -= dx_i
+        xs_up: NDArray = x.copy()
+        xs_up[i] += dx_i
+
+        args.append((f, xs_dn, xs_up))
+
+    if num_threads is not None:
+        num_threads = os.cpu_count()
+
+    with Pool(num_threads) as pool:
+        res: list[tuple[float, float]] = pool.starmap(_run_twice, args)
+
+    fx_dn: NDArray = np.array([x[0] for x in res])
+    fx_up: NDArray = np.array([x[1] for x in res])
+    dxs: NDArray = np.array(dxs_list)
+
+    return (fx_up - fx_dn) / (2.0 * dxs)
 
 
 # ======================== #

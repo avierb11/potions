@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Optional
 
 import numpy as np
@@ -9,13 +10,13 @@ from numpy.typing import NDArray
 from pandas import DataFrame, Series
 from scipy.optimize import fsolve
 
-from ..utils import ZERO_CONC, find_root_multi
+from ..utils import DO_LOGGING, ZERO_CONC, setup_logging
+from ..math import find_root_multi
 
 from ..common_types_compiled import HydroStep
 
-# from potions.utils import find_root_multi
 
-from ..common_types import RtForcing
+from ..common_types_compiled import RtForcing
 from .kinetic_structures import (
     MineralParameters,
     EquilibriumParameters,
@@ -27,6 +28,8 @@ from .kinetic_structures import (
 from .reaction_network import (
     ReactionNetwork,
 )
+
+setup_logging("rt_zone.py")
 
 
 @dataclass(frozen=True)
@@ -302,12 +305,16 @@ class RtZone:
         )
 
         if minerals_only:
-            return np.array(mineral_rates)
+            arr = np.array(mineral_rates)
+            return arr
         else:
             all_species_rates = (
                 self.misc.mineral_stoichiometry @ mineral_rates
             )  # Rate of reaction in mol/s
             # Need to convert to mol/day by multiplying by 86,400 seconds per day
+            all_species_rates[-num_min:] = (
+                0.0  # Make sure there are no minerals being consumed
+            )
 
             return all_species_rates
 
@@ -349,10 +356,10 @@ class RtZone:
             hs.lat_flux_ext + hs.vert_flux_ext - hs.lat_flux - hs.vert_flux
         )  # External fluxes passing through the zone
         q_int: float = hs.lat_flux + hs.vert_flux
-        mass_in: NDArray = d.hydro_forc.q_in * d.conc_in
+        mass_in: NDArray = d.hydro_forc.q_in * d.conc_in  # type: ignore
         # mass_out: NDArray = (d.q_in / d.storage) * (d.conc_in - chms)
         mass_out_internal: NDArray = q_int * chms
-        mass_out_external: NDArray = q_ext * d.conc_in
+        mass_out_external: NDArray = q_ext * d.conc_in  # type: ignore
         mass_out: NDArray = mass_out_internal + mass_out_external
         # Note that d.q_out = q_int + q_ext
 
@@ -423,11 +430,18 @@ class RtZone:
         try:
             opt_res = find_root_multi(residual, c_0)
         except (LinAlgError, ValueError) as e:
-            print("Failed to find root using my own function in solving R+T")
+            if DO_LOGGING:
+                logging.warning(
+                    f"RtZone ODE Step Error (find_root_multi): {','.join(c_0.astype(str))}"
+                )
             opt_res_full = fsolve(residual, c_0, full_output=True)
             opt_res = opt_res_full[0]  # type: ignore
 
             if opt_res_full[2] != 0:
+                if DO_LOGGING:
+                    logging.warning(
+                        f"RtZone ODE Step Error (fsolve): {','.join(c_0.astype(str))}"
+                    )
                 raise ValueError("Both solvers failed to find root") from e
 
         # ivp_res = solve_ivp(ode, t_span=[0, dt_days], y0=c_0)
@@ -450,7 +464,7 @@ class RtZone:
         c_after_eq: NDArray
         # After finding the new concentrations that are not at equilibrium, solve for the equilibrium concentrations
         if self.do_speciation:
-            c_after_eq = self.eq.solve_equilibrium(c_after_rt, failed_dir=failed_dir)
+            c_after_eq = self.eq.solve_equilibrium(c_after_rt)
         else:
             c_after_eq = c_after_rt
 
@@ -487,8 +501,8 @@ class RtZone:
 
         return RtStep(
             state=c_after_eq,
-            conc_in=d.conc_in,
-            mass_in=d.conc_in * d.hydro_step.q_in,
+            conc_in=d.conc_in,  # type: ignore
+            mass_in=d.conc_in * d.hydro_step.q_in,  # type: ignore
             lat_conc=lat_conc,
             vert_conc=vert_conc,
             lat_mass=lat_conc * d.hydro_step.lat_flux_ext,

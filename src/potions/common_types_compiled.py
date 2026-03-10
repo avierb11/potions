@@ -1,4 +1,5 @@
 import cython  # type: ignore
+import numpy as np  # type: ignore
 
 
 @cython.cclass
@@ -112,3 +113,35 @@ class HydroStep:
             f"\tvert_flux_ext={self.vert_flux_ext:.2f},\n"
             ")"
         )
+
+
+@cython.cclass
+class RtForcing:
+    """Contains the hydrologic and chemical drivers for a reactive transport step."""
+
+    # C-level attribute declarations for fast access
+    conc_in: cython.double[:]  # type: ignore
+    hydro_step: HydroStep
+    hydro_forc: HydroForcing
+    s_w: cython.double
+    z_w: cython.double
+
+    def __init__(
+        self,
+        conc_in: np.ndarray,
+        hydro_step: HydroStep,
+        hydro_forc: HydroForcing,
+        s_w: float,
+        z_w: float,
+    ):
+        """Initializes the RtForcing cclass."""
+        self.conc_in = conc_in  # type: ignore
+        self.hydro_step = hydro_step
+        self.hydro_forc = hydro_forc
+        self.s_w = s_w
+        self.z_w = z_w
+
+    @property
+    def q_out(self) -> float:
+        """The total flux of water out of this zone"""
+        return self.hydro_step.lat_flux_ext + self.hydro_step.vert_flux_ext
