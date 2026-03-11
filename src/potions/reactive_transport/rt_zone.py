@@ -14,7 +14,8 @@ from scipy.optimize import fsolve
 from ..utils import DO_LOGGING, ZERO_CONC, setup_logging
 from ..math import find_root_multi
 
-from ..common_types_compiled import HydroStep
+# from ..common_types_compiled import HydroStep
+from potions.core import HydroStep
 
 
 from ..common_types_compiled import RtForcing

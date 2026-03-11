@@ -726,7 +726,7 @@ class SurfaceZone(HydrologicZone):
         Returns:
             str: The base name, "soil".
         """
-        return "soil"
+        return "surface"
 
     @classmethod
     def num_parameters(cls) -> int:

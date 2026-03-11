@@ -31,17 +31,29 @@ from numpy import float64 as f64
 from numpy.typing import ArrayLike, NDArray
 from pandas import DataFrame, Index, Series, Timestamp
 
-from .common_types import ForcingData, LapseRateParameters
+# from .common_types import ForcingData, LapseRateParameters
 from .common_types_compiled import RtForcing
-from .hydro import (  # Still needed for run_hydro_model
+from .common_types import ForcingData
+
+# from .hydro import (  # Still needed for run_hydro_model
+#     GroundZone,
+#     GroundZoneB,
+#     HydrologicZone,
+#     SnowZone,
+#     SurfaceZone,
+# )
+from potions.core import (
+    LapseRateParameters,
+    # RtForcing,
+    HydroStep,
+    HydroForcing,
     GroundZone,
     GroundZoneB,
-    HydroForcing,
-    HydrologicZone,
-    HydroStep,
     SnowZone,
     SurfaceZone,
+    HydrologicZone,
 )
+
 from .interfaces import StateType, Zone
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from .reactive_transport import (

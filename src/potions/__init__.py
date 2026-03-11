@@ -64,16 +64,29 @@ __all__ = [
     "ModelResults",
 ]
 from .common_types import ChemicalState, LapseRateParameters
-from .common_types_compiled import HydroForcing, HydroStep, RtForcing
-from .hydro import (
+
+# from .common_types_compiled import HydroForcing, HydroStep, RtForcing
+
+from .core import (
+    HydroForcing,
+    HydroStep,
+    RtForcing,
     GroundZone,
     GroundZoneB,
-    GroundZoneLinear,
-    GroundZoneLinearB,
-    HydrologicZone,
     SnowZone,
     SurfaceZone,
+    HydrologicZone,
 )
+
+# from .hydro import (
+#     GroundZone,
+#     GroundZoneB,
+#     GroundZoneLinear,
+#     GroundZoneLinearB,
+#     HydrologicZone,
+#     SnowZone,
+#     SurfaceZone,
+# )
 from .interfaces import StepResult, Zone
 from .model import (
     BatchResults,
