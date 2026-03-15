@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use numpy::{PyArrayMethods, PyReadonlyArray1};
-use pyo3::{exceptions::PyValueError, prelude::*, types::PyType};
+use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::{
     common_types::{HydroForcing, HydroStep},
@@ -30,11 +30,14 @@ impl HydrologicZone {
         (s_0 - s) + dt * self.mass_balance(s, d)
     }
 
-    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> HydroStep {
+    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
-        let s_new = find_root_rust(f, s_0).max(0.0);
+        let s_new = match find_root_rust(f, s_0) {
+            Ok(v) => v.max(0.0),
+            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+        };
 
-        HydroStep {
+        Ok(HydroStep {
             state: s_new,
             forc_flux: self.forc_flux(s_new, &d),
             lat_flux: self.lat_flux(s_new, &d),
@@ -43,7 +46,7 @@ impl HydrologicZone {
             q_in: d.q_in,
             lat_flux_ext: self.lat_flux_ext(s_new, &d),
             vert_flux_ext: self.vert_flux_ext(s_new, &d),
-        }
+        })
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -183,20 +186,27 @@ impl SnowZone {
         (s_0 - s) + dt * self.mass_balance(s, d)
     }
 
-    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> HydroStep {
+    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
-        let s_new = find_root_rust(f, s_0).max(0.0);
+        let s_new = match find_root_rust(f, s_0) {
+            Ok(v) => v.max(0.0),
+            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+        };
 
-        HydroStep {
+        Ok(HydroStep {
             state: s_new,
             forc_flux: self.forc_flux(s_new, &d),
-            lat_flux: 0.0,
+            lat_flux: self.lat_flux(s_new, &d),
             vert_flux: self.vert_flux(s_new, &d),
-            vap_flux: 0.0,
+            vap_flux: self.vap_flux(s_new, &d),
             q_in: d.q_in,
-            lat_flux_ext: 0.0,
+            lat_flux_ext: self.lat_flux_ext(s_new, &d),
             vert_flux_ext: self.vert_flux_ext(s_new, &d),
-        }
+        })
+    }
+
+    fn vap_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
     }
 
     fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -207,6 +217,10 @@ impl SnowZone {
         }
     }
 
+    fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
+    }
+
     fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
         if d.temp > self.tt {
             let melt: f64 = self.fmax * (d.temp - self.tt);
@@ -214,6 +228,10 @@ impl SnowZone {
         } else {
             0.0
         }
+    }
+
+    fn lat_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        self.lat_flux(s, d)
     }
 
     fn vert_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -275,6 +293,10 @@ impl SnowZone {
 
             return Bound::new(py, child);
         }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SnowZone(tt={:.2},fmax={:.2})", self.tt, self.fmax)
     }
 }
 
@@ -346,11 +368,14 @@ impl SurfaceZone {
             - self.vap_flux(s, d)
     }
 
-    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> HydroStep {
+    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
-        let s_new = find_root_rust(f, s_0).max(0.0);
+        let s_new = match find_root_rust(f, s_0) {
+            Ok(v) => v.max(0.0),
+            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+        };
 
-        HydroStep {
+        Ok(HydroStep {
             state: s_new,
             forc_flux: self.forc_flux(s_new, &d),
             lat_flux: self.lat_flux(s_new, &d),
@@ -359,15 +384,11 @@ impl SurfaceZone {
             q_in: d.q_in,
             lat_flux_ext: self.lat_flux_ext(s_new, &d),
             vert_flux_ext: self.vert_flux_ext(s_new, &d),
-        }
+        })
     }
 
     fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
         0.0
-    }
-
-    fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in * (s / self.fc).powf(self.beta)
     }
 
     fn vap_flux(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -378,12 +399,16 @@ impl SurfaceZone {
         (self.k0 * (s - self.thr)).max(0.0)
     }
 
+    fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        d.q_in * (s / self.fc).powf(self.beta)
+    }
+
     fn lat_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
-        0.0
+        self.lat_flux(s, d)
     }
 
     fn vert_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
-        0.0
+        self.vert_flux(s, d)
     }
 
     fn param_list(&self) -> Vec<f64> {
@@ -445,6 +470,12 @@ impl SurfaceZone {
             return Bound::new(py, child);
         }
     }
+    fn __repr__(&self) -> String {
+        format!(
+            "SurfaceZone(fc={:.2},lp={:.2},beta={:.2},k0={:.2},thr={:.2})",
+            self.fc, self.lp, self.beta, self.k0, self.thr
+        )
+    }
 }
 
 #[pyclass(from_py_object, extends=HydrologicZone)]
@@ -493,24 +524,31 @@ impl GroundZone {
         (s_0 - s) + dt * self.mass_balance(s, d)
     }
 
-    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> HydroStep {
+    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
-        let s_new = find_root_rust(f, s_0).max(0.0);
+        let s_new = match find_root_rust(f, s_0) {
+            Ok(v) => v.max(0.0),
+            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+        };
 
-        HydroStep {
+        Ok(HydroStep {
             state: s_new,
-            forc_flux: 0.0,
+            forc_flux: self.forc_flux(s_new, &d),
             lat_flux: self.lat_flux(s_new, &d),
             vert_flux: self.vert_flux(s_new, &d),
-            vap_flux: 0.0,
+            vap_flux: self.vap_flux(s_new, &d),
             q_in: d.q_in,
-            lat_flux_ext: 0.0,
-            vert_flux_ext: 0.0,
-        }
+            lat_flux_ext: self.lat_flux_ext(s_new, &d),
+            vert_flux_ext: self.vert_flux_ext(s_new, &d),
+        })
     }
 
-    fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
-        s.min(self.perc)
+    fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
+    }
+
+    fn vap_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
     }
 
     fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -519,6 +557,18 @@ impl GroundZone {
         } else {
             self.k * s.max(0.0).powf(self.alpha)
         }
+    }
+
+    fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        s.min(self.perc)
+    }
+
+    fn lat_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        self.lat_flux(s, d)
+    }
+
+    fn vert_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        self.vert_flux(s, d)
     }
 
     fn param_list(&self) -> Vec<f64> {
@@ -566,6 +616,13 @@ impl GroundZone {
             return Bound::new(py, child);
         }
     }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GroundZone(k={:.2e},alpha={:.2},perc={:.2})",
+            self.k, self.alpha, self.perc
+        )
+    }
 }
 
 #[pyclass(from_py_object, extends=HydrologicZone)]
@@ -611,20 +668,31 @@ impl GroundZoneB {
         d.q_in - self.lat_flux(s, d)
     }
 
-    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> HydroStep {
+    pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
-        let s_new = find_root_rust(f, s_0).max(0.0);
+        let s_new = match find_root_rust(f, s_0) {
+            Ok(v) => v.max(0.0),
+            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+        };
 
-        HydroStep {
+        Ok(HydroStep {
             state: s_new,
-            forc_flux: 0.0,
+            forc_flux: self.forc_flux(s_new, &d),
             lat_flux: self.lat_flux(s_new, &d),
-            vert_flux: 0.0,
-            vap_flux: 0.0,
+            vert_flux: self.vert_flux(s_new, &d),
+            vap_flux: self.vap_flux(s_new, &d),
             q_in: d.q_in,
-            lat_flux_ext: 0.0,
-            vert_flux_ext: 0.0,
-        }
+            lat_flux_ext: self.lat_flux_ext(s_new, &d),
+            vert_flux_ext: self.vert_flux_ext(s_new, &d),
+        })
+    }
+
+    fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
+    }
+
+    fn vap_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
     }
 
     fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -633,6 +701,18 @@ impl GroundZoneB {
         } else {
             self.k * s.max(0.0).powf(self.alpha)
         }
+    }
+
+    fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        0.0
+    }
+
+    fn lat_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        self.lat_flux(s, d)
+    }
+
+    fn vert_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        self.vert_flux(s, d)
     }
 
     fn param_list(&self) -> Vec<f64> {
@@ -677,5 +757,9 @@ impl GroundZoneB {
 
             return Bound::new(py, child);
         }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("GroundZone(k={:.2e},alpha={:.2})", self.k, self.alpha)
     }
 }

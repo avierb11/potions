@@ -6,23 +6,23 @@ use pyo3::prelude::*;
 use crate::{
     common_types::{ForcingData, HydroForcing, HydroStep, LapseRateParameters, RtForcing},
     hydro::{GroundZone, GroundZoneB, HydrologicZone, SnowZone, SurfaceZone},
+    reactive_transport::{
+        kinetic_structures::{
+            EquilibriumParameters, MineralAuxParams, MineralParameters, MonodParameters,
+            RtParameters, TstParameters, ZoneDimensions,
+        },
+        rt_zone::RtZone,
+    },
 };
 pub mod common_types;
 pub mod hydro;
 pub mod math;
+pub mod reactive_transport;
 
 #[pyfunction]
 fn hello_rust() -> PyResult<String> {
     Ok("Hello from Rust!".into())
 }
-
-// #[pymodule]
-// fn core(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-//     m.add_function(wrap_pyfunction!(hello_rust, m)?)?;
-//     #[pymodule_export]
-//     use common_types::ForcingData;
-//     Ok(())
-// }
 
 #[pymodule]
 fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -32,13 +32,24 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LapseRateParameters>()?;
     m.add_class::<RtForcing>()?;
 
-    // #[pymodule_export]
-    // use crate::hydro::{GroundZone, GroundZoneB, SnowZone, SurfaceZone};
+    // Hydrology
     m.add_class::<GroundZone>()?;
     m.add_class::<GroundZoneB>()?;
     m.add_class::<SnowZone>()?;
     m.add_class::<SurfaceZone>()?;
     m.add_class::<HydrologicZone>()?;
+
+    // Kinetic structures
+    m.add_class::<MonodParameters>()?;
+    m.add_class::<TstParameters>()?;
+    m.add_class::<EquilibriumParameters>()?;
+    m.add_class::<MineralAuxParams>()?;
+    m.add_class::<ZoneDimensions>()?;
+    m.add_class::<MineralParameters>()?;
+    m.add_class::<RtParameters>()?;
+
+    // RtZone
+    m.add_class::<RtZone>()?;
 
     Ok(())
 }

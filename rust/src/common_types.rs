@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use polars::prelude::*;
+use numpy::{PyArrayMethods, PyReadonlyArray1, ndarray::Array1};
 use pyo3::prelude::*;
 use pyo3_polars::PySeries;
 
@@ -86,6 +86,13 @@ impl HydroForcing {
             q_in,
         })
     }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "HydroForcing(precip={:.2},temp={:.2},pet={:.2},q_in={:.2})",
+            self.precip, self.temp, self.pet, self.q_in
+        )
+    }
 }
 
 #[pyclass(from_py_object)]
@@ -133,35 +140,42 @@ impl HydroStep {
             vert_flux_ext,
         })
     }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "HydroStep(state={:.2},forc_flux={:.2},lat_flux={:.2},vert_flux={:.2},vap_flux={:.2},q_in={:.2},lat_flux_ext={:.2},vert_flux_ext={:.2})",
+            self.state, self.forc_flux, self.lat_flux, self.vert_flux, self.vap_flux, self.q_in, self.lat_flux_ext, self.vert_flux_ext
+        )
+    }
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RtForcing {
+    pub conc_in: Array1<f64>,
     #[pyo3(get, set)]
-    conc_in: Vec<f64>,
+    pub hydro_step: HydroStep,
     #[pyo3(get, set)]
-    hydro_step: HydroStep,
+    pub hydro_forc: HydroForcing,
     #[pyo3(get, set)]
-    hydro_forc: HydroForcing,
+    pub s_w: f64,
     #[pyo3(get, set)]
-    s_w: f64,
-    #[pyo3(get, set)]
-    z_w: f64,
+    pub z_w: f64,
 }
 
 #[pymethods]
 impl RtForcing {
     #[new]
     fn new(
-        conc_in: Vec<f64>,
+        conc_in: PyReadonlyArray1<f64>,
         hydro_step: HydroStep,
         hydro_forc: HydroForcing,
         s_w: f64,
         z_w: f64,
     ) -> PyResult<Self> {
+        let conc_arr: Array1<f64> = conc_in.to_owned_array();
         Ok(Self {
-            conc_in,
+            conc_in: conc_arr,
             hydro_step,
             hydro_forc,
             s_w,

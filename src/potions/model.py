@@ -32,7 +32,7 @@ from numpy.typing import ArrayLike, NDArray
 from pandas import DataFrame, Index, Series, Timestamp
 
 # from .common_types import ForcingData, LapseRateParameters
-from .common_types_compiled import RtForcing
+# from .common_types_compiled import RtForcing
 from .common_types import ForcingData
 
 # from .hydro import (  # Still needed for run_hydro_model
@@ -42,9 +42,9 @@ from .common_types import ForcingData
 #     SnowZone,
 #     SurfaceZone,
 # )
-from potions.core import (
+from potions.core import (  # type: ignore
+    # Hydrology
     LapseRateParameters,
-    # RtForcing,
     HydroStep,
     HydroForcing,
     GroundZone,
@@ -52,13 +52,17 @@ from potions.core import (
     SnowZone,
     SurfaceZone,
     HydrologicZone,
+    # Reactive Transport
+    RtForcing,
+    RtStep,
+    RtZone,
 )
 
 from .interfaces import StateType, Zone
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from .reactive_transport import (
-    RtStep,
-    RtZone,
+    # RtStep,
+    # RtZone,
     calculate_moisture_fraction,
     calculate_water_table_depth,
     ReactionNetwork,
@@ -1424,8 +1428,9 @@ class Model:
         for layer in cls.structure:
             for zone in layer:
                 zone_range = zone.default_parameter_range()  # type: ignore
-                for param_name, param_range in zone_range.items():
-                    param_ranges[f"{zone.name}.{param_name}"] = param_range  # type: ignore
+
+                for param_name in zone.parameter_names():
+                    param_ranges[f"{zone.name}.{param_name}"] = zone_range[param_name]
 
         # Add the size parameters
         for i, _ in enumerate(cls.structure[0][:-1]):
@@ -1865,7 +1870,7 @@ class Model:
         Create a new model by just updating the reactive transport zones
         """
         new_hydro_zones: dict[str, HydrologicZone] = {
-            name: type(zone).from_array(zone.param_list())  # type: ignore
+            name: type(zone).from_array(np.array(zone.param_list()))
             for name, zone in self.__zones.items()
         }
         scales = deepcopy(self.scales)
@@ -2169,8 +2174,8 @@ class Model:
         time_delta_seconds: NDArray[np.float64] = (
             time_delta_nanoseconds / 1e9
         )  # Need the time step in terms of seconds
-        time_step_days: list[float] = [1.0] + (
-            time_delta_seconds / 86_400.0
+        time_step_days: list[float] = [1.0] + (time_delta_seconds / 86_400.0).astype(
+            np.float64
         ).tolist()  # Now, need the time delta int terms of days
 
         # Construct the initial concentrations

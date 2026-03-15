@@ -1,24 +1,13 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: cdivision=True
-# cython: linetrace=False
-# cython: profile=False
-
 from __future__ import annotations
 
 from abc import abstractmethod
 from typing import Optional
 
-import cython  # type: ignore
 from numpy.typing import NDArray
 
 from .common_types_compiled import HydroForcing, HydroStep
 from .math import bisect, find_root
 from .utils import setup_logging
-
-if not cython.compiled:
-    print("WARNING: 'potions.hydro' is not compiled and performance will suffer")
 
 setup_logging(__file__)
 
@@ -33,7 +22,6 @@ Things to add in
 # ########################################################################### #
 
 
-@cython.cclass
 class HydrologicZone:
     """
     An abstract base class for a generic hydrologic computational zone.
@@ -51,7 +39,7 @@ class HydrologicZone:
         name (str): A descriptive name for the zone (e.g., "snow", "soil").
     """
 
-    __name: str = cython.declare(str, visibility="public")
+    __name: str
 
     def __init__(self, name: str = "unnamed"):
         """
@@ -62,36 +50,19 @@ class HydrologicZone:
         """
         self.__name = name
 
-    @cython.ccall
     def __midpoint_func(
-        self, s: cython.double, s_0: cython.double, d: HydroForcing, dt: cython.double
-    ) -> cython.double:
+        self, s: float, s_0: float, d: HydroForcing, dt: float
+    ) -> float:
         """A wrapper function for solving using the midpoint method"""
         return (s_0 - s) + dt * self.mass_balance(0.5 * (s_0 + s), d)
 
-    @cython.ccall
     def __implicit_eulers_func(
-        self, s: cython.double, s_0: cython.double, d: HydroForcing, dt: cython.double
-    ) -> cython.double:
+        self, s: float, s_0: float, d: HydroForcing, dt: float
+    ) -> float:
         """A wrapper for the implicit Euler's method"""
         return (s_0 - s) + dt * self.mass_balance(s, d)
 
-    @cython.ccall
-    @cython.locals(
-        x_0=cython.double,
-        x_1=cython.double,
-        tol=cython.double,
-        err=cython.double,
-        fx_0=cython.double,
-        fx_1=cython.double,
-        x_n=cython.double,
-        s_new=cython.double,
-        counter=cython.int,
-        max_iter=cython.int,
-    )
-    def step(
-        self: HydrologicZone, s_0: cython.double, d: HydroForcing, dt: cython.double
-    ) -> HydroStep:
+    def step(self: HydrologicZone, s_0: float, d: HydroForcing, dt: float) -> HydroStep:
         """
         Advances the zone's state over a single time step.
 
@@ -131,8 +102,7 @@ class HydrologicZone:
             vert_flux_ext=self.vert_flux_ext(s_new, d),
         )
 
-    @cython.ccall
-    def mass_balance(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def mass_balance(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the net rate of change of storage (ds/dt) for the zone.
 
@@ -140,11 +110,11 @@ class HydrologicZone:
         ds/dt = q_in + forc_flux - vap_flux - lat_flux - vert_flux
 
         Args:
-            s (cython.double): The current state (storage) of the zone.
+            s (float): The current state (storage) of the zone.
             d (HydroForcing): The hydrologic forcing data for the time step.
 
         Returns:
-            cython.double: The net rate of change of storage (e.g., in mm/day).
+            float: The net rate of change of storage (e.g., in mm/day).
         """
         return (
             d.q_in
@@ -154,8 +124,7 @@ class HydrologicZone:
             - self.vert_flux(s, d)
         )
 
-    @cython.ccall
-    def forc_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def forc_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the flux into the zone from direct forcing (e.g., precip).
 
@@ -163,16 +132,15 @@ class HydrologicZone:
         method to define specific forcing behavior.
 
         Args:
-            s (cython.double): The current state (storage) of the zone.
+            s (float): The current state (storage) of the zone.
             d (HydroForcing): The hydrologic forcing data.
 
         Returns:
-            cython.double: The forcing flux, which is 0.0 by default.
+            float: The forcing flux, which is 0.0 by default.
         """
         return 0.0
 
-    @cython.ccall
-    def vap_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vap_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the vaporization flux out of the zone (e.g., ET).
 
@@ -180,16 +148,15 @@ class HydrologicZone:
         method to define specific vaporization behavior.
 
         Args:
-            s (cython.double): The current state (storage) of the zone.
+            s (float): The current state (storage) of the zone.
             d (HydroForcing): The hydrologic forcing data.
 
         Returns:
-            cython.double: The vaporization flux, which is 0.0 by default.
+            float: The vaporization flux, which is 0.0 by default.
         """
         return 0.0
 
-    @cython.ccall
-    def lat_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def lat_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the lateral flux out of the zone.
 
@@ -197,16 +164,15 @@ class HydrologicZone:
         method to define specific lateral flow behavior.
 
         Args:
-            s (cython.double): The current state (storage) of the zone.
+            s (float): The current state (storage) of the zone.
             d (HydroForcing): The hydrologic forcing data.
 
         Returns:
-            cython.double: The lateral flux, which is 0.0 by default.
+            float: The lateral flux, which is 0.0 by default.
         """
         return 0.0
 
-    @cython.ccall
-    def vert_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the vertical flux out of the zone to a lower zone.
 
@@ -214,23 +180,21 @@ class HydrologicZone:
         method to define specific vertical percolation behavior.
 
         Args:
-            s (cython.double): The current state (storage) of the zone.
+            s (float): The current state (storage) of the zone.
             d (HydroForcing): The hydrologic forcing data.
 
         Returns:
-            cython.double: The vertical flux, which is 0.0 by default.
+            float: The vertical flux, which is 0.0 by default.
         """
         return 0.0
 
-    @cython.ccall
-    def lat_flux_ext(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def lat_flux_ext(self, s: float, d: HydroForcing) -> float:
         return self.lat_flux(s, d)
 
-    @cython.ccall
-    def vert_flux_ext(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux_ext(self, s: float, d: HydroForcing) -> float:
         return self.vert_flux(s, d)
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
@@ -238,7 +202,7 @@ class HydrologicZone:
         model states. The order of parameters in the list must be consistent.
 
         Returns:
-            list[cython.double]: An ordered list of the zone's parameter values.
+            list[float]: An ordered list of the zone's parameter values.
         """
         return []
 
@@ -295,7 +259,7 @@ class HydrologicZone:
 
     @classmethod
     @abstractmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
@@ -303,7 +267,7 @@ class HydrologicZone:
         tunable parameter, which can be used by optimization algorithms.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         pass
@@ -340,7 +304,7 @@ class HydrologicZone:
         Returns:
             HydrologicZoneCompiled: A new instance of the zone class.
         """
-        param_dict: dict[str, str | cython.double] = {}
+        param_dict: dict[str, str | float] = {}
         for i, param in enumerate(cls.parameter_names()):
             param_dict[param] = arr[i]
         if name is not None:
@@ -362,22 +326,22 @@ class HydrologicZone:
         pass
 
     @classmethod
-    def default_init_state(cls) -> cython.double:
+    def default_init_state(cls) -> float:
         """
         Returns the default initial state (storage) for this zone type.
 
         Returns:
-            cython.double: The default initial storage value, which is 0.0.
+            float: The default initial storage value, which is 0.0.
         """
         return 0.0
 
     @classmethod
-    def from_dict(cls, params: dict[str, cython.double]) -> HydrologicZone:
+    def from_dict(cls, params: dict[str, float]) -> HydrologicZone:
         """
         Creates a new zone instance from a dictionary of parameters.
 
         Args:
-            params (dict[str, cython.double]): A dictionary mapping parameter names
+            params (dict[str, float]): A dictionary mapping parameter names
                 to their values.
 
         Returns:
@@ -391,8 +355,6 @@ class HydrologicZone:
             ) from None
 
 
-@cython.final
-@cython.cclass
 class SnowZone(HydrologicZone):
     """
     A hydrologic zone representing a snowpack, based on a simple degree-day model.
@@ -401,25 +363,23 @@ class SnowZone(HydrologicZone):
     threshold and releases it as melt when the temperature is above it.
 
     Attributes:
-        tt (cython.double): The threshold temperature (°C) for snowmelt. Below this,
+        tt (float): The threshold temperature (°C) for snowmelt. Below this,
             precipitation is snow; above, it is rain and melt can occur.
-        fmax (cython.double): The maximum melt factor (degree-day factor) in mm/°C/day.
+        fmax (float): The maximum melt factor (degree-day factor) in mm/°C/day.
             This controls the rate of snowmelt.
     """
 
-    tt = cython.declare(cython.double, visibility="public")
-    fmax = cython.declare(cython.double, visibility="public")
+    tt: float
+    fmax: float
 
-    def __init__(
-        self, tt: cython.double = 0.0, fmax: cython.double = 1.0, name: str = "snow"
-    ):
+    def __init__(self, tt: float = 0.0, fmax: float = 1.0, name: str = "snow"):
         """
         Initializes the SnowZone.
 
         Args:
-            tt (cython.double, optional): Threshold temperature for melt (°C).
+            tt (float, optional): Threshold temperature for melt (°C).
                 Defaults to 0.0.
-            fmax (cython.double, optional): Maximum melt factor (mm/°C/day).
+            fmax (float, optional): Maximum melt factor (mm/°C/day).
                 Defaults to 1.0.
             name (str, optional): Name of the zone. Defaults to "snow".
         """
@@ -427,8 +387,7 @@ class SnowZone(HydrologicZone):
         self.tt = tt
         self.fmax = fmax
 
-    @cython.ccall
-    def forc_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def forc_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates snow accumulation from precipitation.
 
@@ -436,19 +395,18 @@ class SnowZone(HydrologicZone):
         is added to the snowpack storage.
 
         Args:
-            s (cython.double): Current snow storage (mm).
+            s (float): Current snow storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of snow accumulation (mm/day).
+            float: The rate of snow accumulation (mm/day).
         """
         if d.temp <= self.tt:
             return d.precip
         else:
             return 0.0
 
-    @cython.ccall
-    def vert_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates the vertical flux of water out of the snowpack (snowmelt).
 
@@ -458,20 +416,19 @@ class SnowZone(HydrologicZone):
         exceed the available snow storage.
 
         Args:
-            s (cython.double): Current snow storage (mm).
+            s (float): Current snow storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of snowmelt and rain pass-through (mm/day).
+            float: The rate of snowmelt and rain pass-through (mm/day).
         """
         if d.temp > self.tt:
-            melt: cython.double = self.fmax * (d.temp - self.tt)
+            melt: float = self.fmax * (d.temp - self.tt)
             return min(s, melt)
         else:
             return 0.0
 
-    @cython.ccall
-    def vert_flux_ext(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux_ext(self, s: float, d: HydroForcing) -> float:
         if (
             d.temp > self.tt
         ):  # Temperature is above the freezing point, return the snow melt
@@ -479,12 +436,12 @@ class SnowZone(HydrologicZone):
         else:  # Temperature is below the freezing point, only return the snow melt
             return self.vert_flux(s, d)
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
         Returns:
-            list[cython.double]: An ordered list of parameters: [tt, fmax].
+            list[float]: An ordered list of parameters: [tt, fmax].
         """
         return [self.tt, self.fmax]
 
@@ -529,12 +486,12 @@ class SnowZone(HydrologicZone):
         return "snow"
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         return {"tt": (-1, 1), "fmax": (0.5, 5.0)}
@@ -543,8 +500,6 @@ class SnowZone(HydrologicZone):
         return f"SnowZone(tt={self.tt:.2f}, fmax={self.fmax:.2f})"
 
 
-@cython.final
-@cython.cclass
 class SurfaceZone(HydrologicZone):
     """
     A hydrologic zone representing a soil layer, inspired by the HBV model.
@@ -553,42 +508,42 @@ class SurfaceZone(HydrologicZone):
     evapotranspiration, lateral flow (interflow), and vertical percolation.
 
     Attributes:
-        fc (cython.double): Field capacity of the soil (mm). Maximum storage.
-        lp (cython.double): Parameter controlling the limit for potential ET. ET is
+        fc (float): Field capacity of the soil (mm). Maximum storage.
+        lp (float): Parameter controlling the limit for potential ET. ET is
             at the potential rate until storage `s` exceeds `lp * fc`.
-        beta (cython.double): A non-linear factor controlling infiltration and
+        beta (float): A non-linear factor controlling infiltration and
             percolation, representing the contribution of runoff from a saturated
             area.
-        k0 (cython.double): A rate constant for lateral flow (interflow) (1/day).
-        thr (cython.double): Storage threshold (mm) for the initiation of lateral flow.
+        k0 (float): A rate constant for lateral flow (interflow) (1/day).
+        thr (float): Storage threshold (mm) for the initiation of lateral flow.
     """
 
-    fc = cython.declare(cython.double, visibility="public")
-    lp = cython.declare(cython.double, visibility="public")
-    beta = cython.declare(cython.double, visibility="public")
-    k0 = cython.declare(cython.double, visibility="public")
-    thr = cython.declare(cython.double, visibility="public")
+    fc: float
+    lp: float
+    beta: float
+    k0: float
+    thr: float
 
     def __init__(
         self,
-        fc: cython.double = 100.0,
-        lp: cython.double = 0.5,
-        beta: cython.double = 1.0,
-        k0: cython.double = 0.1,
-        thr: cython.double = 10.0,
+        fc: float = 100.0,
+        lp: float = 0.5,
+        beta: float = 1.0,
+        k0: float = 0.1,
+        thr: float = 10.0,
         name: str = "surface",
     ):
         """
         Initializes the SurfaceZone.
 
         Args:
-            fc (cython.double, optional): Field capacity (mm). Defaults to 100.0.
-            lp (cython.double, optional): ET limit parameter. Defaults to 0.5.
-            beta (cython.double, optional): Runoff non-linearity factor.
+            fc (float, optional): Field capacity (mm). Defaults to 100.0.
+            lp (float, optional): ET limit parameter. Defaults to 0.5.
+            beta (float, optional): Runoff non-linearity factor.
                 Defaults to 1.0.
-            k0 (cython.double, optional): Lateral flow rate constant (1/day).
+            k0 (float, optional): Lateral flow rate constant (1/day).
                 Defaults to 0.1.
-            thr (cython.double, optional): Lateral flow threshold (mm).
+            thr (float, optional): Lateral flow threshold (mm).
                 Defaults to 10.0.
             name (str, optional): Name of the zone. Defaults to "soil".
         """
@@ -601,12 +556,12 @@ class SurfaceZone(HydrologicZone):
         # self.name: str = name
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         return {
@@ -617,8 +572,7 @@ class SurfaceZone(HydrologicZone):
             "thr": (0, 1_000),
         }
 
-    @cython.ccall
-    def forc_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def forc_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates infiltration from precipitation into the soil.
 
@@ -627,17 +581,16 @@ class SurfaceZone(HydrologicZone):
         the field capacity `fc`.
 
         Args:
-            s (cython.double): Current soil moisture storage (mm).
+            s (float): Current soil moisture storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of infiltration (mm/day).
+            float: The rate of infiltration (mm/day).
         """
         # return d.q_in * (1 - (s / self.fc) ** self.beta)
         return 0.0
 
-    @cython.ccall
-    def vert_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates vertical percolation from the soil to a lower zone.
 
@@ -646,16 +599,15 @@ class SurfaceZone(HydrologicZone):
         percolation rate is scaled by the relative soil moisture.
 
         Args:
-            s (cython.double): Current soil moisture storage (mm).
+            s (float): Current soil moisture storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of vertical percolation (mm/day).
+            float: The rate of vertical percolation (mm/day).
         """
         return d.q_in * (s / self.fc) ** self.beta
 
-    @cython.ccall
-    def vap_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vap_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates actual evapotranspiration (AET) from the soil.
 
@@ -664,16 +616,15 @@ class SurfaceZone(HydrologicZone):
         linearly with storage.
 
         Args:
-            s (cython.double): Current soil moisture storage (mm).
+            s (float): Current soil moisture storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of actual evapotranspiration (mm/day).
+            float: The rate of actual evapotranspiration (mm/day).
         """
         return d.pet * min(s / (self.fc * self.lp), 1.0)
 
-    @cython.ccall
-    def lat_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def lat_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates lateral flow (interflow) from the soil.
 
@@ -681,20 +632,20 @@ class SurfaceZone(HydrologicZone):
         certain threshold `thr`.
 
         Args:
-            s (cython.double): Current soil moisture storage (mm).
+            s (float): Current soil moisture storage (mm).
             d (HydroForcing): Hydrologic forcing data.
 
         Returns:
-            cython.double: The rate of lateral flow (mm/day).
+            float: The rate of lateral flow (mm/day).
         """
         return max(0.0, self.k0 * (s - self.thr))
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
         Returns:
-            list[cython.double]: An ordered list of parameters: [fc, lp, beta, k0, thr].
+            list[float]: An ordered list of parameters: [fc, lp, beta, k0, thr].
         """
         return [self.fc, self.lp, self.beta, self.k0, self.thr]
 
@@ -739,12 +690,12 @@ class SurfaceZone(HydrologicZone):
         return 5
 
     @classmethod
-    def default_init_state(cls) -> cython.double:
+    def default_init_state(cls) -> float:
         """
         Returns the default initial state (storage) for this zone type.
 
         Returns:
-            cython.double: The default initial storage value, which is 25.0.
+            float: The default initial storage value, which is 25.0.
         """
         return 25.0
 
@@ -752,7 +703,6 @@ class SurfaceZone(HydrologicZone):
         return f"SurfaceZone(fc={round(self.fc)}, lp={self.lp:.2f}, beta={self.beta:.2f}, k0={self.k0:.3f}, thr={self.thr:.1f})"
 
 
-@cython.cclass
 class GroundZone(HydrologicZone):
     """
     A zone representing a generic groundwater store with non-linear outflow.
@@ -762,31 +712,31 @@ class GroundZone(HydrologicZone):
     the storage.
 
     Attributes:
-        k (cython.double): Rate constant for lateral groundwater flow (1/day).
-        alpha (cython.double): Exponent for the non-linear storage-outflow relationship.
-        perc (cython.double): The maximum rate of vertical percolation to a lower zone
+        k (float): Rate constant for lateral groundwater flow (1/day).
+        alpha (float): Exponent for the non-linear storage-outflow relationship.
+        perc (float): The maximum rate of vertical percolation to a lower zone
             (mm/day).
     """
 
-    k = cython.declare(cython.double, visibility="public")
-    alpha = cython.declare(cython.double, visibility="public")
-    perc = cython.declare(cython.double, visibility="public")
+    k: float
+    alpha: float
+    perc: float
 
     def __init__(
         self,
-        k: cython.double = 1e-3,
-        alpha: cython.double = 1.0,
-        perc: cython.double = 1.0,
+        k: float = 1e-3,
+        alpha: float = 1.0,
+        perc: float = 1.0,
         name: str = "ground",
     ):
         """
         Initializes the GroundZone.
 
         Args:
-            k (cython.double, optional): Lateral flow rate constant (1/day).
+            k (float, optional): Lateral flow rate constant (1/day).
                 Defaults to 1e-3.
-            alpha (cython.double, optional): Lateral flow exponent. Defaults to 1.0.
-            perc (cython.double, optional): Maximum vertical percolation rate (mm/day).
+            alpha (float, optional): Lateral flow exponent. Defaults to 1.0.
+            perc (float, optional): Maximum vertical percolation rate (mm/day).
                 Defaults to 1.0.
             name (str, optional): Name of the zone. Defaults to "ground".
         """
@@ -796,19 +746,18 @@ class GroundZone(HydrologicZone):
         self.perc = perc
         # self.name = name
 
-    @cython.ccall
-    def lat_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def lat_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates lateral flow from the groundwater zone.
 
         The outflow is a non-linear function of storage: Q_lat = k * s^alpha.
 
         Args:
-            s (cython.double): Current groundwater storage (mm).
+            s (float): Current groundwater storage (mm).
             d (HydroForcing): Hydrologic forcing data (not used).
 
         Returns:
-            cython.double: The rate of lateral flow (mm/day).
+            float: The rate of lateral flow (mm/day).
         """
         try:
             if s < 1e-12:
@@ -822,8 +771,7 @@ class GroundZone(HydrologicZone):
             print(f"Forcing data: {d}")
             raise e
 
-    @cython.ccall
-    def vert_flux(self, s: cython.double, d: HydroForcing) -> cython.double:
+    def vert_flux(self, s: float, d: HydroForcing) -> float:
         """
         Calculates vertical percolation to a lower zone.
 
@@ -831,20 +779,20 @@ class GroundZone(HydrologicZone):
         the available storage `s`.
 
         Args:
-            s (cython.double): Current groundwater storage (mm).
+            s (float): Current groundwater storage (mm).
             d (HydroForcing): Hydrologic forcing data (not used).
 
         Returns:
-            cython.double: The rate of vertical percolation (mm/day).
+            float: The rate of vertical percolation (mm/day).
         """
         return min(s, self.perc)
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
         Returns:
-            list[cython.double]: An ordered list of parameters: [k, alpha, perc].
+            list[float]: An ordered list of parameters: [k, alpha, perc].
         """
         return [self.k, self.alpha, self.perc]
 
@@ -869,12 +817,12 @@ class GroundZone(HydrologicZone):
         return 3
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         return {
@@ -904,12 +852,12 @@ class GroundZone(HydrologicZone):
         return ["k", "alpha", "perc"]
 
     @classmethod
-    def default_init_state(cls) -> cython.double:
+    def default_init_state(cls) -> float:
         """
         Returns the default initial state (storage) for this zone type.
 
         Returns:
-            cython.double: The default initial storage value, which is 10.0.
+            float: The default initial storage value, which is 10.0.
         """
         return 10.0
 
@@ -919,7 +867,6 @@ class GroundZone(HydrologicZone):
         )
 
 
-@cython.cclass
 class GroundZoneLinear(GroundZone):
     """
     A groundwater zone with a linear storage-outflow relationship.
@@ -928,27 +875,27 @@ class GroundZoneLinear(GroundZone):
     exponent `alpha` is fixed to 1.0, resulting in a linear reservoir model.
 
     Attributes:
-        k (cython.double): Rate constant for lateral groundwater flow (1/day).
-        perc (cython.double): The maximum rate of vertical percolation to a lower zone
+        k (float): Rate constant for lateral groundwater flow (1/day).
+        perc (float): The maximum rate of vertical percolation to a lower zone
             (mm/day).
     """
 
-    k = cython.declare(cython.double, visibility="public")
-    perc = cython.declare(cython.double, visibility="public")
+    k: float
+    perc: float
 
     def __init__(
         self,
-        k: cython.double = 1e-3,
-        perc: cython.double = 1.0,
+        k: float = 1e-3,
+        perc: float = 1.0,
         name: str = "ground_linear",
     ) -> None:
         """
         Initializes the GroundZoneLinear.
 
         Args:
-            k (cython.double, optional): Lateral flow rate constant (1/day).
+            k (float, optional): Lateral flow rate constant (1/day).
                 Defaults to 1e-3.
-            perc (cython.double, optional): Maximum vertical percolation rate (mm/day).
+            perc (float, optional): Maximum vertical percolation rate (mm/day).
                 Defaults to 1.0.
             name (str, optional): Name of the zone. Defaults to "ground_linear".
         """
@@ -965,12 +912,12 @@ class GroundZoneLinear(GroundZone):
         return 2
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         return {
@@ -994,7 +941,6 @@ class GroundZoneLinear(GroundZone):
         return GroundZoneLinear()
 
 
-@cython.cclass
 class GroundZoneB(GroundZone):
     """
     A bottom groundwater zone with a non-linear storage-outflow relationship.
@@ -1003,26 +949,26 @@ class GroundZoneB(GroundZone):
     its vertical percolation (`perc`) is fixed to 0.0.
 
     Attributes:
-        k (cython.double): Rate constant for lateral groundwater flow (1/day).
-        alpha (cython.double): Exponent for the non-linear storage-outflow relationship.
+        k (float): Rate constant for lateral groundwater flow (1/day).
+        alpha (float): Exponent for the non-linear storage-outflow relationship.
     """
 
-    k = cython.declare(cython.double, visibility="public")
-    alpha = cython.declare(cython.double, visibility="public")
+    k: float
+    alpha: float
 
     def __init__(
         self,
-        k: cython.double = 1e-3,
-        alpha: cython.double = 1.0,
+        k: float = 1e-3,
+        alpha: float = 1.0,
         name: str = "deep",
     ):
         """
         Initializes the GroundZoneB.
 
         Args:
-            k (cython.double, optional): Lateral flow rate constant (1/day).
+            k (float, optional): Lateral flow rate constant (1/day).
                 Defaults to 1e-3.
-            alpha (cython.double, optional): Lateral flow exponent. Defaults to 1.0.
+            alpha (float, optional): Lateral flow exponent. Defaults to 1.0.
             name (str, optional): Name of the zone.
                 Defaults to "bottom_ground_nl".
         """
@@ -1040,12 +986,12 @@ class GroundZoneB(GroundZone):
         """
         return 2
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
         Returns:
-            list[cython.double]: An ordered list of parameters: [k, alpha].
+            list[float]: An ordered list of parameters: [k, alpha].
         """
         return [self.k, self.alpha]
 
@@ -1060,12 +1006,12 @@ class GroundZoneB(GroundZone):
         return "ground_bottom"
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         default_range = super().default_parameter_range()
@@ -1097,7 +1043,6 @@ class GroundZoneB(GroundZone):
         return f"GroundZoneB(k={self.k:.2e}, alpha={self.alpha:.2f})"
 
 
-@cython.cclass
 class GroundZoneLinearB(GroundZone):
     """
     A bottom groundwater zone with a linear storage-outflow relationship.
@@ -1107,17 +1052,17 @@ class GroundZoneLinearB(GroundZone):
     its lateral flow exponent `alpha` is fixed to 1.0.
 
     Attributes:
-        k (cython.double): Rate constant for lateral groundwater flow (1/day).
+        k (float): Rate constant for lateral groundwater flow (1/day).
     """
 
-    k = cython.declare(cython.double, visibility="public")
+    k: float
 
-    def __init__(self, k: cython.double = 1e-3, name="bottom_ground_l"):
+    def __init__(self, k: float = 1e-3, name="bottom_ground_l"):
         """
         Initializes the GroundZoneLinearB.
 
         Args:
-            k (cython.double, optional): Lateral flow rate constant (1/day).
+            k (float, optional): Lateral flow rate constant (1/day).
                 Defaults to 1e-3.
             name (str, optional): Name of the zone.
                 Defaults to "bottom_ground_l".
@@ -1134,12 +1079,12 @@ class GroundZoneLinearB(GroundZone):
         """
         return 1
 
-    def param_list(self) -> list[cython.double]:
+    def param_list(self) -> list[float]:
         """
         Returns a list of the zone's parameter values.
 
         Returns:
-            list[cython.double]: An ordered list of parameters: [k].
+            list[float]: An ordered list of parameters: [k].
         """
         return [self.k]
 
@@ -1154,12 +1099,12 @@ class GroundZoneLinearB(GroundZone):
         return "ground_linear_bottom"
 
     @classmethod
-    def default_parameter_range(cls) -> dict[str, tuple[cython.double, cython.double]]:
+    def default_parameter_range(cls) -> dict[str, tuple[float, float]]:
         """
         Returns a default parameter range for calibration.
 
         Returns:
-            dict[str, tuple[cython.double, cython.double]]: A dictionary mapping parameter
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
                 names to their (min, max) range.
         """
         default_range = super().default_parameter_range()

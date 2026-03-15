@@ -86,29 +86,34 @@ def objective_function(
     metric: Literal["kge", "nse", "combined"] | Callable[[dict], float],
     print_value: bool,
 ) -> float:
-    model = cls.from_array(x, latent=True)
-    results: dict[str, float | DataFrame] = model.run(
-        init_state=cls.default_init_state(),
-        forc=forc,
-        meas_streamflow=meas_streamflow,
-        verbose=False,
-    )
+    model = cls.hydro_from_array(x, latent=True)
 
-    obj_val: float
+    try:
+        results: dict[str, float | DataFrame] = model.run_hydro_model(
+            init_state=cls.default_hydro_init_state(),
+            forc=forc,
+            meas_streamflow=meas_streamflow,
+            verbose=False,
+        )
 
-    if metric == "kge":
-        obj_val = -results["objective_functions"]["kge"]  # type: ignore
-    elif metric == "nse":
-        obj_val = -results["objective_functions"]["nse"]  # type: ignore
-    elif metric == "combined":
-        obj_val = -results["objective_functions"]["kge"] - results["objective_functions"]["nse"]  # type: ignore
-    else:
-        obj_val = metric(results)
+        obj_val: float
 
-    if print_value and isinstance(obj_val, str):
-        print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
+        if metric == "kge":
+            obj_val = -results["objective_functions"]["kge"]  # type: ignore
+        elif metric == "nse":
+            obj_val = -results["objective_functions"]["nse"]  # type: ignore
+        elif metric == "combined":
+            obj_val = -results["objective_functions"]["kge"] - results["objective_functions"]["nse"]  # type: ignore
+        else:
+            obj_val = metric(results)
 
-    return obj_val
+        if print_value and isinstance(obj_val, str):
+            print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
+
+        return obj_val
+    except Exception:
+        print(f"Failed with parameters {x}")
+        return np.inf
 
 
 def find_root(f: Callable[[float], float], x_0: float, tol: float = 1e-5) -> float:

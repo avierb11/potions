@@ -46,12 +46,6 @@ class SurfaceComplexationReaction:
     pass
 
 
-@dataclass
-class MineralKineticData:
-    tst_reactions: dict[str, TstReaction]
-    monod_reactions: dict[str, MonodReaction]
-
-
 @dataclass(frozen=True)
 class MineralKineticReaction:
     mineral_name: str
@@ -68,6 +62,12 @@ class TstReaction(MineralKineticReaction):
 class MonodReaction(MineralKineticReaction):
     monod_terms: dict[str, float]
     inhib_terms: dict[str, float]
+
+
+@dataclass
+class MineralKineticData:
+    tst_reactions: dict[str, TstReaction]
+    monod_reactions: dict[str, MonodReaction]
 
 
 @dataclass(frozen=True)
@@ -105,14 +105,12 @@ class ChemicalDatabase:
 
     @staticmethod
     def load_default() -> ChemicalDatabase:
-        """
-        """
+        """ """
         db_file_path: str = os.path.join(
             os.path.dirname(__file__), "default_database.json"
         )
 
         return ChemicalDatabase.from_file(db_file_path)
-
 
     def to_file(self, file_path: str) -> None:
         """
@@ -120,7 +118,6 @@ class ChemicalDatabase:
         """
         with open(file_path, "w+") as f:
             json.dump(asdict(self), f, indent=2)
-
 
     @staticmethod
     def from_file(file_path: str) -> ChemicalDatabase:
@@ -169,16 +166,14 @@ class ChemicalDatabase:
             mineral_species=mineral_species,
             tst_reactions=tst_reactions,
             monod_reactions=monod_reactions,
-            exchange_reactions=exchange_reactions
+            exchange_reactions=exchange_reactions,
         )
-
 
     def get_primary_aqueous_species(
         self, species_name: str | Iterable[str]
     ) -> list[PrimaryAqueousSpecies]:
         """Get one or more mineral species from the database"""
         return [self.primary_species[name] for name in species_name]
-
 
     def get_mineral_species(
         self, mineral_name: str | Iterable[str]
@@ -189,7 +184,6 @@ class ChemicalDatabase:
         else:
             return [self.mineral_species[name] for name in mineral_name]
 
-
     def get_secondary_species(
         self, species_name: str | Iterable[str]
     ) -> list[SecondarySpecies]:
@@ -198,7 +192,6 @@ class ChemicalDatabase:
         the user from defining impossible reaction networks
         """
         return [self.secondary_species[name] for name in species_name]
-
 
     def get_single_mineral_reaction(
         self, mineral: str | MineralSpecies, label: str
@@ -219,8 +212,9 @@ class ChemicalDatabase:
         elif mineral_name in self.monod_reactions:
             return "monod", self.monod_reactions[mineral_name][label]
         else:
-            raise ValueError(f"Mineral {mineral_name} not found in either TST or Monod reactions")
-
+            raise ValueError(
+                f"Mineral {mineral_name} not found in either TST or Monod reactions"
+            )
 
     def get_mineral_reactions(
         self,
@@ -230,22 +224,22 @@ class ChemicalDatabase:
         """
         Select the mineral reaction parameters for multiple reactions
         """
-        mineral_names: list[str] = [mineral.name if isinstance(mineral, MineralSpecies) else mineral for mineral in mineral]
+        mineral_names: list[str] = [
+            mineral.name if isinstance(mineral, MineralSpecies) else mineral
+            for mineral in mineral
+        ]
 
-        mineral_reactions: dict = {
-            "tst": [],
-            "monod": []
-        }
+        mineral_reactions: dict = {"tst": [], "monod": []}
 
-        for mineral, label in zip(mineral_names, labels, strict=True): # type: ignore
-            reaction_type, reaction = self.get_single_mineral_reaction(mineral, label) # type: ignore
+        for mineral, label in zip(mineral_names, labels, strict=True):  # type: ignore
+            reaction_type, reaction = self.get_single_mineral_reaction(mineral, label)  # type: ignore
             mineral_reactions[reaction_type].append(reaction)
 
         return MineralKineticData(
             tst_reactions={x.mineral_name: x for x in mineral_reactions["tst"]},
-            monod_reactions={x.mineral_name: x for x in mineral_reactions["monod"]}
+            monod_reactions={x.mineral_name: x for x in mineral_reactions["monod"]},
         )
-    
+
     def get_exchange_reactions(
         self,
         species_name: str | list[str],
@@ -257,6 +251,3 @@ class ChemicalDatabase:
             species_name = [species_name]
 
         return [self.exchange_reactions[name] for name in species_name]
-       
-
-

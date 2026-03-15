@@ -9,9 +9,6 @@ from numpy.typing import NDArray
 import scipy.linalg as la
 from scipy.optimize import fsolve
 
-from cython.cimports.libc.math import isnan, pow, log10, fabs, exp  # type: ignore
-import cython  # type: ignore
-
 from ..common_types_compiled import RtForcing
 from ..math import find_root_multi
 from ..utils import DO_LOGGING, setup_logging
@@ -22,14 +19,7 @@ setup_logging("kinetic_structures.py")
 PARAMETERS_PER_MINERAL: Final[int] = 5
 # =================== #
 
-if not cython.compiled:
-    print(
-        "WARNING: 'potions.reactive_transport.kinetic_structures' is not compiled and may be slower as a result"
-    )
 
-
-@cython.final
-@cython.cclass
 class MonodParameters:
     """
     A class containing the Monod parameters for a reaction network in a reactive transport model.
@@ -63,10 +53,10 @@ class MonodParameters:
                                The columns follow the same order as `monod_mat`.
     """
 
-    monod_mat: DataFrame = cython.declare(object, visibility="public")  # type: ignore
-    inhib_mat: DataFrame = cython.declare(object, visibility="public")  # type: ignore
-    monod_mat_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
-    inhib_mat_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
+    monod_mat: DataFrame
+    inhib_mat: DataFrame
+    monod_mat_np: np.ndarray
+    inhib_mat_np: np.ndarray
 
     def __init__(self, monod_mat: DataFrame, inhib_mat: DataFrame):
         self.monod_mat = monod_mat
@@ -74,9 +64,6 @@ class MonodParameters:
         self.monod_mat_np = monod_mat.to_numpy()  # type: ignore
         self.inhib_mat_np = inhib_mat.to_numpy()  # type: ignore
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def rate(self, chms: np.ndarray) -> np.ndarray:
         """
         Calculate the rate of reaction using Monod kinetics based on the concentration of species.
@@ -106,27 +93,27 @@ class MonodParameters:
             [0.6, 0.4]  # Example output: reaction rates for two minerals
         """
 
-        n_minerals: cython.int = self.monod_mat_np.shape[0]  # type: ignore
-        n_species: cython.int = self.monod_mat_np.shape[1]  # type: ignore
+        n_minerals: int = self.monod_mat_np.shape[0]  # type: ignore
+        n_species: int = self.monod_mat_np.shape[1]  # type: ignore
         monod = np.zeros(n_minerals, dtype=np.float64)  # type: ignore
         inhib = np.zeros(n_minerals, dtype=np.float64)  # type: ignore
 
         # Memoryviews
-        monod_mv: cython.double[:] = monod  # type: ignore
-        inhib_mv: cython.double[:] = inhib  # type: ignore
-        chms_mv: cython.double[:] = chms  # type: ignore
+        monod_mv: np.ndarray = monod  # type: ignore
+        inhib_mv: np.ndarray = inhib  # type: ignore
+        chms_mv: np.ndarray = chms  # type: ignore
 
-        i: cython.int
-        j: cython.int
-        val: cython.double
-        prod: cython.double
+        i: int
+        j: int
+        val: float
+        prod: float
 
         # --- Calculate Monod term ---
         for i in range(n_minerals):
             prod = 1.0
             for j in range(n_species):
                 val = self.monod_mat_np[i, j]  # type: ignore
-                if not isnan(val):
+                if np.isfinite(val):
                     prod *= chms_mv[j] / (val + chms_mv[j])  # type: ignore
             monod_mv[i] = prod  # type: ignore
 
@@ -135,7 +122,7 @@ class MonodParameters:
             prod = 1.0
             for j in range(n_species):
                 val = self.inhib_mat_np[i, j]  # type: ignore
-                if not isnan(val):
+                if np.isfinite(val):
                     prod *= val / (val + chms_mv[j])  # type: ignore
             inhib_mv[i] = prod  # type: ignore
 
@@ -171,8 +158,6 @@ class MonodParameters:
             return bool(monod_are_equal and inhib_are_equal)
 
 
-@cython.final
-@cython.cclass
 class TstParameters:
     """
     The Transition-State Theory (TST) parameters, containing two matrices of shape
@@ -213,20 +198,14 @@ class TstParameters:
     """
 
     # Python types
-    stoich: DataFrame = cython.declare(
-        object, visibility="public"
-    )  # Stoichiometry of the mineral reactions # type: ignore
-    dep: DataFrame = cython.declare(
-        object, visibility="public"
-    )  # Dependence of the rate law on other species concentrations (typically pH through H+ or OH- dependence) # type: ignore
-    min_eq_const: Series = cython.declare(
-        object, visibility="public"
-    )  # Vector of equilibrium constants # type: ignore
+    stoich: DataFrame  # Stoichiometry of the mineral reactions
+    dep: DataFrame  # Dependence of the rate law on other species concentrations (typically pH through H+ or OH- dependence)
+    min_eq_const: Series  # Vector of equilibrium constants
 
     # Cython types
-    stoich_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
-    dep_np: cython.double[:, :] = cython.declare(cython.double[:, :], visibility="public")  # type: ignore
-    min_eq_const_np: cython.double[:] = cython.declare(cython.double[:], visibility="public")  # type: ignore
+    stoich_np: np.ndarray
+    dep_np: np.ndarray
+    min_eq_const_np: np.ndarray
 
     def __init__(self, stoich: DataFrame, dep: DataFrame, min_eq_const: Series):
         # Python types
@@ -239,9 +218,6 @@ class TstParameters:
         self.dep_np = dep.to_numpy()  # type: ignore
         self.min_eq_const_np = min_eq_const.to_numpy()  # type: ignore
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def rate(self, chms_in: np.ndarray) -> np.ndarray:
         """
         Calculate the rate of reaction using Transition-State Theory (TST) kinetics.
@@ -270,30 +246,30 @@ class TstParameters:
             >>> print(rates)
             [0.2, 0.1]  # Example output: reaction rates for two minerals
         """
-        n_minerals: cython.int = self.stoich_np.shape[0]  # type: ignore
-        n_species: cython.int = self.stoich_np.shape[1]  # type: ignore
-        i: cython.int
-        j: cython.int
+        n_minerals: int = self.stoich_np.shape[0]  # type: ignore
+        n_species: int = self.stoich_np.shape[1]  # type: ignore
+        i: int
+        j: int
 
         # --- 2. Allocate output arrays and create memoryviews for fast access ---
         rate_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
-        rate_mv: cython.double[:] = rate_out  # type: ignore
+        rate_mv: np.ndarray = rate_out  # type: ignore
 
         log_conc_arr: np.ndarray = np.empty(n_species, dtype=np.float64)
-        log_conc_mv: cython.double[:] = log_conc_arr  # type: ignore
+        log_conc_mv: np.ndarray = log_conc_arr  # type: ignore
 
-        chms_mv: cython.double[:] = chms_in  # type: ignore
+        chms_mv: np.ndarray = chms_in  # type: ignore
 
         # --- 3. Pre-calculate log10 of concentrations in a C loop ---
         # Replaces: log_conc: NDArray = np.log10(chms)
         for j in range(n_species):
-            log_conc_mv[j] = log10(chms_mv[j])  # type: ignore
+            log_conc_mv[j] = np.log10(chms_mv[j])  # type: ignore
 
         # --- 4. Main loop over each mineral ---
-        log_dep_i: cython.double
-        log_iap_i: cython.double
-        dep_val: cython.double
-        stoich_val: cython.double
+        log_dep_i: float
+        log_iap_i: float
+        dep_val: float
+        stoich_val: float
 
         for i in range(n_minerals):
             log_dep_i = 0.0
@@ -303,11 +279,11 @@ class TstParameters:
             # Replaces: log_dep = self.dep_np @ log_conc and log_iap = self.stoich_np @ log_conc
             for j in range(n_species):
                 dep_val = self.dep_np[i, j]  # type: ignore
-                if not isnan(dep_val):
+                if np.isfinite(dep_val):
                     log_dep_i += dep_val * log_conc_mv[j]  # type: ignore
 
                 stoich_val = self.stoich_np[i, j]  # type: ignore
-                if not isnan(stoich_val):
+                if np.isfinite(stoich_val):
                     log_iap_i += stoich_val * log_conc_mv[j]  # type: ignore
 
             # --- 6. Calculate the final rate for the current mineral ---
@@ -335,8 +311,6 @@ class TstParameters:
             )
 
 
-@cython.final
-@cython.cclass
 class EquilibriumParameters:
     """
     Container class for equilibrium parameters used in aqueous chemical equilibrium calculations.
@@ -401,40 +375,20 @@ class EquilibriumParameters:
     """
 
     # Pandas types
-    stoich: DataFrame = cython.declare(
-        object, visibility="public"
-    )  # Matrix describing the stoichiometry of the secondary species # type: ignore
-    log_eq_consts: Series = cython.declare(
-        object, visibility="public"
-    )  # Vector of the equilibrium constants for the secondary species in log10 scale # type: ignore
-    total: DataFrame = cython.declare(
-        object, visibility="public"
-    )  # Matrix describing the mass and charge balance of the species # type: ignore
-    stoich_null_space: NDArray = cython.declare(
-        object, visibility="public"
-    )  # type: ignore
-    log10_k_w: NDArray = cython.declare(object, visibility="public")  # type: ignore
-    x_particular: NDArray = cython.declare(object, visibility="public")  # type: ignore
+    stoich: DataFrame  # Matrix describing the stoichiometry of the secondary species
+    log_eq_consts: Series  # Vector of the equilibrium constants for the secondary species in log10 scale
+    total: DataFrame  # Matrix describing the mass and charge balance of the species
+    stoich_null_space: NDArray
+    log10_k_w: NDArray
+    x_particular: NDArray
 
     # C types
-    stoich_np: cython.double[:, :] = cython.declare(  # type: ignore
-        cython.double[:, :], visibility="public"  # type: ignore
-    )  # type: ignore
-    log_eq_consts_np: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    total_np: cython.double[:, :] = cython.declare(  # type: ignore
-        cython.double[:, :], visibility="public"  # type: ignore
-    )  # type: ignore
-    stoich_null_space_np: cython.double[:, :] = cython.declare(  # type: ignore
-        cython.double[:, :], visibility="public"  # type: ignore
-    )  # type: ignore
-    log10_k_w_np: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    x_particular_np: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
+    stoich_np: np.ndarray
+    log_eq_consts_np: np.ndarray
+    total_np: np.ndarray
+    stoich_null_space_np: np.ndarray
+    log10_k_w_np: np.ndarray
+    x_particular_np: np.ndarray
 
     def __init__(self, stoich: DataFrame, log_eq_consts: Series, total: DataFrame):
         # Solve the python versions
@@ -453,15 +407,12 @@ class EquilibriumParameters:
         self.log10_k_w_np = self.log10_k_w  # type: ignore
         self.x_particular_np = self.x_particular  # type: ignore
 
-    @cython.ccall
     def conc_func(self, x_free: np.ndarray) -> np.ndarray:
         return 10.0 ** (self.stoich_null_space_np @ x_free + self.x_particular_np)
 
-    @cython.ccall
     def residual_func(self, x_free: np.ndarray, c_tot: np.ndarray) -> np.ndarray:
         return c_tot - self.total_np @ self.conc_func(x_free)
 
-    @cython.ccall
     def solve_equilibrium(self, chms: np.ndarray, verbose: bool = False) -> NDArray:
         """
         Solve for the equilibrium concentrations of all of the species.
@@ -506,7 +457,7 @@ class EquilibriumParameters:
 
         # Set the charge balance value to zero (in case there is an error)
         if "Charge" in self.total.index:
-            charge_ind: cython.int = self.total.index.tolist().index("Charge")  # type: ignore
+            charge_ind: int = self.total.index.tolist().index("Charge")  # type: ignore
             c_tot[charge_ind] = 0.0
 
         if verbose:
@@ -655,39 +606,18 @@ class ZoneDimensions:
         return not (self == other)
 
 
-@cython.cclass
 class MineralParameters:
-    sw_threshold: NDArray = cython.declare(  # type: ignore
-        object, visibility="public"
-    )  # The soil water threshold
-    sw_exp: NDArray = cython.declare(  # type: ignore
-        object, visibility="public"
-    )  # The soil water exponent
-    n_alpha: NDArray = cython.declare(  # type: ignore
-        object, visibility="public"
-    )  # The water table depth factor
-    q_10: NDArray = cython.declare(  # type: ignore
-        object, visibility="public"
-    )  # The temperature factor range
-    ssa: NDArray = cython.declare(  # type: ignore
-        object, visibility="public"
-    )  # The specific surface area in units of g/mol
+    sw_threshold: NDArray  # The soil water threshold
+    sw_exp: NDArray  # The soil water exponent
+    n_alpha: NDArray  # The water table depth factor
+    q_10: NDArray  # The temperature factor range
+    ssa: NDArray  # The specific surface area in units of g/mol
 
-    sw_threshold_cy: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    sw_exp_cy: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    n_alpha_cy: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    q_10_cy: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
-    ssa_cy: cython.double[:] = cython.declare(  # type: ignore
-        cython.double[:], visibility="public"  # type: ignore
-    )  # type: ignore
+    sw_threshold_cy: np.ndarray
+    sw_exp_cy: np.ndarray
+    n_alpha_cy: np.ndarray
+    q_10_cy: np.ndarray
+    ssa_cy: np.ndarray
 
     def __init__(
         self,
@@ -741,17 +671,14 @@ class MineralParameters:
             ssa=param_arr[4],
         )
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def soil_water_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on the soil moisture
         """
-        n_minerals: cython.int = self.sw_threshold_cy.shape[0]  # type: ignore
+        n_minerals: int = self.sw_threshold_cy.shape[0]  # type: ignore
         arr_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
-        arr_mv: cython.double[:] = arr_out  # type: ignore
-        i: cython.int
+        arr_mv: np.ndarray = arr_out  # type: ignore
+        i: int
 
         # This loop replaces the NumPy boolean masking for better performance
         for i in range(n_minerals):
@@ -764,48 +691,39 @@ class MineralParameters:
                 arr_mv[i] = pow(forc.s_w / self.sw_threshold_cy[i], self.sw_exp_cy[i])  # type: ignore
         return arr_out
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def temperature_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on temperature
         """
-        n_minerals: cython.int = self.q_10_cy.shape[0]  # type: ignore
+        n_minerals: int = self.q_10_cy.shape[0]  # type: ignore
         arr_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
-        arr_mv: cython.double[:] = arr_out  # type: ignore
-        i: cython.int
+        arr_mv: np.ndarray = arr_out  # type: ignore
+        i: int
 
         # This loop replaces the vectorized NumPy power operation
         for i in range(n_minerals):
             arr_mv[i] = pow(self.q_10_cy[i], (forc.hydro_forc.temp - 20.0) / 10.0)  # type: ignore
         return arr_out
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def water_table_factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the dependence on the water table
         """
-        n_minerals: cython.int = self.n_alpha_cy.shape[0]  # type: ignore
+        n_minerals: int = self.n_alpha_cy.shape[0]  # type: ignore
         arr_out: np.ndarray = np.ones(n_minerals, dtype=np.float64)  # type: ignore
-        arr_mv: cython.double[:] = arr_out  # type: ignore
-        i: cython.int
-        n_alpha_i: cython.double
+        arr_mv: np.ndarray = arr_out  # type: ignore
+        i: int
+        n_alpha_i: float
 
         # This loop is the C-optimized version of your original loop
         for i in range(n_minerals):
             n_alpha_i = self.n_alpha_cy[i]  # type: ignore
             if n_alpha_i != 0.0:
-                arr_mv[i] = exp(  # type: ignore
-                    -fabs(n_alpha_i) * pow(forc.z_w, (n_alpha_i / fabs(n_alpha_i)))  # type: ignore
+                arr_mv[i] = np.exp(  # type: ignore
+                    -abs(n_alpha_i) * pow(forc.z_w, (n_alpha_i / abs(n_alpha_i)))  # type: ignore
                 )
         return arr_out
 
-    @cython.ccall
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     def factor(self, forc: RtForcing) -> np.ndarray:
         """
         Calculate the auxiliary factor for each function.
@@ -814,15 +732,15 @@ class MineralParameters:
         temperature_factor, and water_table_factor into a single loop
         to avoid creating intermediate arrays.
         """
-        n_minerals: cython.int = self.ssa_cy.shape[0]  # type: ignore
+        n_minerals: int = self.ssa_cy.shape[0]  # type: ignore
         factor_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
-        factor_mv: cython.double[:] = factor_out  # type: ignore
+        factor_mv: np.ndarray = factor_out  # type: ignore
 
-        i: cython.int
-        sw_factor: cython.double
-        temp_factor: cython.double
-        wt_factor: cython.double
-        n_alpha_i: cython.double
+        i: int
+        sw_factor: float
+        temp_factor: float
+        wt_factor: float
+        n_alpha_i: float
 
         for i in range(n_minerals):
             # --- 1. soil_water_factor logic ---
@@ -846,8 +764,8 @@ class MineralParameters:
             if n_alpha_i == 0.0:
                 wt_factor = 1.0
             else:
-                wt_factor = exp(
-                    -fabs(n_alpha_i) * pow(forc.z_w, n_alpha_i / fabs(n_alpha_i))
+                wt_factor = np.exp(
+                    -abs(n_alpha_i) * pow(forc.z_w, n_alpha_i / abs(n_alpha_i))
                 )
 
             # --- 4. Combine all factors ---

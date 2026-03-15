@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from typing import Optional
-import cython  # type: ignore
 
 import numpy as np
 from numpy.linalg import LinAlgError
@@ -15,7 +14,7 @@ from ..utils import DO_LOGGING, ZERO_CONC, setup_logging
 from ..math import find_root_multi
 
 # from ..common_types_compiled import HydroStep
-from potions.core import HydroStep
+from potions.core import HydroStep  # type: ignore
 
 
 from ..common_types_compiled import RtForcing
@@ -30,11 +29,6 @@ from .kinetic_structures import (
 from .reaction_network import (
     ReactionNetwork,
 )
-
-if not cython.compiled:
-    print(
-        "WARNING: 'potions.reactive_transport.rt_zone' is not compiled and may be slower as a result"
-    )
 
 setup_logging("rt_zone.py")
 

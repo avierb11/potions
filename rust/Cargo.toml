@@ -8,7 +8,8 @@ name = "core"
 crate-type = ["cdylib"]
 
 [dependencies]
+ndarray-linalg = {version="0.18.1", features=["openblas-system"]}
 numpy = "0.27.0"
-polars = "0.53.0"
+polars = {version="0.53.0", features=["ndarray"]}
 pyo3 = { version = "0.27", features = ["extension-module"]}
 pyo3-polars = "0.26.0"
