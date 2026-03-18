@@ -1,7 +1,7 @@
 from typing import Callable
 from scipy.optimize import approx_fprime
 import numpy as np
-from .common_types_compiled import HydroForcing
+from potions.core import HydroForcing
 
 
 def ode_is_stable(

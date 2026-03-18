@@ -7,11 +7,10 @@ use crate::{
     common_types::{ForcingData, HydroForcing, HydroStep, LapseRateParameters, RtForcing},
     hydro::{GroundZone, GroundZoneB, HydrologicZone, SnowZone, SurfaceZone},
     reactive_transport::{
-        kinetic_structures::{
+        database::{ChemicalDatabase, MineralKineticData, MineralSpecies, MonodReaction, PrimaryAqueousSpecies, SecondarySpecies, TstReaction}, kinetic_structures::{
             EquilibriumParameters, MineralAuxParams, MineralParameters, MonodParameters,
             RtParameters, TstParameters, ZoneDimensions,
-        },
-        rt_zone::RtZone,
+        }, reaction_network::ReactionNetwork, rt_zone::{RtStep, RtZone}
     },
 };
 pub mod common_types;
@@ -40,16 +39,30 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<HydrologicZone>()?;
 
     // Kinetic structures
+    m.add_class::<MineralParameters>()?;
+    m.add_class::<EquilibriumParameters>()?;
     m.add_class::<MonodParameters>()?;
     m.add_class::<TstParameters>()?;
-    m.add_class::<EquilibriumParameters>()?;
     m.add_class::<MineralAuxParams>()?;
-    m.add_class::<ZoneDimensions>()?;
-    m.add_class::<MineralParameters>()?;
+    m.add_class::<MineralAuxParams>()?;
     m.add_class::<RtParameters>()?;
+    m.add_class::<ZoneDimensions>()?;
 
     // RtZone
+    m.add_class::<RtStep>()?;
     m.add_class::<RtZone>()?;
+
+    // Reaction network
+    m.add_class::<ReactionNetwork>()?;
+
+    // Database things
+    m.add_class::<PrimaryAqueousSpecies>()?;
+    m.add_class::<SecondarySpecies>()?;
+    m.add_class::<MineralSpecies>()?;
+    m.add_class::<TstReaction>()?;
+    m.add_class::<MonodReaction>()?;
+    m.add_class::<MineralKineticData>()?;
+    m.add_class::<ChemicalDatabase>()?;
 
     Ok(())
 }

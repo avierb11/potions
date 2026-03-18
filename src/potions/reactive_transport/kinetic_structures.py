@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 import scipy.linalg as la
 from scipy.optimize import fsolve
 
-from ..common_types_compiled import RtForcing
+from potions.core import RtForcing
 from ..math import find_root_multi
 from ..utils import DO_LOGGING, setup_logging
 
@@ -253,17 +253,14 @@ class TstParameters:
 
         # --- 2. Allocate output arrays and create memoryviews for fast access ---
         rate_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
-        rate_mv: np.ndarray = rate_out  # type: ignore
-
         log_conc_arr: np.ndarray = np.empty(n_species, dtype=np.float64)
-        log_conc_mv: np.ndarray = log_conc_arr  # type: ignore
 
         chms_mv: np.ndarray = chms_in  # type: ignore
 
         # --- 3. Pre-calculate log10 of concentrations in a C loop ---
         # Replaces: log_conc: NDArray = np.log10(chms)
         for j in range(n_species):
-            log_conc_mv[j] = np.log10(chms_mv[j])  # type: ignore
+            log_conc_arr[j] = np.log10(chms_mv[j])  # type: ignore
 
         # --- 4. Main loop over each mineral ---
         log_dep_i: float
@@ -280,15 +277,15 @@ class TstParameters:
             for j in range(n_species):
                 dep_val = self.dep_np[i, j]  # type: ignore
                 if np.isfinite(dep_val):
-                    log_dep_i += dep_val * log_conc_mv[j]  # type: ignore
+                    log_dep_i += dep_val * log_conc_arr[j]  # type: ignore
 
                 stoich_val = self.stoich_np[i, j]  # type: ignore
                 if np.isfinite(stoich_val):
-                    log_iap_i += stoich_val * log_conc_mv[j]  # type: ignore
+                    log_iap_i += stoich_val * log_conc_arr[j]  # type: ignore
 
             # --- 6. Calculate the final rate for the current mineral ---
             # Replaces: dep = 10**log_dep, iap = 10**log_iap, and the final calculation
-            rate_mv[i] = pow(10.0, log_dep_i) * (  # type: ignore
+            rate_out[i] = pow(10.0, log_dep_i) * (  # type: ignore
                 1.0 - pow(10.0, log_iap_i) / self.min_eq_const_np[i]  # type: ignore
             )
 

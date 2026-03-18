@@ -14,10 +14,11 @@ from ..utils import DO_LOGGING, ZERO_CONC, setup_logging
 from ..math import find_root_multi
 
 # from ..common_types_compiled import HydroStep
-from potions.core import HydroStep  # type: ignore
+
+from potions.core import HydroStep, RtForcing  # type: ignore
 
 
-from ..common_types_compiled import RtForcing
+# from ..common_types_compiled import RtForcing
 from .kinetic_structures import (
     MineralParameters,
     EquilibriumParameters,

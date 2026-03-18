@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use numpy::{PyArrayMethods, PyReadonlyArray1, ndarray::Array1};
+use numpy::{ndarray::Array1, PyArray1, PyArrayMethods, PyReadonlyArray1, ToPyArray};
 use pyo3::prelude::*;
 use pyo3_polars::PySeries;
 
@@ -152,7 +152,7 @@ impl HydroStep {
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RtForcing {
-    pub conc_in: Array1<f64>,
+    pub _conc_in: Array1<f64>,
     #[pyo3(get, set)]
     pub hydro_step: HydroStep,
     #[pyo3(get, set)]
@@ -175,7 +175,7 @@ impl RtForcing {
     ) -> PyResult<Self> {
         let conc_arr: Array1<f64> = conc_in.to_owned_array();
         Ok(Self {
-            conc_in: conc_arr,
+            _conc_in: conc_arr,
             hydro_step,
             hydro_forc,
             s_w,
@@ -184,7 +184,22 @@ impl RtForcing {
     }
 
     #[getter]
+    fn conc_in<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self._conc_in.to_pyarray(py)
+    }
+
+    #[setter(conc_in)]
+    fn set_conc_in<'py>(&mut self, py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<()> {
+        self._conc_in = arr.to_owned_array();
+        Ok(())
+    }
+
+    #[getter]
     fn q_out(&self) -> f64 {
         self.hydro_step.lat_flux_ext + self.hydro_step.vert_flux_ext
+    }
+
+    pub fn print_forc(&self) -> () {
+        dbg!(self);
     }
 }

@@ -1,7 +1,7 @@
 use numpy::{
     array,
     ndarray::{s, Array1, Array2},
-    PyArray1, PyArrayMethods, PyReadonlyArray1, ToPyArray,
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray,
 };
 use polars::{frame::DataFrame, prelude::Float64Type};
 use pyo3::{exceptions::PyValueError, prelude::*};
@@ -9,29 +9,27 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{RootFindingError, find_root_multi, null_space_scipy, pinv_scipy},
+    math::{find_root_multi, matmul, null_space_scipy, pinv_scipy, OtherError, RootFindingError},
 };
 const PARAMETERS_PER_MINERAL: usize = 5;
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct MonodParameters {
+    #[pyo3(get)]
     pub monod_mat: PyDataFrame,
+    #[pyo3(get)]
     pub inhib_mat: PyDataFrame,
     pub monod_np: Array2<f64>,
     pub inhib_np: Array2<f64>,
 }
 
 impl MonodParameters {
-    pub fn rate_rust(
-        &self,
-        chms: &Array1<f64>,
-    ) -> Array1<f64> {
-
+    pub fn rate_rust(&self, chms: &Array1<f64>) -> Array1<f64> {
         let n_minerals: usize = self.monod_np.shape()[0];
         let n_species: usize = self.monod_np.shape()[1];
-        let mut monod: Array1<f64> = Array1::zeros(n_species);
-        let mut inhib: Array1<f64> = Array1::zeros(n_species);
+        let mut monod: Array1<f64> = Array1::zeros(n_minerals);
+        let mut inhib: Array1<f64> = Array1::zeros(n_minerals);
 
         for i in 0..n_minerals {
             let mut prod = 1.0;
@@ -58,7 +56,6 @@ impl MonodParameters {
         Array1::from_iter(monod.iter().zip(inhib).map(|(x, y)| x * y))
     }
 }
-
 
 #[pymethods]
 impl MonodParameters {
@@ -99,8 +96,11 @@ impl MonodParameters {
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct TstParameters {
+    #[pyo3(get)]
     pub stoich: PyDataFrame,
+    #[pyo3(get)]
     pub dep: PyDataFrame,
+    #[pyo3(get)]
     pub min_eq_const: PySeries,
     stoich_np: Array2<f64>,
     dep_np: Array2<f64>,
@@ -108,44 +108,51 @@ pub struct TstParameters {
 }
 
 impl TstParameters {
-    pub fn rate_rust(
-        &self,
-        chms: &Array1<f64>,
-    ) -> Array1<f64> {
-        let chms_arr: Array1<f64> = chms.clone();
+    // Calculate the solubility product for each of the minerals
+    pub fn calculate_solubility_product(&self, chms: &Array1<f64>) -> Array1<f64> {
+        let log_conc: Array1<f64> = chms.map(|x| x.log10());
         let n_minerals: usize = self.stoich_np.shape()[0];
         let n_species: usize = self.stoich_np.shape()[1];
-        let mut rate_out: Array1<f64> = Array1::zeros(n_minerals);
-        let log_conc: Array1<f64> = chms_arr.map(|x| x.log10());
-        // Ion activity product for each mineral
+        let mut log_qs: Array1<f64> = Array1::zeros(n_minerals);
+
         for i in 0..n_minerals {
-            let stoich_vals: Array1<f64> = &chms_arr * &self.stoich_np.row(i);
-            let dep_vals: Array1<f64> = &chms_arr * &self.dep_np.row(i);
-
-            let iap_i =
-                match stoich_vals
-                    .into_iter()
-                    .reduce(|x, acc| if x.is_finite() { acc + x } else { acc })
-                {
-                    Some(v) => v,
-                    None => 0.0,
-                };
-
-            let dep_i = match dep_vals
-                .into_iter()
-                .reduce(|x, acc| if x.is_finite() { acc + x } else { acc })
-            {
-                Some(v) => v,
-                None => 0.0,
-            };
-
-            rate_out[i] =
-                (10.0f64).powf(dep_i) * (1.0 - (10.0f64).powf(iap_i) / self.min_eq_const_np[i]);
+            let mut q_i = 0.0;
+            for (j, log_c_j) in log_conc.iter().enumerate() {
+                q_i += *log_c_j * self.stoich_np[(i, j)];
+            }
+            log_qs[i] = q_i;
         }
-        rate_out
+
+        log_qs.map(|x| (10_f64).powf(*x)) // Convert back to linear scale
+    }
+
+    pub fn calculate_dependence_term(&self, chms: &Array1<f64>) -> Array1<f64> {
+        let log_conc: Array1<f64> = chms.map(|x| x.log10());
+        let n_minerals: usize = self.stoich_np.shape()[0];
+        let n_species: usize = self.stoich_np.shape()[1];
+        let mut log_deps: Array1<f64> = Array1::zeros(n_minerals);
+
+        for i in 0..n_minerals {
+            let mut q_i = 0.0;
+            for (j, log_c_j) in log_conc.iter().enumerate() {
+                q_i += *log_c_j * self.dep_np[(i, j)];
+            }
+            log_deps[i] = q_i;
+        }
+
+        log_deps.map(|x| (10_f64).powf(*x)) // Convert back to linear scale
+    }
+
+    pub fn rate_rust(&self, chms: &Array1<f64>) -> Array1<f64> {
+        let solubility_product: Array1<f64> = self.calculate_solubility_product(chms);
+        let dependence: Array1<f64> = self.calculate_dependence_term(chms);
+
+        let tst_rates: Array1<f64> =
+            dependence * (1.0 - solubility_product / &self.min_eq_const_np);
+
+        tst_rates
     }
 }
-
 
 #[pymethods]
 impl TstParameters {
@@ -201,8 +208,11 @@ impl TstParameters {
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct EquilibriumParameters {
+    #[pyo3(get)]
     stoich: PyDataFrame,
+    #[pyo3(get)]
     log_eq_consts: PySeries,
+    #[pyo3(get)]
     total: PyDataFrame,
     total_mat: Array2<f64>,
     stoich_null_space: Array2<f64>,
@@ -211,13 +221,13 @@ pub struct EquilibriumParameters {
 }
 
 impl EquilibriumParameters {
-    pub fn conc_func(&self, x_free: &Array1<f64>) -> Array1<f64> {
+    pub fn conc_func_rust(&self, x_free: &Array1<f64>) -> Array1<f64> {
         let exp: Array1<f64> = self.stoich_null_space.dot(x_free) + &self.x_particular;
         exp.map(|x| (10.0f64).powf(*x))
     }
 
-    pub fn residual(&self, x_free: &Array1<f64>, c_tot: &Array1<f64>) -> Array1<f64> {
-        c_tot - &self.total_mat.dot(&self.conc_func(x_free))
+    pub fn residual_rust(&self, x_free: &Array1<f64>, c_tot: &Array1<f64>) -> Array1<f64> {
+        c_tot - &self.total_mat.dot(&self.conc_func_rust(x_free))
     }
 
     pub fn solve_equilibrium_rust(
@@ -225,16 +235,22 @@ impl EquilibriumParameters {
         chms: &Array1<f64>,
     ) -> Result<Array1<f64>, RootFindingError> {
         let chms_arr: Array1<f64> = chms.clone();
-        let mut c_tot: Array1<f64> = self.total_mat.dot(&chms_arr);
+        // let mut c_tot: Array1<f64> = self.total_mat.t().dot(&chms_arr);
+        let mut c_tot: Array1<f64> = match matmul(&self.total_mat, &chms_arr) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Matrix multiplication error. Shapes were wrong");
+                return Err(RootFindingError::Other(OtherError));
+            }
+        };
 
         // Get the charge balance location
         let s: &DataFrame = &self.total.0;
-        let index_col = &s.columns()[0];
-        let charge_ind = index_col
-            .str()
-            .expect("Failed to convert index to string type in solve_equilibrium")
+
+        let charge_ind = s
+            .get_column_names()
             .into_iter()
-            .position(|x| x == Some("Charge"));
+            .position(|x| x.as_str() == "H+");
 
         match charge_ind {
             Some(i) => c_tot[i] = 0.0,
@@ -242,13 +258,17 @@ impl EquilibriumParameters {
         };
 
         // Create the callable function for solving the root
-        let f_to_solve = |x: &Array1<f64>| self.residual(x, &c_tot);
+        let f_to_solve = |x: &Array1<f64>| self.residual_rust(x, &c_tot);
+
+        let initial_guess: Array1<f64> = Array1::zeros(c_tot.shape()[0]);
 
         // Solve the problem
-        find_root_multi(&f_to_solve, chms_arr)
+        match find_root_multi(&f_to_solve, initial_guess) {
+            Ok(v) => Ok(self.conc_func_rust(&v)),
+            Err(e) => Err(e),
+        }
     }
 }
-
 
 #[pymethods]
 impl EquilibriumParameters {
@@ -256,12 +276,12 @@ impl EquilibriumParameters {
     pub fn new(stoich: PyDataFrame, log_eq_consts: PySeries, total: PyDataFrame) -> PyResult<Self> {
         let stoich_mat: Array2<f64> = stoich
             .0
-            .to_ndarray::<Float64Type>(Default::default())
+            .to_ndarray::<Float64Type>(polars::prelude::IndexOrder::C)
             .expect("Failed to get stoichiometry matrix from dataframe");
 
         let total_mat: Array2<f64> = total
             .0
-            .to_ndarray::<Float64Type>(Default::default())
+            .to_ndarray::<Float64Type>(polars::prelude::IndexOrder::C)
             .expect("Failed to get stoichiometry matrix from dataframe");
 
         let eq_const_arr: Array1<f64> = match log_eq_consts.0.f64() {
@@ -273,7 +293,7 @@ impl EquilibriumParameters {
             }
         };
 
-        let stoich_null_space: Array2<f64> = null_space_scipy(&stoich_mat);
+        let stoich_null_space: Array2<f64> = null_space_scipy(&stoich_mat.clone())?;
         let eq_const_arr: Array1<f64> = match log_eq_consts.0.f64() {
             Ok(v) => v.to_ndarray().unwrap().iter().cloned().collect(),
             Err(_) => {
@@ -283,7 +303,7 @@ impl EquilibriumParameters {
             }
         };
 
-        let stoich_pinv: Array2<f64> = pinv_scipy(&stoich_mat);
+        let stoich_pinv: Array2<f64> = pinv_scipy(&stoich_mat.clone())?;
         let x_particular: Array1<f64> = stoich_pinv.dot(&eq_const_arr);
 
         Ok(Self {
@@ -306,49 +326,132 @@ impl EquilibriumParameters {
 
         match self.solve_equilibrium_rust(&chms_arr) {
             Ok(v) => Ok(v.to_pyarray(py)),
-            Err(_) => Err(PyValueError::new_err("Failed to solve speciation"))
+            Err(_) => Err(PyValueError::new_err("Failed to solve speciation")),
         }
+    }
+
+    pub fn conc_func<'py>(
+        &self,
+        py: Python<'py>,
+        x_free: PyReadonlyArray1<f64>,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let x_free_arr: Array1<f64> = x_free.to_owned_array();
+
+        self.conc_func_rust(&x_free_arr).to_pyarray(py)
+    }
+
+    pub fn residual<'py>(
+        &self,
+        py: Python<'py>,
+        x_free: PyReadonlyArray1<f64>,
+        c_tot: PyReadonlyArray1<f64>,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let x_free_arr: Array1<f64> = x_free.to_owned_array();
+        let c_tot_arr: Array1<f64> = c_tot.to_owned_array();
+        self.residual_rust(&x_free_arr, &c_tot_arr).to_pyarray(py)
+    }
+
+    pub fn total_mat_shape(&self) -> () {
+        let shape = self.total_mat.shape();
+        println!("{:?}", shape);
+    }
+
+    pub fn get_total_mat<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.total_mat.to_pyarray(py)
+    }
+
+    pub fn get_stoich_null_space<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.stoich_null_space.to_pyarray(py)
+    }
+
+    pub fn get_x_particular<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.x_particular.to_pyarray(py)
+    }
+
+    pub fn stoich_null_space_shape(&self) -> () {
+        let shape = self.stoich_null_space.shape();
+        println!("{:?}", shape);
+    }
+
+    pub fn log10_k_w_shape(&self) -> () {
+        let shape = self.log10_k_w.shape();
+        println!("{:?}", shape);
+    }
+
+    pub fn x_particular_shape(&self) -> () {
+        let shape = self.x_particular.shape();
+        println!("{:?}", shape);
     }
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct MineralAuxParams {
+    #[pyo3(get)]
     sw_threshold: f64,
+    #[pyo3(get)]
     sw_exp: f64,
+    #[pyo3(get)]
     n_alpha: f64,
+    #[pyo3(get)]
     q_10: f64,
+    #[pyo3(get)]
     ssa: f64,
 }
 
 #[pymethods]
 impl MineralAuxParams {
     #[new]
-    pub fn new(
-        sw_threshold: f64,
-        sw_exp: f64,
-        n_alpha: f64,
-        q_10: f64,
-        ssa: f64,
-    ) -> PyClassInitializer<Self> {
-        unimplemented!()
+    pub fn new(sw_threshold: f64, sw_exp: f64, n_alpha: f64, q_10: f64, ssa: f64) -> Self {
+        Self {
+            sw_threshold,
+            sw_exp,
+            n_alpha,
+            q_10,
+            ssa,
+        }
     }
 
     pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        unimplemented!()
+        let param_vec = vec![
+            self.sw_threshold,
+            self.sw_exp,
+            self.n_alpha,
+            self.q_10,
+            self.ssa,
+        ];
+        Array1::from_vec(param_vec).to_pyarray(py)
     }
 
     #[staticmethod]
     pub fn from_array(arr: PyReadonlyArray1<f64>) -> PyResult<Self> {
-        unimplemented!()
+        let nd_arr: Array1<f64> = arr.to_owned_array();
+        if nd_arr.len() != 5 {
+            let msg = format!(
+                "Passed incorrect number of parameters to MineralAuxParams::from_array: {}",
+                nd_arr
+            );
+            return Err(PyValueError::new_err(msg));
+        } else {
+            Ok(Self {
+                sw_threshold: nd_arr[0],
+                sw_exp: nd_arr[1],
+                n_alpha: nd_arr[2],
+                q_10: nd_arr[3],
+                ssa: nd_arr[4],
+            })
+        }
     }
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ZoneDimensions {
+    #[pyo3(get)]
     porosity: f64,
+    #[pyo3(get)]
     depth: f64,
+    #[pyo3(get)]
     passive_water_storage: f64,
 }
 
@@ -403,25 +506,21 @@ pub struct MineralParameters {
 }
 
 impl MineralParameters {
-    pub fn soil_water_factor_rust(
-        &self,
-        forc: &RtForcing,
-    ) -> Array1<f64> {
+    pub fn soil_water_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
         let num_minerals = self.sw_threshold.shape()[0];
         let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
         for i in 0..num_minerals {
             if forc.s_w >= self.sw_threshold[i] {
                 arr[i] = ((1.0 - forc.s_w) / (1.0 - self.sw_threshold[i])).powf(self.sw_exp[i])
+            } else {
+                arr[i] = (forc.s_w / self.sw_threshold[i]).powf(self.sw_exp[i])
             }
         }
         arr
     }
 
-    pub fn temperature_factor_rust(
-        &self,
-        forc: &RtForcing,
-    ) -> Array1<f64> {
+    pub fn temperature_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
         let num_minerals = self.sw_threshold.shape()[0];
         let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
@@ -431,10 +530,7 @@ impl MineralParameters {
         arr
     }
 
-    pub fn water_table_factor_rust(
-        &self,
-        forc: &RtForcing,
-    ) -> Array1<f64> {
+    pub fn water_table_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
         let num_minerals = self.sw_threshold.shape()[0];
         let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
@@ -584,7 +680,9 @@ impl MineralParameters {
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RtParameters {
+    #[pyo3(get)]
     pub dimensions: ZoneDimensions,
+    #[pyo3(get)]
     pub mineral_params: MineralParameters,
 }
 

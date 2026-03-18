@@ -6,7 +6,7 @@ build-backend = "maturin"
 authors = [{ name = "Andrew Vierbicher", email = "acv5255@psu.edu" }]
 name = "potions-model"
 version = "0.0.1"
-dependencies = ["numpy", "scipy", "pandas", "matplotlib", "emcee", "networkx"]
+dependencies = ["numpy", "scipy", "pandas>=3", "matplotlib", "emcee", "networkx"]
 description = "A simple and flexible hydrologic modeling package"
 requires-python = ">= 3.10"
 

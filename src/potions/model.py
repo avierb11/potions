@@ -31,6 +31,8 @@ from numpy import float64 as f64
 from numpy.typing import ArrayLike, NDArray
 from pandas import DataFrame, Index, Series, Timestamp
 
+# from potions.reactive_transport.rt_zone import RtStep
+
 # from .common_types import ForcingData, LapseRateParameters
 # from .common_types_compiled import RtForcing
 from .common_types import ForcingData
@@ -2114,13 +2116,13 @@ class Model:
                     s_i,
                     d_i,
                     dt_days,
-                    failed_dir=failed_dir,
                 )
             except Exception as e:
-                # print(f"Failed on zone {i} with values:")
-                # print(f"{s_i=}")
+                print(f"Failed on zone {i} with values:")
+                print(f"{s_i=}")
                 # print(f"{d_i=}")
-                # print(f"{dt_days=}")
+                print(d_i.print_forc())
+                print(f"{dt_days=}")
                 raise e
             lat_mass[i] = step.lat_mass
             vert_mass[i] = step.vert_mass
@@ -2221,6 +2223,7 @@ class Model:
 
                 if verbose:
                     print(f"Finished step {i}")
+
         except Exception as e:
             if DO_LOGGING:
                 print(f"Failed on step {i} with error: {e}")  # type: ignore
