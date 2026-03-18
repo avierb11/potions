@@ -58,6 +58,8 @@ from potions.core import (  # type: ignore
     RtForcing,
     RtStep,
     RtZone,
+    ReactionNetwork,
+    RtParameters,
 )
 
 from .interfaces import StateType, Zone
@@ -67,8 +69,8 @@ from .reactive_transport import (
     # RtZone,
     calculate_moisture_fraction,
     calculate_water_table_depth,
-    ReactionNetwork,
-    RtParameters,
+    # ReactionNetwork,
+    # RtParameters,
     get_hydro_steps,
 )
 from .utils import (
@@ -1788,14 +1790,14 @@ class Model:
         return len(self.hydro_to_array())
 
     @classmethod
-    def get_num_parameters(cls: type[Model]) -> int:
+    def get_num_hydro_parameters(cls: type[Model]) -> int:
         """The total number of optimizable parameters in the model."""
         num_params: int = 0
         for layer in cls.structure:
             for zone in layer:
                 num_params += zone.num_parameters()  # type: ignore
 
-        return num_params
+        return num_params + cls.get_num_size_parameters()
 
     def rt_to_array(self) -> NDArray:
         """Convert the reactive transport structures into an array"""
@@ -2400,7 +2402,7 @@ class Model:
         num_zones = cls.get_num_zones()
         num_rt_params_per_zone = 3 + network.num_mineral_parameters
         num_rt_params = num_zones * num_rt_params_per_zone
-        num_hydro_params: int = cls.get_num_parameters()
+        num_hydro_params: int = cls.get_num_hydro_parameters()
 
         if verbose:
             print(f"Number of zones in the model: {num_zones}")

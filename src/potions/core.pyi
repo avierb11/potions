@@ -174,8 +174,8 @@ class RtZone:
         self,
         network: ReactionNetwork,
         params: RtParameters,
-        do_reactions: bool,
-        do_speciation: bool,
+        do_reactions: bool = True,
+        do_speciation: bool = True,
         name: str = "unnamed",
     ) -> None: ...
     def mass_balance_ode(self, chms: np.ndarray, d: RtForcing) -> np.ndarray: ...
