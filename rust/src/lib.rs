@@ -1,16 +1,22 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use pyo3::prelude::*;
+use pyo3::{create_exception, exceptions::PyException, prelude::*};
 
 use crate::{
     common_types::{ForcingData, HydroForcing, HydroStep, LapseRateParameters, RtForcing},
     hydro::{GroundZone, GroundZoneB, HydrologicZone, SnowZone, SurfaceZone},
     reactive_transport::{
-        database::{ChemicalDatabase, MineralKineticData, MineralSpecies, MonodReaction, PrimaryAqueousSpecies, SecondarySpecies, TstReaction}, kinetic_structures::{
+        database::{
+            ChemicalDatabase, MineralKineticData, MineralSpecies, MonodReaction,
+            PrimaryAqueousSpecies, SecondarySpecies, TstReaction,
+        },
+        kinetic_structures::{
             EquilibriumParameters, MineralAuxParams, MineralParameters, MonodParameters,
             RtParameters, TstParameters, ZoneDimensions,
-        }, reaction_network::ReactionNetwork, rt_zone::{RtStep, RtZone}
+        },
+        reaction_network::ReactionNetwork,
+        rt_zone::{RtStep, RtZone},
     },
 };
 pub mod common_types;
@@ -18,10 +24,12 @@ pub mod hydro;
 pub mod math;
 pub mod reactive_transport;
 
-#[pyfunction]
-fn hello_rust() -> PyResult<String> {
-    Ok("Hello from Rust!".into())
-}
+create_exception!(math, ScalarRootFindingError, PyException);
+create_exception!(math, RootFindingError, PyException);
+create_exception!(math, IterationError, RootFindingError);
+create_exception!(math, LinearSystemError, RootFindingError);
+create_exception!(math, OtherError, RootFindingError);
+create_exception!(math, MatMulError, PyException);
 
 #[pymodule]
 fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -64,5 +72,14 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MineralKineticData>()?;
     m.add_class::<ChemicalDatabase>()?;
 
+    // Math things
+    m.add(
+        "ScalarRootFindingError",
+        m.py().get_type::<ScalarRootFindingError>(),
+    )?;
+    m.add("MatMulError", m.py().get_type::<MatMulError>())?;
+    m.add("IterationError", m.py().get_type::<IterationError>())?;
+    m.add("LinearSystemError", m.py().get_type::<LinearSystemError>())?;
+    m.add("OtherError", m.py().get_type::<OtherError>())?;
     Ok(())
 }

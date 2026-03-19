@@ -36,22 +36,46 @@ class RtForcing:
 # Hydrology
 @dataclass
 class HydrologicZone:
+    name: str = "unnamed"
+
+    def step(self, s_0: float, d: HydroForcing, dt: float) -> HydroStep: ...
+    def mass_balance(self, s: float, d: HydroForcing) -> float: ...
+    def forc_flux(self, s: float, d: HydroForcing) -> float: ...
+    def vap_flux(self, s: float, d: HydroForcing) -> float: ...
+    def lat_flux(self, s: float, d: HydroForcing) -> float: ...
+    def vert_flux(self, s: float, d: HydroForcing) -> float: ...
+    def lat_flux_ext(self, s: float, d: HydroForcing) -> float: ...
+    def vert_flux_ext(self, s: float, d: HydroForcing) -> float: ...
+    def param_list(self) -> list[float]: ...
+    @classmethod
+    def default(cls: type[HydrologicZone]) -> HydrologicZone: ...
+    @classmethod
+    def num_parameters(cls: type[HydrologicZone]) -> int: ...
+    @classmethod
+    def default_parameter_range(
+        cls: type[HydrologicZone],
+    ) -> dict[str, tuple[float, float]]: ...
+    @classmethod
+    def base_name(cls: type) -> str: ...
+    @classmethod
+    def parameter_names(cls) -> list[str]: ...
+    @classmethod
+    def default_init_state(cls) -> float: ...
+
+@dataclass
+class GroundZone(HydrologicZone):
     pass
 
 @dataclass
-class GroundZone:
+class GroundZoneB(HydrologicZone):
     pass
 
 @dataclass
-class GroundZoneB:
+class SnowZone(HydrologicZone):
     pass
 
 @dataclass
-class SnowZone:
-    pass
-
-@dataclass
-class SurfaceZone:
+class SurfaceZone(HydrologicZone):
     pass
 
 # Kinetic Structures
@@ -329,9 +353,26 @@ class ChemicalDatabase:
     def get_secondary_species(
         self, secondary_names: list[str]
     ) -> list[SecondarySpecies]: ...
+    def get_mineral_species(self, mineral_names: list[str]) -> list[MineralSpecies]: ...
     def get_single_mineral_reaction(
         self, mineral: str, label: str
     ) -> list[tuple[str, MineralKineticReaction]]: ...
     def get_mineral_reactions(
         self, mineral_names: list[str], labels: list[str]
     ) -> MineralKineticData: ...
+
+# ==== Exceptions ==== #
+class ScalarRootFindingError(Exception):
+    pass
+
+class MatMulError(Exception):
+    pass
+
+class IterationError(Exception):
+    pass
+
+class LinearSystemError(Exception):
+    pass
+
+class OtherError(Exception):
+    pass

@@ -5,7 +5,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::{
     common_types::{HydroForcing, HydroStep},
-    math::find_root_rust,
+    math::{find_root_rust, ScalarRootFindingError},
 };
 
 #[pyclass(subclass)]
@@ -34,7 +34,14 @@ impl HydrologicZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+            Err(e) => {
+                let err_msg: String = match e {
+                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                };
+                let msg = format!("Failed to find root in Python step: {}", err_msg);
+                return Err(crate::ScalarRootFindingError::new_err(msg));
+            }
         };
 
         Ok(HydroStep {
@@ -190,7 +197,14 @@ impl SnowZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+            Err(e) => {
+                let err_msg: String = match e {
+                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                };
+                let msg = format!("Failed to find root in Python step: {}", err_msg);
+                return Err(crate::ScalarRootFindingError::new_err(msg));
+            }
         };
 
         Ok(HydroStep {
@@ -372,7 +386,14 @@ impl SurfaceZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+            Err(e) => {
+                let err_msg: String = match e {
+                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                };
+                let msg = format!("Failed to find root in Python step: {}", err_msg);
+                return Err(crate::ScalarRootFindingError::new_err(msg));
+            }
         };
 
         Ok(HydroStep {
@@ -528,7 +549,14 @@ impl GroundZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+            Err(e) => {
+                let err_msg: String = match e {
+                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                };
+                let msg = format!("Failed to find root in Python step: {}", err_msg);
+                return Err(crate::ScalarRootFindingError::new_err(msg));
+            }
         };
 
         Ok(HydroStep {
@@ -672,7 +700,14 @@ impl GroundZoneB {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(_) => return Err(PyValueError::new_err("Failed to find root in Python step")),
+            Err(e) => {
+                let err_msg: String = match e {
+                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                };
+                let msg = format!("Failed to find root in Python step: {}", err_msg);
+                return Err(crate::ScalarRootFindingError::new_err(msg));
+            }
         };
 
         Ok(HydroStep {

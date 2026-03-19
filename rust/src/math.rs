@@ -6,7 +6,7 @@ use numpy::{
     PyArray2, PyArrayMethods,
 };
 use pyo3::{
-    exceptions::{PyRuntimeError, PyValueError},
+    exceptions::{PyException, PyRuntimeError, PyValueError},
     prelude::*,
 };
 
@@ -16,36 +16,47 @@ const FIND_ROOT_TOL: f64 = 1e-6;
 const FIND_ROOT_MAXITER: usize = 50;
 const MULTI_MAXITER: usize = 100;
 const MULTI_TOL: f64 = 1e-6;
-const APPROX_FPRIME_DX: f64 = 1e-3;
+const APPROX_FPRIME_DX: f64 = 1e-8;
+const APPROX_FPRIME_REL_DX: f64 = 1e-3;
+const F_PRIME_MIN_VAL: f64 = 1e-20;
 
 pub trait ObjectiveFunctionScalar {
     fn evaluate(&self, x: f64) -> f64;
 }
 
+#[pyclass]
 #[derive(Debug, Clone)]
-pub struct ScalarRootFindingError;
+pub enum ScalarRootFindingError {
+    IterationError(),
+    NanError(),
+}
 
+#[pyclass(extends=PyException)]
 #[derive(Debug, Clone)]
 pub struct IterationError;
 
+#[pyclass]
 #[derive(Debug, Clone)]
-pub struct LinearSystemError {
+pub struct LinearSystemDescription {
     pub iter: usize,
     pub jac: Array2<f64>,
     pub x: Array1<f64>,
     pub x_0: Array1<f64>,
 }
 
+#[pyclass(extends=PyException)]
 #[derive(Debug, Clone)]
 pub struct OtherError;
 
+#[pyclass]
 #[derive(Debug, Clone)]
 pub enum RootFindingError {
-    IterationError(IterationError),
-    LinearSystemError(LinearSystemError),
-    Other(OtherError),
+    IterationError(),
+    LinearSystemError(LinearSystemDescription),
+    Other(),
 }
 
+// #[pyclass(extends=PyException)]
 #[derive(Debug, Clone)]
 pub struct MatMulError;
 
@@ -58,7 +69,7 @@ impl fmt::Display for ScalarRootFindingError {
 impl fmt::Display for RootFindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg: String = match self {
-            Self::IterationError(s) => {
+            Self::IterationError() => {
                 format!("Maximum iterations reached")
             }
             Self::LinearSystemError(s) => {
@@ -67,17 +78,11 @@ impl fmt::Display for RootFindingError {
                     s.iter, s.jac, s.x, s.x_0
                 )
             }
-            Self::Other(_) => {
+            Self::Other() => {
                 format!("Other error")
             }
         };
         write!(f, "{}", msg)
-    }
-}
-
-impl fmt::Display for LinearSystemError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Failed to solve linear system")
     }
 }
 
@@ -113,7 +118,11 @@ where
         err = fx_1.abs();
         counter += 1;
         if counter >= FIND_ROOT_MAXITER {
-            return Err(ScalarRootFindingError);
+            return Err(ScalarRootFindingError::IterationError());
+        }
+
+        if x_1.is_nan() {
+            return Err(ScalarRootFindingError::NanError());
         }
     }
 
@@ -219,15 +228,20 @@ where
     let mut jac_x: Array2<f64> = Array2::zeros((n, n));
 
     for (i, x_i) in x.iter().enumerate() {
+        let dx = match x_i.abs() < F_PRIME_MIN_VAL {
+            true => APPROX_FPRIME_DX,
+            false => APPROX_FPRIME_REL_DX * x_i.abs(),
+        };
+
         let mut x_up: Array1<f64> = x.clone();
         let mut x_dn: Array1<f64> = x.clone();
-        x_up[i] = x_i + APPROX_FPRIME_DX;
-        x_dn[i] = x_i - APPROX_FPRIME_DX;
+        x_up[i] = x_i + dx;
+        x_dn[i] = x_i - dx;
 
         let fx_up: Array1<f64> = f(&x_up);
         let fx_dn: Array1<f64> = f(&x_dn);
 
-        let jac_x_i: Array1<f64> = (fx_up - fx_dn) / (2.0 * APPROX_FPRIME_DX);
+        let jac_x_i: Array1<f64> = (fx_up - fx_dn) / (2.0 * dx);
         jac_x.column_mut(i).assign(&jac_x_i);
     }
 
@@ -253,7 +267,7 @@ where
             Ok(v) => v,
             Err(_) => {
                 return {
-                    let err = LinearSystemError {
+                    let err = LinearSystemDescription {
                         iter: i,
                         jac: jac_x,
                         x: x,
@@ -269,11 +283,11 @@ where
         err = (f_x.pow2()).mean().unwrap();
     }
 
-    dbg!(&x_0);
-    dbg!(&x);
-    dbg!(&err);
+    // dbg!(&x_0);
+    // dbg!(&x);
+    // dbg!(&err);
 
-    Err(RootFindingError::IterationError(IterationError))
+    Err(RootFindingError::IterationError())
 }
 
 pub fn matmul(a: &Array2<f64>, x: &Array1<f64>) -> Result<Array1<f64>, MatMulError> {

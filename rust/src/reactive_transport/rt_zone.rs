@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::RtForcing,
-    math::find_root_multi,
+    math::{find_root_multi, RootFindingError},
     reactive_transport::{
         kinetic_structures::{
             EquilibriumParameters, MineralParameters, MonodParameters, RtParameters, TstParameters,
@@ -291,27 +291,56 @@ impl RtZone {
             |c: &Array1<f64>| (&c_0_arr - c) + dt_days * self.mass_balance_ode_rust(c, d);
 
         let c_after_rt: Array1<f64> = match find_root_multi(&residual, c_0_arr.clone()) {
-            Ok(v) => v,
-            Err(_) => {
-                return Err(PyValueError::new_err(
-                    "Failed to solve RT step during simulation",
-                ))
-            }
+            Ok(v) => v.map(|x| x.max(ZERO_CONC)),
+            Err(e) => match e {
+                // Match tuple-style variant with no data
+                RootFindingError::IterationError() => {
+                    return Err(crate::IterationError::new_err(
+                        "Exceeded iterations when solving RT system",
+                    ));
+                }
+                // Match and bind the data from LinearSystemError
+                RootFindingError::LinearSystemError(description) => {
+                    return Err(crate::LinearSystemError::new_err(
+                        "Exceeded iterations when solving RT system",
+                    ));
+                }
+                // Match the 'Other' variant
+                RootFindingError::Other() => {
+                    return Err(PyRuntimeError::new_err(
+                        "Failed to solve RT system with other error",
+                    ));
+                }
+            },
         };
-
-        // dbg!(&c_after_rt);
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),
             true => match self.eq.solve_equilibrium_rust(&c_after_rt) {
                 Ok(v) => {
                     // eprintln!("Solved speciation");
-                    v
+                    v.map(|x| x.max(ZERO_CONC))
                 }
-                Err(e) => {
-                    let msg = format!("Failed to solve speciation after RT: {}", e.to_string());
-                    return Err(PyValueError::new_err(msg));
-                }
+                Err(e) => match e {
+                    // Match tuple-style variant with no data
+                    RootFindingError::IterationError() => {
+                        return Err(crate::IterationError::new_err(
+                            "Exceeded iterations when solving speciation",
+                        ));
+                    }
+                    // Match and bind the data from LinearSystemError
+                    RootFindingError::LinearSystemError(description) => {
+                        return Err(crate::LinearSystemError::new_err(
+                            "Exceeded iterations when solving speciation",
+                        ));
+                    }
+                    // Match the 'Other' variant
+                    RootFindingError::Other() => {
+                        return Err(PyRuntimeError::new_err(
+                            "Failed to solve speciation with other error",
+                        ));
+                    }
+                },
             },
         };
 

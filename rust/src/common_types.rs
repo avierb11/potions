@@ -93,6 +93,10 @@ impl HydroForcing {
             self.precip, self.temp, self.pet, self.q_in
         )
     }
+
+    pub fn to_string(&self) -> String {
+        self.__repr__()
+    }
 }
 
 #[pyclass(from_py_object)]
@@ -146,6 +150,10 @@ impl HydroStep {
             "HydroStep(state={:.2},forc_flux={:.2},lat_flux={:.2},vert_flux={:.2},vap_flux={:.2},q_in={:.2},lat_flux_ext={:.2},vert_flux_ext={:.2})",
             self.state, self.forc_flux, self.lat_flux, self.vert_flux, self.vap_flux, self.q_in, self.lat_flux_ext, self.vert_flux_ext
         )
+    }
+
+    pub fn to_string(&self) -> String {
+        self.__repr__()
     }
 }
 
@@ -201,5 +209,16 @@ impl RtForcing {
 
     pub fn print_forc(&self) -> () {
         dbg!(self);
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RtForcing(\n\tconc_in=array({}),\n\thydro_step={},\n\thydro_forc={},\n\ts_w={:.2},\n\tz_w={}\n)",
+            self._conc_in.to_string(),
+            self.hydro_step.to_string(),
+            self.hydro_forc.to_string(),
+            self.s_w,
+            self.z_w
+        )
     }
 }

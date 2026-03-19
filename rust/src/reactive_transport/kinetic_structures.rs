@@ -240,7 +240,7 @@ impl EquilibriumParameters {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("Matrix multiplication error. Shapes were wrong");
-                return Err(RootFindingError::Other(OtherError));
+                return Err(RootFindingError::Other());
             }
         };
 

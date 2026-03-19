@@ -2122,8 +2122,7 @@ class Model:
             except Exception as e:
                 print(f"Failed on zone {i} with values:")
                 print(f"{s_i=}")
-                # print(f"{d_i=}")
-                print(d_i.print_forc())
+                print(f"{d_i=}")
                 print(f"{dt_days=}")
                 raise e
             lat_mass[i] = step.lat_mass
@@ -2232,6 +2231,7 @@ class Model:
             if return_partial:
                 final_completed = i  # type: ignore
             else:
+                print(f"Failed on step {i}")  # type: ignore
                 raise e
 
         # Construct an output dataframe
