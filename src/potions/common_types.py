@@ -96,6 +96,31 @@ class ChemicalState:
         return np.concatenate([self.prim_aq_conc, self.sec_conc])  # type: ignore
 
 
+@dataclass(frozen=True)
+class HydroModelStep:
+    """Holds the results of a single time step for the entire model.
+
+    This is an immutable data structure that contains the new states and the
+    calculated fluxes for all zones in the model for a single time step.
+
+    Attributes (list order corresponds to the flattened model zones):
+        state: A list of the updated states for each zone.
+        forc_flux: A list of the forcing fluxes for each zone.
+        vap_flux: A list of the vaporization fluxes for each zone.
+        lat_flux: A list of the lateral fluxes for each zone.
+        vert_flux: A list of the vertical fluxes for each zone.
+    """
+
+    state: np.ndarray
+    forc_flux: np.ndarray
+    vap_flux: np.ndarray
+    lat_flux: np.ndarray
+    vert_flux: np.ndarray
+    q_in: np.ndarray
+    lat_flux_ext: np.ndarray
+    vert_flux_ext: np.ndarray
+
+
 @dataclass
 class HydroSimulation:
     forcing: list[ForcingData]
