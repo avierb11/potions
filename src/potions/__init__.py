@@ -1,8 +1,6 @@
 __all__ = [
     # Sub-modules
     "common_types",
-    "common_types_compiled",
-    "hydro",
     "interfaces",
     "model",
     "objective_functions",
@@ -63,10 +61,23 @@ __all__ = [
     "RtZoneConfiguration",
     "ModelResults",
     "MineralKineticData",
+    "RtModelResults",
+    "RtNumericalError",
+    "HydrologyNumericalError",
+    "OptimizationError",
+    # River things
+    "RiverDimensions",
+    "RiverParameters",
+    "RiverZone",
 ]
-from .common_types import ChemicalState, LapseRateParameters
-
-# from .common_types_compiled import HydroForcing, HydroStep, RtForcing
+from .common_types import (
+    ChemicalState,
+    LapseRateParameters,
+    HydroModelResults,
+    RtModelResults,
+    ModelResults,
+    ForcingData,
+)
 
 from .core import (
     HydroForcing,
@@ -95,32 +106,33 @@ from .core import (
     MonodReaction,
     MineralKineticData,
     ChemicalDatabase,
+    OptimizationError,
+    # River
+    RiverDimensions,
+    RiverParameters,
+    RiverZone,
 )
 
-# from .hydro import (
-#     GroundZone,
-#     GroundZoneB,
-#     GroundZoneLinear,
-#     GroundZoneLinearB,
-#     HydrologicZone,
-#     SnowZone,
-#     SurfaceZone,
-# )
 from .interfaces import StepResult, Zone
-from .model import (
-    BatchResults,
-    ForcingData,
+
+from .common_models import (
     HbvLateralModel,
     HbvModel,
     HbvNonlinearModel,
-    Hillslope,
-    HydroModelResults,
-    Layer,
-    Model,
     ThreeLayerModel,
-    RtZoneConfiguration,
-    ModelResults,
 )
+
+from .model_components import (
+    Hillslope,
+    Layer,
+)
+
+from .model import (
+    BatchResults,
+    Model,
+    RtZoneConfiguration,
+)
+
 from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
 from .reactive_transport import (
     # ChemicalDatabase,
@@ -145,9 +157,7 @@ from .reactive_transport import (
     calculate_water_table_depth,
     calculate_moisture_fraction,
 )
-from .utils import (
-    objective_function,
-)
+from .utils import objective_function, RtNumericalError, HydrologyNumericalError
 
 from .math import (
     find_root_multi,

@@ -8,12 +8,13 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::{exceptions::PyKeyError, prelude::*};
 use pyo3_polars::{PyDataFrame, PySeries};
 
+use crate::reactive_transport::database::ExchangeReaction;
 use crate::reactive_transport::{
     database::{MineralKineticData, MineralSpecies, PrimaryAqueousSpecies, SecondarySpecies},
     kinetic_structures::{EquilibriumParameters, MonodParameters, TstParameters},
 };
 
-#[pyclass(from_py_object)]
+#[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug)]
 pub struct ReactionNetwork {
     #[pyo3(get)]
@@ -24,6 +25,8 @@ pub struct ReactionNetwork {
     pub secondary: Vec<SecondarySpecies>,
     #[pyo3(get)]
     pub mineral_kinetics: MineralKineticData,
+    #[pyo3(get)]
+    pub exchange_species: Vec<ExchangeReaction>,
     #[pyo3(get)]
     pub species: PyDataFrame,
 }
@@ -36,6 +39,7 @@ impl ReactionNetwork {
         mineral: Vec<MineralSpecies>,
         secondary: Vec<SecondarySpecies>,
         mineral_kinetics: MineralKineticData,
+        exchange_species: Vec<ExchangeReaction>,
     ) -> PyResult<Self> {
         let mut species_types: Vec<String> = Vec::new();
         let mut names: Vec<String> = Vec::new();
@@ -43,6 +47,7 @@ impl ReactionNetwork {
         species_types.append(&mut vec!["primary".to_owned(); primary_aqueous.len()]);
         species_types.append(&mut vec!["secondary".to_owned(); secondary.len()]);
         species_types.append(&mut vec!["mineral".to_owned(); mineral.len()]);
+
         for x in &primary_aqueous {
             names.push(x.name.clone());
         }
@@ -53,6 +58,16 @@ impl ReactionNetwork {
 
         for x in &mineral {
             names.push(x.name.clone());
+        }
+
+        if exchange_species.len() > 0 {
+            species_types.append(&mut vec!["exchange".to_owned(); exchange_species.len() + 1]);
+
+            names.push("X-".to_string());
+
+            for x in &exchange_species {
+                names.push(x.name.clone());
+            }
         }
 
         let species_df = df!(
@@ -68,6 +83,7 @@ impl ReactionNetwork {
             mineral,
             secondary,
             mineral_kinetics,
+            exchange_species,
             species: py_df,
         })
     }
@@ -91,7 +107,7 @@ impl ReactionNetwork {
 
     #[getter]
     pub fn has_exchange(&self) -> bool {
-        false
+        self.exchange_species.len() > 0
     }
 
     #[getter]
@@ -109,6 +125,13 @@ impl ReactionNetwork {
             charge_vec.push(0.0);
         }
 
+        if self.has_exchange() {
+            charge_vec.push(-1.0);
+            for exch in self.exchange_species.iter() {
+                charge_vec.push(exch.charge);
+            }
+        }
+
         let ser = Series::new("charge".into(), charge_vec);
 
         PySeries(ser)
@@ -116,7 +139,7 @@ impl ReactionNetwork {
 
     #[getter]
     pub fn equilibrium_species(&self) -> PyDataFrame {
-        let mask = self
+        let mineral_mask = self
             .species
             .0
             .column("type")
@@ -125,6 +148,25 @@ impl ReactionNetwork {
             .expect("Failed to convert column to string")
             .equal("mineral")
             .not();
+        let exchange_mask = self
+            .species
+            .0
+            .column("type")
+            .expect("Failed to get 'type' column")
+            .str()
+            .expect("Failed to convert column to string")
+            .equal("exchange")
+            .not();
+
+        let mask: ChunkedArray<BooleanType> = mineral_mask
+            .into_iter()
+            .zip(exchange_mask.into_iter())
+            .map(|(a, b)| match (a, b) {
+                (Some(a_i), Some(b_i)) => a_i & b_i,
+                _ => false,
+            })
+            .collect();
+
         let eq_spec = self
             .species
             .clone()
@@ -147,6 +189,8 @@ impl ReactionNetwork {
         let mut sec_stoich_colnames: Vec<String> = Vec::new();
         let mut log_eq_consts: Vec<f64> = Vec::new();
 
+        // ==== Construct the equilibrium matrix ==== //
+
         for spec in self.secondary.iter() {
             let mut stoich_i: Vec<f64> = Vec::new();
             log_eq_consts.push(spec.eq_consts[1]);
@@ -163,7 +207,24 @@ impl ReactionNetwork {
             sec_stoich_colnames.push(spec.name.clone().into())
         }
 
-        // Create the mass conservation matrix
+        for exch in self.exchange_species.iter() {
+            log_eq_consts.push(exch.log10_k_eq);
+            let mut stoich_i: Vec<f64> = Vec::new();
+
+            for s_i in self.species_names().iter() {
+                if exch.stoichiometry.contains_key(s_i) {
+                    stoich_i.push(exch.stoichiometry[s_i]);
+                } else {
+                    stoich_i.push(0.0);
+                }
+            }
+
+            sec_stoich_columns.push(Column::new(exch.name.clone().into(), stoich_i));
+        }
+
+        // ========================================== //
+
+        // ==== Mass Conservation matrix ==== //
         let species_ids = self.species_indices();
         for (i, tot_spec_i) in self.total_species().iter().enumerate() {
             total_colnames.push(tot_spec_i.clone().into());
@@ -184,9 +245,17 @@ impl ReactionNetwork {
                         tot_i[sec_id] = sec.stoichiometry[tot_spec_i];
                     }
                 }
+
+                for exch in self.exchange_species.iter() {
+                    if exch.stoichiometry.contains_key(tot_spec_i) {
+                        let exch_id = species_ids[&exch.name];
+                        tot_i[exch_id] = exch.stoichiometry[tot_spec_i];
+                    }
+                }
                 total_columns.push(Column::new(tot_spec_i.into(), tot_i.to_vec()));
             }
         }
+        // ================================== //
 
         let total_df: DataFrame = DataFrame::new(self.num_species(), total_columns)
             .expect("Failed to construct mass and charge conservation dataframe")
@@ -195,13 +264,16 @@ impl ReactionNetwork {
                 Some(polars::polars_utils::either::Right(self.species_names())),
             )
             .expect("Failed to transpose mass_charge dataframe:");
-        let sec_stoich_df: DataFrame = DataFrame::new(self.num_species(), sec_stoich_columns)
-            .expect("Failed to construct mass and charge conservation dataframe")
-            .transpose(
-                None,
-                Some(polars::polars_utils::either::Right(self.species_names())),
-            )
-            .expect("Failed to transpose secondary stoichiometry dataframe");
+        let sec_stoich_df: DataFrame = match sec_stoich_columns.len() == 0 {
+            true => DataFrame::empty(),
+            false => DataFrame::new(self.num_species(), sec_stoich_columns)
+                .expect("Failed to construct mass and charge conservation dataframe")
+                .transpose(
+                    None,
+                    Some(polars::polars_utils::either::Right(self.species_names())),
+                )
+                .expect("Failed to transpose secondary stoichiometry dataframe"),
+        };
         let seq_eq_vec: Series = Series::new("log_keq".into(), log_eq_consts);
 
         EquilibriumParameters::new(
@@ -213,14 +285,6 @@ impl ReactionNetwork {
 
     #[getter]
     pub fn tst_params(&self) -> PyResult<TstParameters> {
-        // let mineral_stoich_df: DataFrame = self
-        //     .mineral_stoichiometry()?
-        //     .0
-        //     .transpose(
-        //         None,
-        //         Some(polars::polars_utils::either::Right(self.species_names())),
-        //     )
-        //     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let mut mineral_stoich_cols: Vec<Column> = Vec::new();
         let mut dep_cols: Vec<Column> = Vec::new();
 
@@ -258,21 +322,28 @@ impl ReactionNetwork {
         }
 
         let min_eq_ser: Series = Series::new("eq_consts".into(), min_eq_vals);
-        let dep_df = DataFrame::new(self.num_species(), dep_cols)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .transpose(
-                None,
-                Some(polars::polars_utils::either::Right(self.species_names())),
-            )
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let mineral_stoich_df = DataFrame::new(self.num_species(), mineral_stoich_cols)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .transpose(
-                None,
-                Some(polars::polars_utils::either::Right(self.species_names())),
-            )
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let dep_df = match dep_cols.len() == 0 {
+            true => DataFrame::empty(),
+            false => DataFrame::new(self.num_species(), dep_cols)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                .transpose(
+                    None,
+                    Some(polars::polars_utils::either::Right(self.species_names())),
+                )
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+        };
+
+        let mineral_stoich_df = match mineral_stoich_cols.len() == 0 {
+            true => DataFrame::empty(),
+            false => DataFrame::new(self.num_species(), mineral_stoich_cols)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                .transpose(
+                    None,
+                    Some(polars::polars_utils::either::Right(self.species_names())),
+                )
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+        };
 
         TstParameters::new(
             PyDataFrame(mineral_stoich_df),
@@ -314,21 +385,29 @@ impl ReactionNetwork {
             inhib_cols.push(Column::new(m.name.clone().into(), inhib_i));
         }
 
-        let monod_df: DataFrame = DataFrame::new(self.num_species(), monod_cols)
-            .expect("Failed to create Monod Matrix")
-            .transpose(
-                None,
-                Some(polars::polars_utils::either::Right(self.species_names())),
-            )
-            .expect("Failed to transpose Monod dataframe");
-        let inhib_df: DataFrame = DataFrame::new(self.num_species(), inhib_cols)
-            .expect("Failed to create Inhibition Matrix")
-            .transpose(
-                None,
-                Some(polars::polars_utils::either::Right(self.species_names())),
-            )
-            .expect("Failed to transpose Inhibition dataframe");
+        let monod_df = match monod_cols.len() == 0 {
+            true => DataFrame::empty(),
+            false => DataFrame::new(self.num_species(), monod_cols)
+                .expect("Failed to create Monod Matrix")
+                .transpose(
+                    None,
+                    Some(polars::polars_utils::either::Right(self.species_names())),
+                )
+                .expect("Failed to transpose Monod dataframe"),
+        };
 
+        let inhib_df = match inhib_cols.len() == 0 {
+            true => DataFrame::empty(),
+            false => DataFrame::new(self.num_species(), inhib_cols)
+                .expect("Failed to create Inhibition Matrix")
+                .transpose(
+                    None,
+                    Some(polars::polars_utils::either::Right(self.species_names())),
+                )
+                .expect("Failed to transpose Inhibition dataframe"),
+        };
+
+        // let monod_df: DataFrame = ;
         let monod_mat: PyDataFrame = PyDataFrame(monod_df);
 
         let inhib_mat: PyDataFrame = PyDataFrame(inhib_df);
@@ -350,6 +429,14 @@ impl ReactionNetwork {
 
         for x in &self.mineral {
             spec_names.push(x.name.clone());
+        }
+
+        if self.has_exchange() {
+            spec_names.push("X-".to_string());
+
+            for exch in self.exchange_species.iter() {
+                spec_names.push(exch.name.clone());
+            }
         }
 
         spec_names
@@ -427,8 +514,73 @@ impl ReactionNetwork {
     }
 
     #[getter]
+    pub fn num_exchange_species(&self) -> usize {
+        if self.has_exchange() {
+            self.exchange_species.len() + 1
+        } else {
+            0
+        }
+    }
+
+    #[getter]
+    pub fn primary_ids(&self) -> Vec<usize> {
+        let mut id_vals: Vec<usize> = Vec::new();
+
+        for i in 0..self.primary_aqueous.len() {
+            id_vals.push(i);
+        }
+
+        id_vals
+    }
+
+    #[getter]
+    pub fn secondary_ids(&self) -> Vec<usize> {
+        let mut id_vals: Vec<usize> = Vec::new();
+
+        let num_prim = self.primary_aqueous.len();
+
+        for i in 0..self.num_secondary() {
+            id_vals.push(i + num_prim);
+        }
+
+        id_vals
+    }
+
+    #[getter]
+    pub fn mineral_ids(&self) -> Vec<usize> {
+        let mut id_vals: Vec<usize> = Vec::new();
+
+        let offset = self.primary_aqueous.len() + self.num_secondary();
+
+        for i in 0..self.num_minerals() {
+            id_vals.push(i + offset);
+        }
+
+        id_vals
+    }
+
+    #[getter]
+    pub fn exchange_ids(&self) -> Vec<usize> {
+        let mut id_vals: Vec<usize> = Vec::new();
+
+        let offset = self.primary_aqueous.len() + self.num_secondary() + self.num_minerals();
+
+        for i in 0..self.num_exchange_species() {
+            id_vals.push(i + offset);
+        }
+
+        id_vals
+    }
+
+    #[getter]
     pub fn num_species(&self) -> usize {
-        self.primary_aqueous.len() + self.secondary.len() + self.mineral.len()
+        self.primary_aqueous.len() + self.secondary.len() + self.mineral.len() + {
+            if self.has_exchange() {
+                1 + self.exchange_species.len()
+            } else {
+                0
+            }
+        }
     }
 
     #[getter]
@@ -455,6 +607,14 @@ impl ReactionNetwork {
             s.insert(x.name.clone(), "mineral".into());
         }
 
+        if self.has_exchange() {
+            s.insert("X-".to_string(), "exchange".into());
+
+            for x in self.exchange_species.iter() {
+                s.insert(x.name.clone(), "exchange".into());
+            }
+        }
+
         s
     }
 
@@ -476,6 +636,16 @@ impl ReactionNetwork {
             counter += 1;
         }
 
+        if self.has_exchange() {
+            s.insert("X-".to_string(), counter);
+            counter += 1;
+
+            for x in self.exchange_species.iter() {
+                s.insert(x.name.clone(), counter);
+                counter += 1;
+            }
+        }
+
         s
     }
 
@@ -486,7 +656,7 @@ impl ReactionNetwork {
 
     #[getter]
     pub fn num_total_species(&self) -> usize {
-        self.primary_aqueous.len() + self.mineral.len()
+        self.primary_aqueous.len() + self.mineral.len() + self.num_exchange_species()
     }
 
     #[getter]
@@ -501,6 +671,10 @@ impl ReactionNetwork {
             tot.push(x.name.clone())
         }
 
+        if self.has_exchange() {
+            tot.push("X-".to_string());
+        }
+
         tot
     }
 
@@ -512,5 +686,79 @@ impl ReactionNetwork {
     ) -> Bound<'py, PyArray1<f64>> {
         let conc: Array1<f64> = Array1::from_elem(self.num_aqueous_species(), init_conc);
         conc.to_pyarray(py)
+    }
+
+    pub fn __getstate__(
+        &self,
+    ) -> (
+        Vec<PrimaryAqueousSpecies>,
+        Vec<MineralSpecies>,
+        Vec<SecondarySpecies>,
+        MineralKineticData,
+    ) {
+        (
+            self.primary_aqueous.clone(),
+            self.mineral.clone(),
+            self.secondary.clone(),
+            self.mineral_kinetics.clone(),
+        )
+    }
+
+    pub fn __setstate__(
+        &mut self,
+        state: (
+            Vec<PrimaryAqueousSpecies>,
+            Vec<MineralSpecies>,
+            Vec<SecondarySpecies>,
+            MineralKineticData,
+        ),
+    ) {
+        let (pa, m, s, mk) = state;
+
+        // Regenerate the derived species DataFrame
+        let mut species_types = Vec::new();
+        let mut names = Vec::new();
+
+        species_types.extend(vec!["primary".to_string(); pa.len()]);
+        species_types.extend(vec!["secondary".to_string(); s.len()]);
+        species_types.extend(vec!["mineral".to_string(); m.len()]);
+
+        for x in &pa {
+            names.push(x.name.clone());
+        }
+        for x in &s {
+            names.push(x.name.clone());
+        }
+        for x in &m {
+            names.push(x.name.clone());
+        }
+
+        let species_df = df!(
+            "name" => names,
+            "type" => species_types
+        )
+        .expect("Failed to reconstruct dataframe");
+
+        self.primary_aqueous = pa;
+        self.mineral = m;
+        self.secondary = s;
+        self.mineral_kinetics = mk;
+        self.species = PyDataFrame(species_df);
+    }
+
+    pub fn __getnewargs__(
+        &self,
+    ) -> (
+        Vec<PrimaryAqueousSpecies>,
+        Vec<MineralSpecies>,
+        Vec<SecondarySpecies>,
+        MineralKineticData,
+    ) {
+        (
+            self.primary_aqueous.clone(),
+            self.mineral.clone(),
+            self.secondary.clone(),
+            self.mineral_kinetics.clone(),
+        )
     }
 }

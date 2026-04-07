@@ -1,19 +1,15 @@
 use std::collections::HashMap;
 
-use numpy::{ndarray::Array1, PyArray1, PyArrayMethods, PyReadonlyArray1, ToPyArray};
+use numpy::{
+    ndarray::{Array1, Array2},
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, ToPyArray,
+};
 use pyo3::prelude::*;
 use pyo3_polars::PySeries;
 
-#[pyclass(from_py_object)]
-#[derive(Clone, Debug)]
-pub struct ForcingData {
-    #[pyo3(get, set)]
-    pub precip: f64,
-    #[pyo3(get, set)]
-    pub temp: f64,
-    #[pyo3(get, set)]
-    pub pet: f64,
-}
+use crate::{celsius, mm_water, molar, moles};
+
+pub const ZERO_CONC: f64 = 1e-20;
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -46,8 +42,8 @@ impl LapseRateParameters {
         &self,
         gauge_elevation: f64,
         elev: f64,
-        forcing_data: &ForcingData,
-    ) -> ForcingData {
+        forcing_data: &HydroForcing,
+    ) -> HydroForcing {
         unimplemented!()
     }
 
@@ -66,13 +62,13 @@ impl LapseRateParameters {
 #[derive(Clone, Debug)]
 pub struct HydroForcing {
     #[pyo3(get, set)]
-    pub precip: f64,
+    pub precip: mm_water,
     #[pyo3(get, set)]
-    pub temp: f64,
+    pub temp: celsius,
     #[pyo3(get, set)]
-    pub pet: f64,
+    pub pet: mm_water,
     #[pyo3(get, set)]
-    pub q_in: f64,
+    pub q_in: mm_water,
 }
 
 #[pymethods]
@@ -97,27 +93,41 @@ impl HydroForcing {
     pub fn to_string(&self) -> String {
         self.__repr__()
     }
+
+    pub fn __eq__(&self, other: HydroForcing) -> bool {
+        let diffs: Vec<f64> = vec![
+            self.precip - other.precip,
+            self.temp - other.temp,
+            self.pet - other.pet,
+            self.q_in - other.q_in,
+        ];
+        diffs.iter().map(|x| x.abs()).all(|x| x <= 1e-12)
+    }
+
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct HydroStep {
     #[pyo3(get, set)]
-    pub state: f64,
+    pub state: mm_water,
     #[pyo3(get, set)]
-    pub forc_flux: f64,
+    pub forc_flux: mm_water,
     #[pyo3(get, set)]
-    pub lat_flux: f64,
+    pub lat_flux: mm_water,
     #[pyo3(get, set)]
-    pub vert_flux: f64,
+    pub vert_flux: mm_water,
     #[pyo3(get, set)]
-    pub vap_flux: f64,
+    pub vap_flux: mm_water,
     #[pyo3(get, set)]
-    pub q_in: f64,
+    pub q_in: mm_water,
     #[pyo3(get, set)]
-    pub lat_flux_ext: f64,
+    pub lat_flux_ext: mm_water,
     #[pyo3(get, set)]
-    pub vert_flux_ext: f64,
+    pub vert_flux_ext: mm_water,
 }
 
 #[pymethods]
@@ -147,7 +157,7 @@ impl HydroStep {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "HydroStep(state={:.2},forc_flux={:.2},lat_flux={:.2},vert_flux={:.2},vap_flux={:.2},q_in={:.2},lat_flux_ext={:.2},vert_flux_ext={:.2})",
+            "HydroStep(\n\tstate={:.2},\n\tforc_flux={:.2},\n\tlat_flux={:.2},\n\tvert_flux={:.2},\n\tvap_flux={:.2},\n\tq_in={:.2},\n\tlat_flux_ext={:.2},\n\tvert_flux_ext={:.2})",
             self.state, self.forc_flux, self.lat_flux, self.vert_flux, self.vap_flux, self.q_in, self.lat_flux_ext, self.vert_flux_ext
         )
     }
@@ -155,12 +165,45 @@ impl HydroStep {
     pub fn to_string(&self) -> String {
         self.__repr__()
     }
+
+    // Total amount of water exiting the zone and carrying dissolved solutes
+    pub fn q_internal(&self) -> f64 {
+        self.lat_flux + self.vert_flux
+    }
+
+    // Total amount of water that does not interact with the zone
+    pub fn q_external(&self) -> f64 {
+        self.lat_flux_ext + self.vert_flux_ext - self.q_internal()
+    }
+
+    // Total rate of water exiting the zone
+    pub fn total_water_out(&self) -> f64 {
+        self.lat_flux + self.vert_flux + self.vap_flux
+    }
+
+    pub fn __eq__(&self, other: HydroStep) -> bool {
+        let diffs: Vec<f64> = vec![
+            self.state - other.state,
+            self.forc_flux - other.forc_flux,
+            self.lat_flux - other.lat_flux,
+            self.vert_flux - other.vert_flux,
+            self.vap_flux - other.vap_flux,
+            self.q_in - other.q_in,
+            self.lat_flux_ext - other.lat_flux_ext,
+            self.vert_flux_ext - other.vert_flux_ext,
+        ];
+        diffs.iter().map(|x| x.abs()).all(|x| x <= 1e-12)
+    }
+
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RtForcing {
-    pub _conc_in: Array1<f64>,
+    pub _conc_in: Array1<molar>,
     #[pyo3(get, set)]
     pub hydro_step: HydroStep,
     #[pyo3(get, set)]
@@ -213,12 +256,99 @@ impl RtForcing {
 
     fn __repr__(&self) -> String {
         format!(
-            "RtForcing(\n\tconc_in=array({}),\n\thydro_step={},\n\thydro_forc={},\n\ts_w={:.2},\n\tz_w={}\n)",
+            "RtForcing(\n\tconc_in=array({}),\nhydro_step={},\nhydro_forc={},\ns_w={:.2},\nz_w={}\n)",
             self._conc_in.to_string(),
             self.hydro_step.to_string(),
             self.hydro_forc.to_string(),
             self.s_w,
             self.z_w
         )
+    }
+
+    pub fn __eq__(&self, other: &RtForcing) -> bool {
+        let conc_eq: bool = (&self._conc_in - &other._conc_in)
+            .map(|x| x.abs())
+            .iter()
+            .all(|x| *x < 1e-12);
+
+        let comps: Vec<bool> = vec![
+            conc_eq,
+            self.hydro_step.__eq__(other.hydro_step.clone()),
+            self.hydro_forc.__eq__(other.hydro_forc.clone()),
+            (self.s_w - other.s_w).abs() < 1e-12,
+            (self.z_w - other.z_w).abs() < 1e-12,
+        ];
+
+        comps.iter().all(|x| *x)
+    }
+
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+}
+
+#[pyclass]
+#[derive(Debug)]
+pub struct RtStep {
+    #[pyo3(get, set)]
+    pub state: Py<PyArray1<molar>>,
+    #[pyo3(get, set)]
+    pub total_moles: Py<PyArray1<moles>>,
+    #[pyo3(get, set)]
+    pub conc_in: Py<PyArray1<molar>>,
+    #[pyo3(get, set)]
+    pub mass_in: Py<PyArray1<moles>>,
+    #[pyo3(get, set)]
+    pub lat_conc: Py<PyArray1<molar>>,
+    #[pyo3(get, set)]
+    pub vert_conc: Py<PyArray1<molar>>,
+    #[pyo3(get, set)]
+    pub lat_mass: Py<PyArray1<moles>>,
+    #[pyo3(get, set)]
+    pub vert_mass: Py<PyArray1<moles>>,
+    #[pyo3(get, set)]
+    pub mineral_rates: Py<PyArray1<f64>>,
+}
+
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
+pub struct MiscData {
+    pub mineral_stoichiometry: Array2<f64>,
+    pub species_mobility: Array1<bool>,
+    pub mineral_molar_mass: Array1<f64>,
+    pub rate_const: Array1<f64>,
+}
+
+#[pymethods]
+impl MiscData {
+    #[new]
+    pub fn new(
+        mineral_stoichiometry: PyReadonlyArray2<f64>,
+        species_mobility: PyReadonlyArray1<bool>,
+        mineral_molar_mass: PyReadonlyArray1<f64>,
+        rate_const: PyReadonlyArray1<f64>,
+    ) -> Self {
+        Self {
+            mineral_stoichiometry: mineral_stoichiometry.to_owned_array(),
+            species_mobility: species_mobility.to_owned_array(),
+            mineral_molar_mass: mineral_molar_mass.to_owned_array(),
+            rate_const: rate_const.to_owned_array(),
+        }
+    }
+
+    pub fn get_mineral_stoichiometry<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.mineral_stoichiometry.to_pyarray(py)
+    }
+
+    pub fn get_species_mobility<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.species_mobility.to_pyarray(py)
+    }
+
+    pub fn get_mineral_molar_mass<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.mineral_molar_mass.to_pyarray(py)
+    }
+
+    pub fn get_rate_const<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.rate_const.to_pyarray(py)
     }
 }

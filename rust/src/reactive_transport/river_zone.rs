@@ -14,8 +14,8 @@ use crate::{
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
-            EquilibriumParameters, MineralParameters, MonodParameters, RtParameters, TstParameters,
-            ZoneDimensions,
+            EquilibriumParameters, MineralParameters, MonodParameters, RiverDimensions,
+            RiverParameters, TstParameters,
         },
         reaction_network::ReactionNetwork,
     },
@@ -23,11 +23,11 @@ use crate::{
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
-pub struct RtZone {
+pub struct RiverZone {
     #[pyo3(get)]
     pub network: ReactionNetwork,
     #[pyo3(get)]
-    pub parameters: RtParameters,
+    pub parameters: RiverParameters,
     #[pyo3(get, set)]
     pub do_reactions: bool,
     #[pyo3(get, set)]
@@ -46,7 +46,7 @@ pub struct RtZone {
     pub misc: MiscData,
 }
 
-impl RtZone {
+impl RiverZone {
     fn mass_balance_ode_rust(&self, chms: &Array1<f64>, d: &RtForcing) -> Array1<molar_per_time> {
         let transport_rate_vec: Array1<molar_per_time> = self.transport_rate_rust(chms, d);
 
@@ -118,8 +118,7 @@ impl RtZone {
             return Array1::from_elem((chms.len(),), ZERO_CONC);
         }
 
-        // let q_internal: f64 = d.hydro_step.q_internal();
-        let q_in: f64 = d.hydro_step.q_in;
+        let q_in: f64 = d.hydro_step.q_internal();
         let q_out: f64 = d.hydro_step.vap_flux + d.hydro_step.lat_flux + d.hydro_step.vert_flux;
         let v_0: f64 = d.hydro_step.state;
         // let v_t: f64 = v_0 + (q_in - q_out);
@@ -142,7 +141,7 @@ impl RtZone {
             if i < num_aqueous {
                 tot_moles[i] = c_i * d.hydro_step.state;
             } else {
-                tot_moles[i] = c_i * self.dimensions().depth;
+                tot_moles[i] = c_i * self.dimensions().bed_depth;
             }
         }
 
@@ -163,55 +162,22 @@ impl RtZone {
                     moles_arr[i] = m_i / d.hydro_step.state;
                 }
             } else {
-                moles_arr[i] = m_i / self.dimensions().depth;
+                moles_arr[i] = m_i / self.dimensions().bed_depth;
             }
         }
 
         moles_arr
     }
-
-    pub fn residual_function_rust(
-        &self,
-        c_0: &Array1<f64>,
-        conc: &Array1<f64>,
-        d: &RtForcing,
-        dt_days: f64,
-    ) -> Array1<f64> {
-        let res = (c_0 - conc) + dt_days * self.mass_balance_ode_rust(conc, d);
-
-        if cfg!(debug_assertions) {
-            if res.is_any_nan() {
-                eprintln!("Error: nan value in residual");
-            }
-        }
-
-        res
-    }
-
-    pub fn solve_rt_step_rust(
-        &self,
-        py: Python<'_>,
-        c_0: &Array1<f64>,
-        d: &RtForcing,
-        dt_days: f64,
-        verbose: bool,
-    ) -> PyResult<Array1<f64>> {
-        let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
-
-        let res = find_root_multi(&residual, c_0.clone(), verbose);
-
-        res
-    }
 }
 
 #[pymethods]
-impl RtZone {
+impl RiverZone {
     #[new]
     #[pyo3(signature = (network, params, do_reactions = true, do_speciation = true, name = "unnamed".to_string()))]
     pub fn new<'py>(
         py: Python<'py>,
         network: ReactionNetwork,
-        params: RtParameters,
+        params: RiverParameters,
         do_reactions: bool,
         do_speciation: bool,
         name: String,
@@ -339,39 +305,6 @@ impl RtZone {
             .to_pyarray(py)
     }
 
-    pub fn residual_function<'py>(
-        &self,
-        py: Python<'py>,
-        c_0: PyReadonlyArray1<f64>,
-        conc: PyReadonlyArray1<f64>,
-        d: &RtForcing,
-        dt_days: f64,
-    ) -> Bound<'py, PyArray1<f64>> {
-        let c_0_arr = c_0.to_owned_array();
-        let conc_arr = conc.to_owned_array();
-        self.residual_function_rust(&c_0_arr, &conc_arr, d, dt_days)
-            .to_pyarray(py)
-    }
-
-    #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
-    pub fn solve_rt_step<'py>(
-        &self,
-        py: Python<'py>,
-        c_0: PyReadonlyArray1<f64>,
-        d: &RtForcing,
-        dt_days: f64,
-        verbose: bool,
-    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        let c_0_arr = c_0.to_owned_array();
-
-        let res = self.solve_rt_step_rust(py, &c_0_arr, d, dt_days, verbose);
-
-        match res {
-            Ok(x) => Ok(x.to_pyarray(py)),
-            Err(e) => Err(e),
-        }
-    }
-
     #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
     pub fn step<'py>(
         &self,
@@ -398,22 +331,16 @@ impl RtZone {
             x
         };
 
-        let c_after_rt: Array1<molar> =
-            self.solve_rt_step_rust(py, &c_0_arr, d, dt_days, verbose)?;
+        let residual = |conc: &Array1<molar>| {
+            (&c_0_arr - conc) + dt_days * self.mass_balance_ode_rust(conc, d)
+        };
 
-        // dbg!(&c_after_rt);
-        if verbose {
-            eprintln!("c_after_rt={}", &c_after_rt);
-        }
+        let c_after_rt: Array1<molar> = find_root_multi(&residual, c_0_arr.clone(), verbose)?;
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),
             true => self.eq.solve_equilibrium_rust(&c_after_rt, verbose)?,
         };
-
-        if verbose {
-            eprintln!("c_after_eq={}", &c_after_eq);
-        }
 
         let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);
 
@@ -526,7 +453,7 @@ impl RtZone {
     }
 
     #[getter]
-    pub fn dimensions(&self) -> ZoneDimensions {
+    pub fn dimensions(&self) -> RiverDimensions {
         self.parameters.dimensions.clone()
     }
 
@@ -550,7 +477,7 @@ impl RtZone {
         name: String,
         natural_scales: bool,
     ) -> PyResult<Self> {
-        match RtParameters::from_array(py, arr, natural_scales) {
+        match RiverParameters::from_array(py, arr, natural_scales) {
             Ok(v) => match Self::new(py, network.clone(), v, do_reactions, do_speciation, name) {
                 Ok(new_self) => return Ok(new_self),
                 Err(e) => return Err(e),

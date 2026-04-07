@@ -1,22 +1,40 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
+#![allow(non_camel_case_types)]
 
+#[macro_use]
+extern crate uom;
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 
+unit! {
+    system: uom::si;
+    quantity: uom::si::length;
+    @millimeter_water: 1_000.0; "mm", "millimeter", "millimeters";
+}
+
+type molar = f64;
+type moles = f64;
+type mm_water = f64;
+type celsius = f64;
+type moles_per_time = f64;
+type molar_per_time = f64;
+
 use crate::{
-    common_types::{ForcingData, HydroForcing, HydroStep, LapseRateParameters, RtForcing},
+    common_types::{HydroForcing, HydroStep, LapseRateParameters, RtForcing, RtStep},
     hydro::{GroundZone, GroundZoneB, HydrologicZone, SnowZone, SurfaceZone},
+    math::OptimizationError,
     reactive_transport::{
         database::{
-            ChemicalDatabase, MineralKineticData, MineralSpecies, MonodReaction,
+            ChemicalDatabase, ExchangeReaction, MineralKineticData, MineralSpecies, MonodReaction,
             PrimaryAqueousSpecies, SecondarySpecies, TstReaction,
         },
         kinetic_structures::{
             EquilibriumParameters, MineralAuxParams, MineralParameters, MonodParameters,
-            RtParameters, TstParameters, ZoneDimensions,
+            RiverDimensions, RiverParameters, RtParameters, TstParameters, ZoneDimensions,
         },
         reaction_network::ReactionNetwork,
-        rt_zone::{RtStep, RtZone},
+        river_zone::RiverZone,
+        rt_zone::RtZone,
     },
 };
 pub mod common_types;
@@ -33,7 +51,6 @@ create_exception!(math, MatMulError, PyException);
 
 #[pymodule]
 fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<ForcingData>()?;
     m.add_class::<HydroForcing>()?;
     m.add_class::<HydroStep>()?;
     m.add_class::<LapseRateParameters>()?;
@@ -55,10 +72,15 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MineralAuxParams>()?;
     m.add_class::<RtParameters>()?;
     m.add_class::<ZoneDimensions>()?;
+    m.add_class::<RiverDimensions>()?;
+    m.add_class::<RiverParameters>()?;
 
     // RtZone
     m.add_class::<RtStep>()?;
     m.add_class::<RtZone>()?;
+
+    // River zone
+    m.add_class::<RiverZone>()?;
 
     // Reaction network
     m.add_class::<ReactionNetwork>()?;
@@ -71,6 +93,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MonodReaction>()?;
     m.add_class::<MineralKineticData>()?;
     m.add_class::<ChemicalDatabase>()?;
+    m.add_class::<ExchangeReaction>()?;
 
     // Math things
     m.add(
@@ -81,5 +104,6 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("IterationError", m.py().get_type::<IterationError>())?;
     m.add("LinearSystemError", m.py().get_type::<LinearSystemError>())?;
     m.add("OtherError", m.py().get_type::<OtherError>())?;
+    m.add_class::<OptimizationError>()?;
     Ok(())
 }

@@ -5,7 +5,6 @@ from typing import Optional
 
 from numpy.typing import NDArray
 
-from .common_types_compiled import HydroForcing, HydroStep
 from .math import bisect, find_root
 from .utils import setup_logging
 

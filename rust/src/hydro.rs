@@ -5,7 +5,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::{
     common_types::{HydroForcing, HydroStep},
-    math::{find_root_rust, ScalarRootFindingError},
+    math::{bisect_rust, find_root_rust, ScalarRootFindingError},
 };
 
 #[pyclass(subclass)]
@@ -34,14 +34,17 @@ impl HydrologicZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(e) => {
-                let err_msg: String = match e {
-                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
-                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
-                };
-                let msg = format!("Failed to find root in Python step: {}", err_msg);
-                return Err(crate::ScalarRootFindingError::new_err(msg));
-            }
+            Err(e) => match bisect_rust(f, 1000.0) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_msg: String = match e {
+                        ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                        ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                    };
+                    let msg = format!("Failed to find root in Python step: {}", err_msg);
+                    return Err(crate::ScalarRootFindingError::new_err(msg));
+                }
+            },
         };
 
         Ok(HydroStep {
@@ -197,14 +200,17 @@ impl SnowZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(e) => {
-                let err_msg: String = match e {
-                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
-                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
-                };
-                let msg = format!("Failed to find root in Python step: {}", err_msg);
-                return Err(crate::ScalarRootFindingError::new_err(msg));
-            }
+            Err(e) => match bisect_rust(f, 1000.0) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_msg: String = match e {
+                        ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                        ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                    };
+                    let msg = format!("Failed to find root in Python step: {}", err_msg);
+                    return Err(crate::ScalarRootFindingError::new_err(msg));
+                }
+            },
         };
 
         Ok(HydroStep {
@@ -289,7 +295,8 @@ impl SnowZone {
     }
 
     #[staticmethod]
-    fn default_parameter_range() -> HashMap<String, (f64, f64)> {
+    #[pyo3(signature=(natural_scales=true))]
+    fn default_parameter_range(natural_scales: bool) -> HashMap<String, (f64, f64)> {
         HashMap::from([
             ("tt".to_owned(), (-1.0, 1.0)),
             ("fmax".to_owned(), (0.5, 5.0)),
@@ -297,7 +304,12 @@ impl SnowZone {
     }
 
     #[staticmethod]
-    fn from_array<'py>(py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, Self>> {
+    #[pyo3(signature=(arr, natural_scales=true))]
+    fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Bound<'py, Self>> {
         let vals: Vec<f64> = arr.to_vec().expect("Failed to get parameters");
         if vals.len() != Self::num_parameters() {
             return Err(PyValueError::new_err("Wrong number of arguments"));
@@ -386,14 +398,17 @@ impl SurfaceZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(e) => {
-                let err_msg: String = match e {
-                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
-                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
-                };
-                let msg = format!("Failed to find root in Python step: {}", err_msg);
-                return Err(crate::ScalarRootFindingError::new_err(msg));
-            }
+            Err(e) => match bisect_rust(f, 1000.0) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_msg: String = match e {
+                        ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                        ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                    };
+                    let msg = format!("Failed to find root in Python step: {}", err_msg);
+                    return Err(crate::ScalarRootFindingError::new_err(msg));
+                }
+            },
         };
 
         Ok(HydroStep {
@@ -458,7 +473,8 @@ impl SurfaceZone {
     }
 
     #[staticmethod]
-    fn default_parameter_range() -> HashMap<String, (f64, f64)> {
+    #[pyo3(signature=(natural_scales=true))]
+    fn default_parameter_range(natural_scales: bool) -> HashMap<String, (f64, f64)> {
         HashMap::from([
             ("fc".to_owned(), (50.0, 1_000.0)),
             ("lp".to_owned(), (0.05, 1.0)),
@@ -474,7 +490,12 @@ impl SurfaceZone {
     }
 
     #[staticmethod]
-    fn from_array<'py>(py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, Self>> {
+    #[pyo3(signature=(arr, natural_scales=true))]
+    fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Bound<'py, Self>> {
         let vals: Vec<f64> = arr.to_vec().expect("Failed to get parameters");
         if vals.len() != Self::num_parameters() {
             return Err(PyValueError::new_err("Wrong number of arguments"));
@@ -549,14 +570,17 @@ impl GroundZone {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(e) => {
-                let err_msg: String = match e {
-                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
-                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
-                };
-                let msg = format!("Failed to find root in Python step: {}", err_msg);
-                return Err(crate::ScalarRootFindingError::new_err(msg));
-            }
+            Err(e) => match bisect_rust(f, 1000.0) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_msg: String = match e {
+                        ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                        ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                    };
+                    let msg = format!("Failed to find root in Python step: {}", err_msg);
+                    return Err(crate::ScalarRootFindingError::new_err(msg));
+                }
+            },
         };
 
         Ok(HydroStep {
@@ -618,10 +642,16 @@ impl GroundZone {
         "ground".to_owned()
     }
 
+    #[pyo3(signature=(natural_scales=true))]
     #[staticmethod]
-    fn default_parameter_range() -> HashMap<String, (f64, f64)> {
+    fn default_parameter_range(natural_scales: bool) -> HashMap<String, (f64, f64)> {
+        let k_range = if natural_scales {
+            (-5.0, -1.0)
+        } else {
+            (1e-5, 0.1)
+        };
         HashMap::from([
-            ("k".to_owned(), (1e-5, 0.1)),
+            ("k".to_owned(), k_range),
             ("alpha".to_owned(), (0.5, 3.0)),
             ("perc".to_owned(), (0.0, 5.0)),
         ])
@@ -633,13 +663,23 @@ impl GroundZone {
     }
 
     #[staticmethod]
-    fn from_array<'py>(py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, Self>> {
+    #[pyo3(signature=(arr, natural_scales=true))]
+    fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Bound<'py, Self>> {
         let vals: Vec<f64> = arr.to_vec().expect("Failed to get parameters");
         if vals.len() != Self::num_parameters() {
             return Err(PyValueError::new_err("Wrong number of arguments"));
         } else {
-            let child: PyClassInitializer<Self> =
-                Self::new(vals[0], vals[1], vals[2], Self::base_name());
+            let k = if natural_scales {
+                (10_f64).powf(vals[0])
+            } else {
+                vals[0]
+            };
+
+            let child: PyClassInitializer<Self> = Self::new(k, vals[1], vals[2], Self::base_name());
 
             return Bound::new(py, child);
         }
@@ -700,14 +740,17 @@ impl GroundZoneB {
         let f = |s| self.__implicit_eulers_func(s, s_0, &d, dt);
         let s_new = match find_root_rust(f, s_0) {
             Ok(v) => v.max(0.0),
-            Err(e) => {
-                let err_msg: String = match e {
-                    ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
-                    ScalarRootFindingError::NanError() => "Got NaN value".into(),
-                };
-                let msg = format!("Failed to find root in Python step: {}", err_msg);
-                return Err(crate::ScalarRootFindingError::new_err(msg));
-            }
+            Err(e) => match bisect_rust(f, 1000.0) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_msg: String = match e {
+                        ScalarRootFindingError::IterationError() => "Exceeded iterations".into(),
+                        ScalarRootFindingError::NanError() => "Got NaN value".into(),
+                    };
+                    let msg = format!("Failed to find root in Python step: {}", err_msg);
+                    return Err(crate::ScalarRootFindingError::new_err(msg));
+                }
+            },
         };
 
         Ok(HydroStep {
@@ -769,12 +812,16 @@ impl GroundZoneB {
         "ground_bottom".to_owned()
     }
 
+    #[pyo3(signature = (natural_scales=true))]
     #[staticmethod]
-    fn default_parameter_range() -> HashMap<String, (f64, f64)> {
-        HashMap::from([
-            ("k".to_owned(), (1e-5, 0.1)),
-            ("alpha".to_owned(), (0.5, 3.0)),
-        ])
+    fn default_parameter_range(natural_scales: bool) -> HashMap<String, (f64, f64)> {
+        let k_range = if natural_scales {
+            (-5.0, -1.0)
+        } else {
+            (1e-5, 0.1)
+        };
+
+        HashMap::from([("k".to_owned(), k_range), ("alpha".to_owned(), (0.5, 3.0))])
     }
 
     #[staticmethod]
@@ -782,13 +829,24 @@ impl GroundZoneB {
         10.0
     }
 
+    #[pyo3(signature=(arr, natural_scales=true))]
     #[staticmethod]
-    fn from_array<'py>(py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, Self>> {
+    fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Bound<'py, Self>> {
         let vals: Vec<f64> = arr.to_vec().expect("Failed to get parameters");
         if vals.len() != Self::num_parameters() {
             return Err(PyValueError::new_err("Wrong number of arguments"));
         } else {
-            let child: PyClassInitializer<Self> = Self::new(vals[0], vals[1], Self::base_name());
+            let k = if natural_scales {
+                (10_f64).powf(vals[0])
+            } else {
+                vals[0]
+            };
+
+            let child: PyClassInitializer<Self> = Self::new(k, vals[1], Self::base_name());
 
             return Bound::new(py, child);
         }

@@ -16,7 +16,7 @@ from ..utils import DO_LOGGING, setup_logging
 setup_logging("kinetic_structures.py")
 
 # ==== Constants ==== #
-PARAMETERS_PER_MINERAL: Final[int] = 5
+PARAMETERS_PER_MINERAL: Final[int] = 4
 # =================== #
 
 

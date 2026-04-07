@@ -1,7 +1,7 @@
 use numpy::{
     array,
     ndarray::{s, Array1, Array2},
-    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray,
+    PyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray,
 };
 use polars::{frame::DataFrame, prelude::Float64Type};
 use pyo3::{exceptions::PyValueError, prelude::*};
@@ -9,9 +9,10 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{find_root_multi, matmul, null_space_scipy, pinv_scipy, OtherError, RootFindingError},
+    math::{approx_fprime, find_root_multi, matmul, null_space_scipy, pinv_scipy},
+    molar, molar_per_time,
 };
-const PARAMETERS_PER_MINERAL: usize = 5;
+const PARAMETERS_PER_MINERAL: usize = 4;
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -25,11 +26,11 @@ pub struct MonodParameters {
 }
 
 impl MonodParameters {
-    pub fn rate_rust(&self, chms: &Array1<f64>) -> Array1<f64> {
+    pub fn rate_rust(&self, chms: &Array1<molar>) -> Array1<molar_per_time> {
         let n_minerals: usize = self.monod_np.shape()[0];
         let n_species: usize = self.monod_np.shape()[1];
-        let mut monod: Array1<f64> = Array1::zeros(n_minerals);
-        let mut inhib: Array1<f64> = Array1::zeros(n_minerals);
+        let mut monod: Array1<molar_per_time> = Array1::zeros(n_minerals);
+        let mut inhib: Array1<molar_per_time> = Array1::zeros(n_minerals);
 
         for i in 0..n_minerals {
             let mut prod = 1.0;
@@ -109,7 +110,7 @@ pub struct TstParameters {
 
 impl TstParameters {
     // Calculate the solubility product for each of the minerals
-    pub fn calculate_solubility_product(&self, chms: &Array1<f64>) -> Array1<f64> {
+    pub fn calculate_solubility_product(&self, chms: &Array1<molar>) -> Array1<molar_per_time> {
         let log_conc: Array1<f64> = chms.map(|x| x.log10());
         let n_minerals: usize = self.stoich_np.shape()[0];
         let n_species: usize = self.stoich_np.shape()[1];
@@ -233,14 +234,15 @@ impl EquilibriumParameters {
     pub fn solve_equilibrium_rust(
         &self,
         chms: &Array1<f64>,
-    ) -> Result<Array1<f64>, RootFindingError> {
+        verbose: bool,
+    ) -> PyResult<Array1<f64>> {
         let chms_arr: Array1<f64> = chms.clone();
         // let mut c_tot: Array1<f64> = self.total_mat.t().dot(&chms_arr);
         let mut c_tot: Array1<f64> = match matmul(&self.total_mat, &chms_arr) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Matrix multiplication error. Shapes were wrong");
-                return Err(RootFindingError::Other());
+                let msg = format!("Incorrect shapes for matrix and vector: shape {:?} is incompatible with shape {:?}", self.total_mat.shape(), chms_arr.shape());
+                return Err(PyValueError::new_err(msg));
             }
         };
 
@@ -263,7 +265,7 @@ impl EquilibriumParameters {
         let initial_guess: Array1<f64> = Array1::zeros(c_tot.shape()[0]);
 
         // Solve the problem
-        match find_root_multi(&f_to_solve, initial_guess) {
+        match find_root_multi(&f_to_solve, initial_guess, verbose) {
             Ok(v) => Ok(self.conc_func_rust(&v)),
             Err(e) => Err(e),
         }
@@ -317,16 +319,18 @@ impl EquilibriumParameters {
         })
     }
 
+    #[pyo3(signature = (chms, verbose=false))]
     pub fn solve_equilibrium<'py>(
         &self,
         py: Python<'py>,
         chms: PyReadonlyArray1<f64>,
+        verbose: bool,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let chms_arr: Array1<f64> = chms.to_owned_array();
 
-        match self.solve_equilibrium_rust(&chms_arr) {
+        match self.solve_equilibrium_rust(&chms_arr, verbose) {
             Ok(v) => Ok(v.to_pyarray(py)),
-            Err(_) => Err(PyValueError::new_err("Failed to solve speciation")),
+            Err(e) => Err(e),
         }
     }
 
@@ -349,6 +353,23 @@ impl EquilibriumParameters {
         let x_free_arr: Array1<f64> = x_free.to_owned_array();
         let c_tot_arr: Array1<f64> = c_tot.to_owned_array();
         self.residual_rust(&x_free_arr, &c_tot_arr).to_pyarray(py)
+    }
+
+    /// return the jacobian matrix of this problem
+    pub fn residual_jacobian<'py>(
+        &self,
+        py: Python<'py>,
+        x_free: PyReadonlyArray1<f64>,
+        c_tot: PyReadonlyArray1<f64>,
+    ) -> Bound<'py, PyArray2<f64>> {
+        let x_free_arr = x_free.to_owned_array();
+        let c_tot_arr = c_tot.to_owned_array();
+
+        let f = |x: &Array1<f64>| self.residual_rust(x, &c_tot_arr);
+
+        let jac = approx_fprime(&f, &x_free_arr, false);
+
+        jac.to_pyarray(py)
     }
 
     pub fn total_mat_shape(&self) -> () {
@@ -391,8 +412,8 @@ pub struct MineralAuxParams {
     sw_threshold: f64,
     #[pyo3(get)]
     sw_exp: f64,
-    #[pyo3(get)]
-    n_alpha: f64,
+    // #[pyo3(get)]
+    // n_alpha: f64,
     #[pyo3(get)]
     q_10: f64,
     #[pyo3(get)]
@@ -402,11 +423,11 @@ pub struct MineralAuxParams {
 #[pymethods]
 impl MineralAuxParams {
     #[new]
-    pub fn new(sw_threshold: f64, sw_exp: f64, n_alpha: f64, q_10: f64, ssa: f64) -> Self {
+    pub fn new(sw_threshold: f64, sw_exp: f64, q_10: f64, ssa: f64) -> Self {
         Self {
             sw_threshold,
             sw_exp,
-            n_alpha,
+            // n_alpha,
             q_10,
             ssa,
         }
@@ -416,7 +437,7 @@ impl MineralAuxParams {
         let param_vec = vec![
             self.sw_threshold,
             self.sw_exp,
-            self.n_alpha,
+            // self.n_alpha,
             self.q_10,
             self.ssa,
         ];
@@ -426,7 +447,7 @@ impl MineralAuxParams {
     #[staticmethod]
     pub fn from_array(arr: PyReadonlyArray1<f64>) -> PyResult<Self> {
         let nd_arr: Array1<f64> = arr.to_owned_array();
-        if nd_arr.len() != 5 {
+        if nd_arr.len() != PARAMETERS_PER_MINERAL {
             let msg = format!(
                 "Passed incorrect number of parameters to MineralAuxParams::from_array: {}",
                 nd_arr
@@ -436,9 +457,9 @@ impl MineralAuxParams {
             Ok(Self {
                 sw_threshold: nd_arr[0],
                 sw_exp: nd_arr[1],
-                n_alpha: nd_arr[2],
-                q_10: nd_arr[3],
-                ssa: nd_arr[4],
+                // n_alpha: nd_arr[2],
+                q_10: nd_arr[2],
+                ssa: nd_arr[3],
             })
         }
     }
@@ -448,11 +469,11 @@ impl MineralAuxParams {
 #[derive(Clone, Debug)]
 pub struct ZoneDimensions {
     #[pyo3(get)]
-    porosity: f64,
+    pub porosity: f64,
     #[pyo3(get)]
-    depth: f64,
+    pub depth: f64,
     #[pyo3(get)]
-    passive_water_storage: f64,
+    pub passive_water_storage: f64,
 }
 
 #[pymethods]
@@ -493,6 +514,17 @@ impl ZoneDimensions {
     pub fn max_water_volume(&self) -> f64 {
         self.porosity * self.depth - self.passive_water_storage
     }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "ZoneDimensions(porosity={},depth={},passive_water_storage={})",
+            self.porosity, self.depth, self.passive_water_storage
+        )
+    }
+
+    pub fn to_string(&self) -> String {
+        self.__repr__()
+    }
 }
 
 #[pyclass(from_py_object)]
@@ -500,7 +532,7 @@ impl ZoneDimensions {
 pub struct MineralParameters {
     pub sw_threshold: Array1<f64>,
     pub sw_exp: Array1<f64>,
-    pub n_alpha: Array1<f64>,
+    // pub n_alpha: Array1<f64>,
     pub q_10: Array1<f64>,
     pub ssa: Array1<f64>,
 }
@@ -530,27 +562,27 @@ impl MineralParameters {
         arr
     }
 
-    pub fn water_table_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
-        let num_minerals = self.sw_threshold.shape()[0];
-        let mut arr: Array1<f64> = Array1::zeros(num_minerals);
+    // pub fn water_table_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
+    //     let num_minerals = self.sw_threshold.shape()[0];
+    //     let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
-        for i in 0..num_minerals {
-            let n_alpha_i = self.n_alpha[i];
-            let gw_val = match n_alpha_i.abs() >= 1e-12 {
-                true => 1.0,
-                false => (-n_alpha_i.abs() * forc.z_w.powf(n_alpha_i.signum())).exp(),
-            };
-            arr[i] = gw_val;
-        }
+    //     for i in 0..num_minerals {
+    //         let n_alpha_i = self.n_alpha[i];
+    //         let gw_val = match n_alpha_i.abs() >= 1e-12 {
+    //             true => 1.0,
+    //             false => (-n_alpha_i.abs() * forc.z_w.powf(n_alpha_i.signum())).exp(),
+    //         };
+    //         arr[i] = gw_val;
+    //     }
 
-        arr
-    }
+    //     arr
+    // }
 
     pub fn factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
         let sw_factor: Array1<f64> = self.soil_water_factor_rust(&forc);
         let temp_factor: Array1<f64> = self.temperature_factor_rust(&forc);
-        let gw_factor: Array1<f64> = self.water_table_factor_rust(&forc);
-        let fact: Array1<f64> = sw_factor * temp_factor * gw_factor;
+        // let gw_factor: Array1<f64> = self.water_table_factor_rust(&forc);
+        let fact: Array1<f64> = sw_factor * temp_factor;
         fact
     }
 }
@@ -562,14 +594,14 @@ impl MineralParameters {
         py: Python<'py>,
         sw_threshold: PyReadonlyArray1<f64>,
         sw_exp: PyReadonlyArray1<f64>,
-        n_alpha: PyReadonlyArray1<f64>,
+        // n_alpha: PyReadonlyArray1<f64>,
         q_10: PyReadonlyArray1<f64>,
         ssa: PyReadonlyArray1<f64>,
     ) -> Self {
         Self {
             sw_threshold: sw_threshold.to_owned_array(),
             sw_exp: sw_exp.to_owned_array(),
-            n_alpha: n_alpha.to_owned_array(),
+            // n_alpha: n_alpha.to_owned_array(),
             q_10: q_10.to_owned_array(),
             ssa: ssa.to_owned_array(),
         }
@@ -582,42 +614,47 @@ impl MineralParameters {
         for i in 0..num_minerals {
             arr[i * ppm + 0] = self.sw_threshold[i];
             arr[i * ppm + 1] = self.sw_exp[i];
-            arr[i * ppm + 2] = self.n_alpha[i];
-            arr[i * ppm + 3] = self.q_10[i];
-            arr[i * ppm + 4] = self.ssa[i];
+            // arr[i * ppm + 2] = self.n_alpha[i];
+            arr[i * ppm + 2] = self.q_10[i];
+            arr[i * ppm + 3] = self.ssa[i];
         }
 
         arr.to_pyarray(py)
     }
 
     #[staticmethod]
-    pub fn from_array(arr: PyReadonlyArray1<f64>) -> PyResult<Self> {
+    #[pyo3(signature=(arr, natural_scales=true))]
+    pub fn from_array(arr: PyReadonlyArray1<f64>, natural_scales: bool) -> PyResult<Self> {
         let x: Array1<f64> = arr.to_owned_array();
+        // dbg!(&x);
         if x.len() % PARAMETERS_PER_MINERAL != 0 {
-            return Err(PyValueError::new_err(
-                "Failed to create new MineralParameters from array",
-            ));
+            let msg = format!("Failed to create new MineralParameters from array because the shape is wrong, expected multiple of {} but got {}", PARAMETERS_PER_MINERAL, x.len());
+            return Err(PyValueError::new_err(msg));
         }
         let num_minerals: usize = x.len() / PARAMETERS_PER_MINERAL;
 
         let mut sw_threshold: Array1<f64> = Array1::zeros(num_minerals);
         let mut sw_exp: Array1<f64> = Array1::zeros(num_minerals);
-        let mut n_alpha: Array1<f64> = Array1::zeros(num_minerals);
+        // let mut n_alpha: Array1<f64> = Array1::zeros(num_minerals);
         let mut q_10: Array1<f64> = Array1::zeros(num_minerals);
         let mut ssa: Array1<f64> = Array1::zeros(num_minerals);
 
         for i in 0..num_minerals {
             sw_threshold[i] = x[i * PARAMETERS_PER_MINERAL + 0];
             sw_exp[i] = x[i * PARAMETERS_PER_MINERAL + 1];
-            n_alpha[i] = x[i * PARAMETERS_PER_MINERAL + 2];
-            q_10[i] = x[i * PARAMETERS_PER_MINERAL + 3];
-            ssa[i] = x[i * PARAMETERS_PER_MINERAL + 4];
+            // n_alpha[i] = x[i * PARAMETERS_PER_MINERAL + 2];
+            q_10[i] = x[i * PARAMETERS_PER_MINERAL + 2];
+            ssa[i] = if natural_scales {
+                (10_f64).powf(x[i * PARAMETERS_PER_MINERAL + 3])
+            } else {
+                x[i * PARAMETERS_PER_MINERAL + 3]
+            };
         }
 
         Ok(Self {
             sw_threshold,
             sw_exp,
-            n_alpha,
+            // n_alpha,
             q_10,
             ssa,
         })
@@ -639,13 +676,13 @@ impl MineralParameters {
         self.temperature_factor_rust(forc).to_pyarray(py)
     }
 
-    pub fn water_table_factor<'py>(
-        &self,
-        py: Python<'py>,
-        forc: &RtForcing,
-    ) -> Bound<'py, PyArray1<f64>> {
-        self.water_table_factor_rust(forc).to_pyarray(py)
-    }
+    // pub fn water_table_factor<'py>(
+    //     &self,
+    //     py: Python<'py>,
+    //     forc: &RtForcing,
+    // ) -> Bound<'py, PyArray1<f64>> {
+    //     self.water_table_factor_rust(forc).to_pyarray(py)
+    // }
 
     pub fn factor<'py>(&self, py: Python<'py>, forc: RtForcing) -> Bound<'py, PyArray1<f64>> {
         self.factor_rust(&forc).to_pyarray(py)
@@ -655,14 +692,14 @@ impl MineralParameters {
     pub fn from_mineral_parameters(minerals: Vec<MineralAuxParams>) -> PyResult<Self> {
         let mut sw_thrs: Vec<f64> = Vec::new();
         let mut sw_exps: Vec<f64> = Vec::new();
-        let mut n_alphas: Vec<f64> = Vec::new();
+        // let mut n_alphas: Vec<f64> = Vec::new();
         let mut q_10s: Vec<f64> = Vec::new();
         let mut ssas: Vec<f64> = Vec::new();
 
         for m in minerals {
             sw_thrs.push(m.sw_threshold);
             sw_exps.push(m.sw_exp);
-            n_alphas.push(m.n_alpha);
+            // n_alphas.push(m.n_alpha);
             q_10s.push(m.q_10);
             ssas.push(m.ssa);
         }
@@ -670,7 +707,7 @@ impl MineralParameters {
         Ok(Self {
             sw_threshold: Array1::from_vec(sw_thrs),
             sw_exp: Array1::from_vec(sw_exps),
-            n_alpha: Array1::from_vec(n_alphas),
+            // n_alpha: Array1::from_vec(n_alphas),
             q_10: Array1::from_vec(q_10s),
             ssa: Array1::from_vec(ssas),
         })
@@ -683,54 +720,199 @@ pub struct RtParameters {
     #[pyo3(get)]
     pub dimensions: ZoneDimensions,
     #[pyo3(get)]
-    pub mineral_params: MineralParameters,
+    pub mineral_params: Option<MineralParameters>,
 }
 
 #[pymethods]
 impl RtParameters {
     #[new]
-    pub fn new(dimensions: ZoneDimensions, mineral_params: MineralParameters) -> RtParameters {
+    pub fn new(
+        dimensions: ZoneDimensions,
+        mineral_params: Option<MineralParameters>,
+    ) -> RtParameters {
         Self {
             dimensions,
             mineral_params,
         }
     }
 
-    pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        let dim_arr = self.dimensions.to_array(py);
-        let min_arr = self.mineral_params.to_array(py);
+    pub fn to_array<'py>(
+        &self,
+        py: Python<'py>,
+        include_minerals: bool,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let dim_arr: Vec<f64> = self.dimensions.to_array(py).to_vec().unwrap();
+        let min_arr: Vec<f64> = match &self.mineral_params {
+            Some(v) => v.to_array(py).to_vec().unwrap(),
+            None => Vec::new(),
+        };
 
-        let comps = vec![dim_arr.to_vec().unwrap(), min_arr.to_vec().unwrap()];
-        let params = comps.concat();
+        let comps: Vec<Vec<f64>> = vec![dim_arr, min_arr];
+        let params: Vec<f64> = comps.concat();
 
         PyArray1::from_vec(py, params)
     }
 
     #[staticmethod]
-    pub fn from_array<'py>(py: Python<'py>, arr: PyReadonlyArray1<f64>) -> PyResult<Self> {
+    #[pyo3(signature=(arr, natural_scales=true))]
+    pub fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Self> {
         let x: Array1<f64> = arr.to_owned_array();
         let size_params: Array1<f64> = x.slice(s![0..3]).to_owned();
-        let min_params: Array1<f64> = x.slice(s![3..]).to_owned();
-
         let size_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &size_params);
         let dimensions = match ZoneDimensions::from_array(size_params_py.readonly()) {
             Ok(v) => v,
             Err(_) => return Err(PyValueError::new_err("Failed to construct soil parameters")),
         };
 
+        if x.len() == 3 {
+            // There are no reactions in this zone
+            return Ok(Self {
+                dimensions,
+                mineral_params: None,
+            });
+        }
+
+        let min_params: Array1<f64> = x.slice(s![3..]).to_owned();
+
         let min_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &min_params);
-        let mineral_params = match MineralParameters::from_array(min_params_py.readonly()) {
-            Ok(v) => v,
-            Err(_) => {
-                return Err(PyValueError::new_err(
-                    "Failed to construct mineral parameters",
-                ))
-            }
-        };
+        let mineral_params =
+            match MineralParameters::from_array(min_params_py.readonly(), natural_scales) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = format!("Failed to construct mineral parameters: {}", e.to_string());
+                    return Err(PyValueError::new_err(msg));
+                }
+            };
 
         Ok(Self {
             dimensions,
-            mineral_params: mineral_params,
+            mineral_params: Some(mineral_params),
+        })
+    }
+}
+
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
+pub struct RiverDimensions {
+    #[pyo3(get, set)]
+    pub bed_depth: f64,
+    #[pyo3(get, set)]
+    pub passive_water_storage: f64,
+}
+
+#[pymethods]
+impl RiverDimensions {
+    #[new]
+    pub fn new(bed_depth: f64, passive_water_storage: f64) -> Self {
+        Self {
+            bed_depth,
+            passive_water_storage,
+        }
+    }
+
+    #[staticmethod]
+    pub fn num_parameters() -> usize {
+        2
+    }
+
+    pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray::from_vec(py, vec![self.bed_depth, self.passive_water_storage])
+    }
+
+    #[staticmethod]
+    pub fn from_array(arr: PyReadonlyArray1<f64>) -> PyResult<Self> {
+        let x = arr.to_owned_array();
+
+        match x.len() {
+            2 => Ok(Self {
+                bed_depth: x[0],
+                passive_water_storage: x[1],
+            }),
+            _ => Err(PyValueError::new_err(
+                "Incorrect array size passed to RiverDimensions::from_array",
+            )),
+        }
+    }
+}
+
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
+pub struct RiverParameters {
+    #[pyo3(get, set)]
+    pub dimensions: RiverDimensions,
+    #[pyo3(get, set)]
+    pub mineral_params: Option<MineralParameters>,
+}
+
+#[pymethods]
+impl RiverParameters {
+    #[new]
+    pub fn new(dimensions: RiverDimensions, mineral_params: Option<MineralParameters>) -> Self {
+        Self {
+            dimensions,
+            mineral_params,
+        }
+    }
+
+    pub fn to_array<'py>(
+        &self,
+        py: Python<'py>,
+        include_minerals: bool,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let dim_arr: Vec<f64> = self.dimensions.to_array(py).to_vec().unwrap();
+        let min_arr: Vec<f64> = match &self.mineral_params {
+            Some(v) => v.to_array(py).to_vec().unwrap(),
+            None => Vec::new(),
+        };
+
+        let comps: Vec<Vec<f64>> = vec![dim_arr, min_arr];
+        let params: Vec<f64> = comps.concat();
+
+        PyArray1::from_vec(py, params)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature=(arr, natural_scales=true))]
+    pub fn from_array<'py>(
+        py: Python<'py>,
+        arr: PyReadonlyArray1<f64>,
+        natural_scales: bool,
+    ) -> PyResult<Self> {
+        let x: Array1<f64> = arr.to_owned_array();
+        let size_params: Array1<f64> = x.slice(s![0..RiverDimensions::num_parameters()]).to_owned();
+        let size_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &size_params);
+        let dimensions = match RiverDimensions::from_array(size_params_py.readonly()) {
+            Ok(v) => v,
+            Err(_) => return Err(PyValueError::new_err("Failed to construct soil parameters")),
+        };
+
+        if x.len() == RiverDimensions::num_parameters() {
+            // There are no reactions in this zone
+            return Ok(Self {
+                dimensions,
+                mineral_params: None,
+            });
+        }
+
+        let min_params: Array1<f64> = x.slice(s![RiverDimensions::num_parameters()..]).to_owned();
+
+        let min_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &min_params);
+        let mineral_params =
+            match MineralParameters::from_array(min_params_py.readonly(), natural_scales) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = format!("Failed to construct mineral parameters: {}", e.to_string());
+                    return Err(PyValueError::new_err(msg));
+                }
+            };
+
+        Ok(Self {
+            dimensions,
+            mineral_params: Some(mineral_params),
         })
     }
 }

@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, Optional, TypeVar
 
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
-from pandas import Series
+from pandas import DataFrame, Series
+
+from .core import RtStep
 
 
 # ==== Types ==== #
@@ -92,3 +94,45 @@ class ChemicalState:
         Get a vector of aqueous concentrations, including primary and secondary
         """
         return np.concatenate([self.prim_aq_conc, self.sec_conc])  # type: ignore
+
+
+@dataclass
+class HydroSimulation:
+    forcing: list[ForcingData]
+    storage: DataFrame
+    forc_flux: DataFrame
+    lat_flux: DataFrame
+    vert_flux: DataFrame
+    vap_flux: DataFrame
+    q_in: DataFrame
+    lat_flux_ext: DataFrame
+    vert_flux_ext: DataFrame
+
+
+@dataclass
+class HydroModelResults:
+    """A type containing the results of a hydrologic model run.
+
+    Attributes:
+        simulation (DataFrame): A DataFrame with time series of states and
+            fluxes for all zones, plus simulated and measured streamflow.
+        objective_functions (Series): A Series with the values of each of the objective functions as keys
+    """
+
+    simulation: DataFrame
+    objective_functions: Series
+
+
+@dataclass
+class RtModelResults:
+    simulation: DataFrame
+    objective_functions: Optional[DataFrame]
+    rt_forcings: np.ndarray
+    steps: list[list[RtStep]]
+    other: dict[str, Any]
+
+
+@dataclass
+class ModelResults:
+    hydro: HydroModelResults
+    reactive_transport: RtModelResults

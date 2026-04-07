@@ -15,7 +15,7 @@ from ..hydro import (
 from ..model import (
     Layer,
     Model,
-    ModelStep,
+    HydroModelStep,
     ForcingData,
     run_hydro_model,
     HbvModel,
@@ -180,7 +180,9 @@ def test_3_box_simple_model_steady_state() -> None:
 
     start = time.time()
     for i in range(num_steps):
-        model_step: ModelStep = model.step_hydro_model(np.array(state), forcing, 1.0)
+        model_step: HydroModelStep = model.step_hydro_model(
+            np.array(state), forcing, 1.0
+        )
         new_state = np.array(model_step.state)
         new_error = abs(new_state - state).sum()
         state = new_state

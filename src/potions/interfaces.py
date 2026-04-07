@@ -1,5 +1,8 @@
 from __future__ import annotations
+from abc import ABC, abstractmethod
 from typing import TypeVar, Protocol
+
+from potions.core import HydrologicZone
 
 # 1. DEFINE GENERIC TYPE VARIABLES
 # These act as placeholders for the specific types that each model will use.
