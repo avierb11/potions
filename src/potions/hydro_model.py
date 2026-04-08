@@ -1,17 +1,25 @@
 from __future__ import annotations
-from typing import Callable, Final, Iterable, Optional
-from pandas import DataFrame, Index, Series, Timestamp
+
+import itertools
+from multiprocessing import Pool
 import operator
 from functools import reduce
+import os
+import random
+from typing import Callable, Final, Iterable, Iterator, Literal, Optional
+
+import networkx as nx
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-import networkx as nx
+from pandas import DataFrame, Index, Series, Timestamp
+import scipy.optimize as opt
+import emcee  # type: ignore
 
-from .common_types import HydroModelStep, ForcingData, HydroModelResults
-from .core import HydroStep, HydrologicZone, HydroForcing, ScalarRootFindingError
+from .common_types import ForcingData, HydroModelResults, HydroModelStep
+from .core import HydroForcing, HydrologicZone, HydroStep, ScalarRootFindingError
 from .model_components import Layer
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from .utils import HydrologyNumericalError
+from .utils import HydrologyNumericalError, log_probability, objective_function
 
 # ==== Constants and types ==== #
 f64 = np.float64
@@ -86,6 +94,14 @@ class HydrologicalModel:
         self.__vert_matrix: NDArray = vert
         self.__forcing_mat: NDArray = self.get_forc_mat(scales)
         self.__forcing_rel_mat: NDArray = self.get_forc_mat(scales, relative=True)
+
+    def __len__(self) -> int:
+        """Returns the number of layers in the model."""
+        return len(self.layers)
+
+    def __iter__(self) -> Iterator[Layer]:
+        """Returns an iterator over the layers in the model."""
+        return iter(self.layers)
 
     @property
     def hydro_zones(self) -> dict[str, HydrologicZone]:
@@ -162,6 +178,15 @@ class HydrologicalModel:
     def scales(self) -> list[float]:
         """The list of relative areas for each surface zone."""
         return self.__scales
+
+    @property
+    def surface_zone_ids(self) -> list[int]:
+        """
+        Get a list of the numerical indices of the surface zones in the model.
+
+        Note that these must be the top zones in the model. It's just the indices of the first later of zones
+        """
+        return [i for i, _ in enumerate(self.structure[0])]
 
     def flatten(self) -> list[HydrologicZone]:
         """Flattens the nested model structure into a single list of zones.
@@ -431,6 +456,32 @@ class HydrologicalModel:
                 river_zones.append(current_zone_idx + len(layer) - 1)
             current_zone_idx += len(layer)
         return river_zones
+
+    @classmethod
+    def get_num_zone_parameters(cls) -> int:
+        """Gets the total number of tunable parameters across all zones.
+
+        Returns:
+            int: The count of zone-specific parameters.
+        """
+        num_zone_params: int = 0
+        for layer in cls.structure:
+            for zone in layer:
+                num_zone_params += len(zone.param_list())
+
+        return num_zone_params
+
+    @classmethod
+    def get_num_size_parameters(cls) -> int:
+        """Gets the number of tunable size (area) parameters.
+
+        This is equal to one less than the number of surface zones, as the
+        last one is determined by the constraint that they sum to 1.
+
+        Returns:
+            int: The number of size parameters.
+        """
+        return len(cls.structure[0]) - 1
 
     def _validate_model_structure(self) -> None:
         """Validates the model's structure and configuration.
@@ -923,5 +974,517 @@ class HydrologicalModel:
             props[prop_name] = model_res[prop_name].mean()
 
         # Create the object and save
-        res = HydroModelResults(simulation=model_res, objective_functions=obj_val_ser)
+        res = HydroModelResults(
+            simulation=model_res, objective_functions=obj_val_ser, forcing=forc
+        )
         return res
+
+    @classmethod
+    def hydro_from_array(
+        cls, arr: NDArray, latent: bool = False, natural_scales: bool = True
+    ) -> HydrologicalModel:
+        """Creates a new model instance from a 1D NumPy array of parameters.
+
+        Args:
+            arr (NDArray): A flat array of parameter values.
+            latent (bool): If True, treats size parameters as being in a latent
+                space, requiring transformation. Defaults to False.
+
+        Returns:
+            Model: A new, parameterized model instance.
+        """
+
+        num_zone_params: int = cls.get_num_zone_parameters()
+        num_size_params: int = cls.get_num_size_parameters()
+
+        zone_params: NDArray = arr[:num_zone_params]
+        size_params: list[float] = arr[
+            num_zone_params : num_zone_params + num_size_params
+        ].tolist()
+
+        if latent:
+            fractions: list[float] = []
+            remainder: float = 1.0
+            for size in size_params:
+                fraction: float = size / remainder
+                fractions.append(fraction)
+                remainder -= size
+
+            size_params = fractions
+
+        size_params.append(1 - sum(size_params))
+        # print(f"Size params: {size_params}")
+
+        # lapse_rate_params: NDArray = arr[num_zone_params + num_size_params :]
+
+        new_zones: dict[str, HydrologicZone] = dict()
+        for layer in cls.structure:
+            for zone in layer:
+                ps, zone_params = (
+                    zone_params[: zone.num_parameters()],  # type: ignore
+                    zone_params[zone.num_parameters() :],  # type: ignore
+                )
+                new_zones[zone.name] = zone.from_array(ps, natural_scales=natural_scales)  # type: ignore
+
+        # new_lapse_rates: list[LapseRateParameters] = [
+        #     LapseRateParameters(
+        #         temp_factor=temp_factor,
+        #         precip_factor=precip_factor,
+        #     )
+        #     for precip_factor, temp_factor in zip(
+        #         lapse_rate_params[::2], lapse_rate_params[1::2], strict=True
+        #     )
+        # ]
+
+        return cls(
+            zones=new_zones,
+            scales=size_params,
+            # lapse_rates=new_lapse_rates,
+        )
+
+    def hydro_parameter_names(self) -> list[str]:
+        """Gets an ordered list of all parameter names in the model.
+
+        Returns:
+            list[str]: A list of parameter names (e.g., "soil.fc").
+        """
+        param_names: list[str] = []
+        for layer in self.structure:
+            for zone in layer:
+                for param in zone.parameter_names():  # type: ignore
+                    param_names += [f"{zone.name}.{param}"]  # type: ignore
+        for i, _ in enumerate(self.structure[0][:-1]):
+            param_names.append(f"proportion.{i + 1}")
+
+        # for i, _ in enumerate(self.lapse_rates):
+        #     param_names += [
+        #         f"lapse_rate.{i + 1}.precip_factor",
+        #         f"lapse_rate.{i + 1}.temp_factor",
+        #     ]
+
+        return param_names
+
+    @classmethod
+    def hydro_from_dict(cls, params: dict) -> HydrologicalModel:
+        """Creates a new model instance from a dictionary of parameters.
+
+        Args:
+            params (dict): A dictionary mapping parameter names (e.g., "soil.fc")
+                to their values.
+
+        Returns:
+            Model: A new, parameterized model instance.
+        """
+        params_list: list[tuple[str, float]] = [
+            (key, val) for key, val in params.items()
+        ]
+
+        zone_params_list: list[tuple[str, float]] = [
+            x for x in params_list if x[0].split(".")[0] in cls.get_zone_names()
+        ]
+        proportion_params_list: list[tuple[str, float]] = [
+            x for x in params_list if x[0].split(".")[0] == "proportion"
+        ]
+        # lapse_rate_params_list: list[tuple[str, float]] = [
+        #     x for x in params_list if x[0].split(".")[0] == "lapse_rate"
+        # ]
+
+        decomposed_vals: list[tuple[str, str, float]] = [
+            (key.split(".")[0], key.split(".")[1], val) for key, val in zone_params_list
+        ]
+
+        # Check the zone names
+        zone_names: list[str] = list(set(map(lambda x: x[0], decomposed_vals)))
+
+        for zone_name in zone_names:
+            if zone_name not in cls.get_zone_names():
+                raise ValueError(f"Unknown zone name: {zone_name}")
+
+        # Now, group the parameters into their zones
+        zone_params: dict[str, dict[str, float]] = {}
+        zone_param_dict: dict[str, float]
+        for key, group in itertools.groupby(decomposed_vals, lambda x: x[0]):
+            zps: list[tuple[str, str, float]] = list(group)
+            zone_param_dict = {x[1]: x[2] for x in zps}
+
+            zone_params[key] = zone_param_dict
+
+        # Now, construct the zones
+        zones: dict[str, HydrologicZone] = {}
+        for zone_name in zone_names:
+            zone_param_dict = zone_params[zone_name]
+            zone_type: type[HydrologicZone] = cls.get_zone_type(zone_name)
+
+            new_zone = zone_type.from_dict(zone_param_dict)  # type: ignore
+            zones[zone_name] = new_zone
+
+        # Get the sizes (if applicable)
+        scales_ordered: list[tuple[int, float]] = [
+            (int(key.split(".")[1]), val) for key, val in proportion_params_list
+        ]
+        scales_ordered.sort(key=lambda x: x[0])
+        scales: list[float] | None = [float(val) for _, val in scales_ordered]
+        if len(scales) == 0:  # type: ignore
+            scales = None
+
+        if scales is not None:
+            scales.append(1 - sum(scales))
+
+        # Get the lapse rate parameters (if applicable)
+        # lapse_rates: list[LapseRateParameters] = []
+        # lapse_rates_grouped: list[tuple[int, str, float]] = [
+        #     (int(key.split(".")[1]), key.split(".")[2], val)
+        #     for key, val in lapse_rate_params_list
+        # ]
+        # lapse_rates_grouped.sort(key=lambda x: x[0])
+
+        # lapse_rate_groups: dict[int, list[tuple[int, str, float]]] = {
+        #     k: list(v)
+        #     for k, v in itertools.groupby(lapse_rates_grouped, lambda x: x[0])
+        # }
+
+        # for _k, v in lapse_rate_groups.items():
+        #     param_dict = {}
+        #     for _, key, val in v:
+        #         param_dict[key] = val
+        #     lapse_rates.append(LapseRateParameters.from_dict(param_dict))  # type: ignore
+
+        return cls(zones=zones, scales=scales)
+
+    @classmethod
+    def get_zone_type(cls, name: str) -> type:
+        """Gets the class type of a zone by its name.
+
+        Args:
+            name (str): The name of the zone.
+
+        Returns:
+            type: The class of the specified zone (e.g., `SurfaceZone`).
+        """
+        for layer in cls.structure:
+            for zone in layer:
+                if zone.name == name:  # type: ignore
+                    return type(zone)
+        raise ValueError(f"Unknown zone name: {name}")
+
+    @classmethod
+    def default_parameter_ranges(
+        cls,
+    ) -> dict[str, tuple[float, float]]:
+        """Gets the default parameter ranges for calibration.
+
+        Args:
+            include_lapse_rates (bool): If True, includes default ranges for
+                lapse rate parameters. Defaults to False.
+
+        Returns:
+            dict[str, tuple[float, float]]: A dictionary mapping parameter
+                names to their (min, max) bounds.
+        """
+        param_ranges: dict[str, tuple[float, float]] = {}
+        # Add the hydrologic zone parameters
+        for layer in cls.structure:
+            for zone in layer:
+                zone_range = zone.default_parameter_range()  # type: ignore
+
+                for param_name in zone.parameter_names():
+                    param_ranges[
+                        f"{zone.name}.{
+                        param_name}"
+                    ] = zone_range[param_name]
+
+        # Add the size parameters
+        for i, _ in enumerate(cls.structure[0][:-1]):
+            param_ranges[f"proportion.{i + 1}"] = (0.1, 0.9)
+
+        # Add the lapse rate parameters
+        # if include_lapse_rates:
+        #     for i, _ in enumerate(cls.structure[0]):
+        #         params: dict[str, tuple[float, float]] = (
+        #             LapseRateParameters.default_parameter_range()  # type: ignore
+        #         )
+        #         for param_name, param_range in params.items():
+        #             param_ranges[
+        #                 f"lapse_rate.{
+        #                 i + 1}.{param_name}"
+        #             ] = param_range
+
+        return param_ranges
+
+    @classmethod
+    def simple_calibration(
+        cls: type[HydrologicalModel],
+        forc: ForcingData | Iterable[ForcingData],
+        meas_streamflow: Series,
+        metric: (
+            Literal["nse", "kge", "combined"] | Callable[[HydroModelResults], float]
+        ),
+        num_threads: int = -1,
+        polish: bool = False,
+        maxiter=10,
+        print_values: bool = False,
+        param_ranges: Optional[dict[str, tuple[float, float]]] = None,
+    ) -> tuple[dict[str, float], HydroModelResults, opt.OptimizeResult]:
+        """Performs a simple calibration using differential evolution.
+
+        Args:
+            forc (ForcingData | Iterable[ForcingData]): The forcing data.
+            meas_streamflow (Series): The observed streamflow for optimization.
+            metric (Literal["nse", "kge", "combined"]): The objective function to optimize
+                ("nse", "kge", "metric").
+            use_lapse_rates (bool): Whether to include lapse rates in the
+                calibration. Defaults to False.
+            num_threads (int): Number of parallel workers for the optimizer.
+                Defaults to -1 (all cores).
+            polish (bool): If True, refines the result with a local optimizer.
+                Defaults to False.
+            maxiter (int): Maximum number of generations for the optimizer.
+                Defaults to 10.
+            print_values (bool): If True, prints metric values during
+                optimization. Defaults to False.
+
+        Returns:
+            tuple[dict, dict, OptimizeResult]: A tuple containing:
+                - The dictionary of the best-fit parameters.
+                - The results dictionary from the best-fit model run.
+                - The full `OptimizeResult` object from SciPy.
+        """
+
+        bounds: dict[str, tuple[float, float]]
+        if param_ranges is None:
+            bounds = cls.default_parameter_ranges()
+        else:
+            bounds = param_ranges
+
+        bounds_list: list[tuple[float, float]] = list(bounds.values())
+
+        args = (cls, forc, meas_streamflow, metric, print_values)
+
+        opt_res = opt.differential_evolution(
+            func=objective_function,
+            bounds=bounds_list,  # type: ignore
+            maxiter=maxiter,
+            tol=0.01,
+            rng=0,
+            polish=polish,
+            workers=num_threads,
+            args=args,
+            updating="deferred",
+        )
+
+        # Now, run the model and return the optimum results
+        model = cls.hydro_from_array(opt_res.x)
+        best_results = model.run_hydro_model(
+            forc=forc,  # type: ignore
+            init_state=cls.default_hydro_init_state(),
+            meas_streamflow=meas_streamflow,
+            verbose=False,
+        )
+
+        opt_params: dict[str, float] = {
+            key: val for key, val in zip(bounds.keys(), opt_res.x, strict=True)
+        }
+
+        return opt_params, best_results, opt_res
+
+    def gradient(
+        self,
+        obj_func: Callable[[HydroModelResults], float] | str,
+        forc: ForcingData | list[ForcingData],
+        meas_streamflow: Series,
+        rel_step: float = 0.01,
+        mean_elev: Optional[list[float]] = None,
+        include_lapse_rates: bool = False,
+    ) -> np.ndarray:
+        """
+        Compute the gradient of some objective function that takes the `HydroModelResults` as an argument
+        and returns a float representing the gradient
+        """
+        # Get the objective function
+        if isinstance(obj_func, str):
+
+            def operational_obj_func(res: HydroModelResults) -> float:
+                return res.objective_functions[obj_func]
+
+        else:
+            operational_obj_func = obj_func  # type: ignore
+
+        params = self.hydro_to_array()
+
+        grad_vals: list[float] = []
+        bounds: dict = self.default_parameter_ranges()
+        for i, (x_i, (min_val, max_val)) in enumerate(
+            zip(params, bounds.values(), strict=True)
+        ):
+            # Compute the gradient at x_i using centered finite differences
+            state_left = params.copy()
+            state_right = params.copy()
+
+            dx: float = abs(state_left[i] * rel_step)
+
+            # Make sure that the steps are nonzero
+            if abs(dx) < 1e-6:
+                dx = abs(0.5 * (max_val - min_val))
+
+            x_i_left = max(min_val, x_i - dx)
+            x_i_right = min(max_val, x_i + dx)
+
+            state_left[i] = x_i_left
+            state_right[i] = x_i_right
+
+            left_model = self.hydro_from_array(state_left)
+            right_model = self.hydro_from_array(state_right)
+
+            left_res = left_model.run_hydro_model(
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+            )
+            right_res = right_model.run_hydro_model(
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+            )
+
+            grad_vals.append(
+                (operational_obj_func(right_res) - operational_obj_func(left_res))
+                / (x_i_right - x_i_left)
+            )
+
+        return np.array(grad_vals)
+
+    @classmethod
+    def mcmc(
+        cls: type[HydrologicalModel],
+        forc: ForcingData | list[ForcingData],
+        meas_streamflow: Series,
+        include_lapse_rates: bool = False,
+        elevations: Optional[list[float]] = None,
+        bounds: dict[str, tuple[float, float]] | None = None,
+        num_threads: int = -1,
+        num_walkers: Optional[int] = None,
+        num_samples: int = 1_000,
+        metric: Callable[[HydroModelResults], float] | Literal["kge", "nse"] = "kge",
+        initial_state: Optional[NDArray[f64]] = None,
+        random_seed: int = 0,
+    ) -> tuple[DataFrame, DataFrame, emcee.EnsembleSampler, emcee.State]:
+        """Runs a Markov Chain Monte Carlo simulation."""
+        if num_threads < 1:
+            num_threads = os.cpu_count()  # type: ignore
+
+        if bounds is None:
+            bounds = cls.default_parameter_ranges()
+
+        if initial_state is None:
+            initial_state = np.array(
+                [0.5 * (x[0] + x[1]) for x in bounds.values()]
+            )  # Have the initial guess be in the middle of the parameter ranges
+        param_ranges = np.array([x[1] - x[0] for x in bounds.values()])
+        ndim = initial_state.size
+
+        if num_walkers is None:
+            num_walkers = 2 * ndim
+
+        # ==== Set random state ==== #
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+        # ========================== #
+
+        initial_walker_states = [
+            initial_state + 0.25 * param_ranges * np.random.randn(ndim)
+            for _ in range(num_walkers)
+        ]
+
+        args = (
+            cls,
+            forc,
+            meas_streamflow,
+            bounds,
+            metric,
+            elevations,
+        )
+
+        if num_threads != 1:
+            with Pool(num_threads) as pool:
+                sampler = emcee.EnsembleSampler(
+                    num_walkers, ndim, log_prob_fn=log_probability, pool=pool, args=args
+                )
+
+                mc_result = sampler.run_mcmc(
+                    initial_walker_states, num_samples, progress=True
+                )
+        else:
+            sampler = emcee.EnsembleSampler(
+                num_walkers, ndim, log_prob_fn=log_probability, args=args
+            )
+
+            mc_result = sampler.run_mcmc(
+                initial_walker_states, num_samples, progress=True
+            )
+
+        # Now, examine the outputs
+        blob_arr: np.ndarray = sampler.get_blobs()  # type: ignore
+        blob_arr = blob_arr.reshape(
+            (blob_arr.shape[0] * blob_arr.shape[1], blob_arr.shape[2])
+        )
+
+        # Get the examples
+        # base_model = cls()
+        column_names: list[str] = ["kge", "nse", "log_kge", "log_nse", "bias"]
+        # base_model.run(
+        #     forc=forc, meas_streamflow=meas_streamflow
+        # )["objective_functions"].index.tolist()
+
+        obj_func_df = DataFrame(blob_arr, columns=column_names)
+
+        sample_arr: np.ndarray = sampler.get_chain()  # type: ignore
+        sample_arr = sample_arr.reshape(
+            (sample_arr.shape[0] * sample_arr.shape[1], sample_arr.shape[2])
+        )
+        sample_df = DataFrame(sample_arr, columns=list(bounds.keys()))
+
+        return sample_df, obj_func_df, sampler, mc_result  # type: ignore
+
+    def to_dict(self) -> dict[str, float]:
+        """Converts the model's parameters to a dictionary.
+
+        Returns:
+            dict[str, float]: A dictionary mapping parameter names to values.
+        """
+        return {
+            key: val
+            for key, val in zip(
+                self.hydro_parameter_names(), self.hydro_to_array(), strict=True
+            )
+        }
+
+    def to_series(self) -> Series:
+        """Converts the model's parameters to a pandas Series.
+
+        Returns:
+            Series: A Series with parameter names as the index.
+        """
+        return Series(self.hydro_to_array(), index=self.hydro_parameter_names())
+
+    @classmethod
+    def hydro_from_series(cls, series: Series) -> HydrologicalModel:
+        """Creates a new model instance from a pandas Series of parameters.
+
+        Args:
+            series (Series): A Series of parameters with names as the index.
+
+        Returns:
+            Model: A new, parameterized model instance.
+        """
+        return cls.hydro_from_dict(series.to_dict())
+
+    @property
+    def num_hydro_parameters(self) -> int:
+        """The total number of optimizable parameters in the model."""
+        return len(self.hydro_to_array())
+
+    @classmethod
+    def get_num_hydro_parameters(cls: type[HydrologicalModel]) -> int:
+        """The total number of optimizable parameters in the model."""
+        num_params: int = 0
+        for layer in cls.structure:
+            for zone in layer:
+                num_params += zone.num_parameters()  # type: ignore
+
+        return num_params + cls.get_num_size_parameters()

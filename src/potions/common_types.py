@@ -1,9 +1,8 @@
-from dataclasses import dataclass
-from typing import Any, Optional, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, TypeVar, TypedDict
 
 import numpy as np
 from numpy import float64 as f64
-from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
 from .core import RtStep
@@ -76,24 +75,16 @@ class LapseRateParameters:
 class ChemicalState:
     """Represents the chemical state of a zone, partitioned by species type."""
 
-    prim_aq_conc: NDArray  # Primary aqueous species concentrations
-    sec_conc: NDArray  # Secondary species concentrations
-    min_conc: NDArray  # Mineral concentrations
-
-    def to_primary_array(self) -> NDArray:
-        """Concatenates primary aqueous and mineral species into a single array."""
-        return np.concatenate([self.prim_aq_conc, self.min_conc])  # type: ignore
-
-    def to_array(self) -> NDArray:
-        """Concatenates all species into a single array."""
-        raise NotImplementedError()
-
-    @property
-    def aqueous_concentrations(self) -> NDArray:
-        """
-        Get a vector of aqueous concentrations, including primary and secondary
-        """
-        return np.concatenate([self.prim_aq_conc, self.sec_conc])  # type: ignore
+    mineral: dict[str, float] = field(default_factory=dict)  # Mineral concentrations
+    exchange: dict[str, float] = field(
+        default_factory=dict
+    )  # Exchange species concentrations
+    primary: dict[str, float] = field(
+        default_factory=dict
+    )  # Primary aqueous species concentrations
+    secondary: dict[str, float] = field(
+        default_factory=dict
+    )  # Secondary species concentrations
 
 
 @dataclass(frozen=True)
@@ -144,6 +135,7 @@ class HydroModelResults:
         objective_functions (Series): A Series with the values of each of the objective functions as keys
     """
 
+    forcing: ForcingData | list[ForcingData]
     simulation: DataFrame
     objective_functions: Series
 
@@ -161,3 +153,34 @@ class RtModelResults:
 class ModelResults:
     hydro: HydroModelResults
     reactive_transport: RtModelResults
+
+
+@dataclass(frozen=True)
+class RtZoneConfiguration:
+    do_reactions: bool
+    do_speciation: bool
+
+
+class BatchResults(TypedDict):
+    simulations: dict[int, DataFrame]
+    objective_functions: DataFrame
+
+
+class BatchParams(TypedDict):
+    """A dictionary specifying parameters for a batch model run.
+
+    This is used internally by `Model.run_batch` to pass configuration
+    to the worker processes.
+
+    Attributes:
+        output_dir: The directory path to save simulation results.
+        threshold_function: A callable that takes the results dictionary of a
+            single run and returns True if the results should be saved.
+        return_results: If True, the full simulation results are returned
+            from the worker process.
+        save_results: If True, worker processes will save results to disk.
+    """
+
+    output_dir: Optional[str]
+    threshold_function: Optional[Callable[[HydroModelResults], bool]]
+    save_results: bool

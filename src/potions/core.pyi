@@ -324,6 +324,7 @@ class ReactionNetwork:
     mineral: list[MineralSpecies]
     secondary: list[SecondarySpecies]
     mineral_kinetics: MineralKineticData
+    exchange_species: list[ExchangeReaction]
     species: pl.DataFrame
 
     def __init__(
@@ -389,29 +390,49 @@ class ReactionNetwork:
 # Database and stuff
 @dataclass
 class PrimaryAqueousSpecies:
-    pass
+    name: str
+    molar_mass: float
+    charge: float
+    dh_size_param: float
 
 @dataclass
 class SecondarySpecies:
-    pass
+    name: str
+    stoichiometry: dict[str, float]
+    eq_consts: list[float]
+    dh_size_param: float
+    charge: float
+    molar_mass: float
 
 @dataclass
 class MineralSpecies:
-    pass
+    name: str
+    molar_mass: float
+    stoichiometry: dict[str, float]
+    eq_consts: list[float]
+    molar_volume: float
 
 @dataclass
 class TstReaction:
-    pass
+    mineral_name: str
+    label: str
+    rate_constant: float
+    dependence: dict[str, float]
 
 @dataclass
 class MonodReaction:
-    pass
+    mineral_name: str
+    label: str
+    rate_constant: float
+    monod_terms: dict[str, float]
+    inhib_terms: dict[str, float]
 
 MineralKineticReaction = TstReaction | MonodReaction
 
 @dataclass
 class MineralKineticData:
-    pass
+    tst_reactions: dict[str, TstReaction]
+    monod_reactions: dict[str, MonodReaction]
 
 @dataclass
 class ExchangeReaction:

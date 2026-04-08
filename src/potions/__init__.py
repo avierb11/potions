@@ -113,7 +113,6 @@ from .core import (
     RiverZone,
 )
 
-from .interfaces import StepResult, Zone
 
 from .common_models import (
     HbvLateralModel,

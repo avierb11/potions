@@ -13,9 +13,13 @@ const DEFAULT_DATABASE_STR: &str = include_str!("default_database.json");
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrimaryAqueousSpecies {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub molar_mass: f64,
+    #[pyo3(get)]
     pub charge: f64,
+    #[pyo3(get)]
     pub dh_size_param: f64,
 }
 
@@ -68,11 +72,17 @@ impl PrimaryAqueousSpecies {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecondarySpecies {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub stoichiometry: HashMap<String, f64>,
+    #[pyo3(get)]
     pub eq_consts: Vec<f64>,
+    #[pyo3(get)]
     pub dh_size_param: f64,
+    #[pyo3(get)]
     pub charge: f64,
+    #[pyo3(get)]
     pub molar_mass: f64,
 }
 
@@ -152,10 +162,15 @@ impl SecondarySpecies {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MineralSpecies {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub molar_mass: f64,
+    #[pyo3(get)]
     pub stoichiometry: HashMap<String, f64>,
+    #[pyo3(get)]
     pub eq_consts: Vec<f64>,
+    #[pyo3(get)]
     pub molar_volume: f64,
 }
 
@@ -241,9 +256,13 @@ pub enum PrimarySpecies {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TstReaction {
+    #[pyo3(get)]
     pub mineral_name: String,
+    #[pyo3(get)]
     pub label: String,
+    #[pyo3(get)]
     pub rate_constant: f64, // Base-10 logarithm of the rate constant at 25 C
+    #[pyo3(get)]
     pub dependence: HashMap<String, f64>,
 }
 
@@ -297,10 +316,15 @@ impl TstReaction {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MonodReaction {
+    #[pyo3(get)]
     pub mineral_name: String,
+    #[pyo3(get)]
     pub label: String,
+    #[pyo3(get)]
     pub rate_constant: f64, // Base-10 logarithm of the rate constant at 25 C
+    #[pyo3(get)]
     pub monod_terms: HashMap<String, f64>,
+    #[pyo3(get)]
     pub inhib_terms: HashMap<String, f64>,
 }
 
@@ -381,7 +405,9 @@ impl MonodReaction {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MineralKineticData {
+    #[pyo3(get)]
     pub tst_reactions: HashMap<String, TstReaction>,
+    #[pyo3(get)]
     pub monod_reactions: HashMap<String, MonodReaction>,
 }
 
@@ -445,11 +471,17 @@ pub struct ExchangeReaction {
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChemicalDatabase {
+    #[pyo3(get)]
     pub primary_species: HashMap<String, PrimaryAqueousSpecies>,
+    #[pyo3(get)]
     pub secondary_species: HashMap<String, SecondarySpecies>,
+    #[pyo3(get)]
     pub mineral_species: HashMap<String, MineralSpecies>,
+    #[pyo3(get)]
     pub exchange_reactions: HashMap<String, ExchangeReaction>,
+    #[pyo3(get)]
     pub tst_reactions: HashMap<String, HashMap<String, TstReaction>>,
+    #[pyo3(get)]
     pub monod_reactions: HashMap<String, HashMap<String, MonodReaction>>,
 }
 
