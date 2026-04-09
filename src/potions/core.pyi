@@ -306,6 +306,14 @@ class RiverZone(RtZone):
         do_speciation: bool = True,
         name: str = "unnamed",
     ) -> None: ...
+    @staticmethod
+    def from_array(
+        arr: np.ndarray,
+        network: ReactionNetwork,
+        do_reactions: bool,
+        do_speciation: bool,
+        natural_scales: bool = True,
+    ) -> RiverZone: ...
 
 @dataclass
 class RtStep:

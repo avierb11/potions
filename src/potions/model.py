@@ -315,16 +315,13 @@ class Model(ReactiveTransportModel):
             print("Starting reactive transport simulation")
 
         rt_res: RtModelResults = self.run_rt_model(
-            hydro_sim_df=hydro_res.simulation,
-            forc=forc,
-            mineral_conc=mineral_conc,
+            hydro_res=hydro_res,
             precip_conc=precip_conc,
             init_conc=init_conc,  # type: ignore
             meas_river_conc=meas_river_conc,
             verbose=verbose,
             return_partial=False,
             failed_dir=None,
-            exchange_conc=exchange_conc,
         )
 
         return ModelResults(hydro=hydro_res, reactive_transport=rt_res)
@@ -359,9 +356,15 @@ class Model(ReactiveTransportModel):
         num_hydro_params: int = cls.get_num_hydro_parameters()
         num_dim_params: int = 3 * num_zones
         num_min_params: int = 0
-        for _zone_name, zone in config.items():
-            num_min_params += PARAMETERS_PER_MINERAL * zone.do_reactions
-        num_expected: int = num_hydro_params + num_dim_params + num_min_params
+        num_river_params: int = 0
+        for zone_name, zone in config.items():
+            if zone_name == "river":
+                num_river_params += 3 + PARAMETERS_PER_MINERAL * zone.do_reactions
+            else:
+                num_min_params += PARAMETERS_PER_MINERAL * zone.do_reactions
+        num_expected: int = (
+            num_hydro_params + num_dim_params + num_min_params + num_river_params
+        )
 
         if arr.size != num_expected:
             raise PotionsError(
@@ -379,19 +382,20 @@ class Model(ReactiveTransportModel):
 
         # Split the main array into hydrologic and RT parts.
         # Slicing from the end is safer than calculating the hydro param count.
-        hydro_params_arr = arr[0:num_hydro_params]
-        rt_params_arr = arr[num_hydro_params:]
+        hydro_params_arr: NDArray = arr[0:num_hydro_params]
+        rt_zone_params_arr: NDArray = arr[num_hydro_params:-num_river_params]
+        river_params_arr: NDArray = arr[-num_river_params:]
 
         if verbose:
             print(f"Hydrological parameters: {hydro_params_arr}")
-            print(f"Reactive transport parameters: {rt_params_arr}")
+            print(f"Reactive transport parameters: {rt_zone_params_arr}")
 
         # Create the base hydrologic model and the RT parameters separately.
         hydro_mod: HydrologicalModel = cls.hydro_from_array(
             hydro_params_arr, natural_scales=natural_scales
         )
         rt_params: dict[str, RtParameters] = cls.rt_params_from_array(
-            rt_params_arr,
+            rt_zone_params_arr,
             network,
             config,
             verbose=verbose,
@@ -415,6 +419,16 @@ class Model(ReactiveTransportModel):
             )
             rt_zones[zone_name] = rt_zone
 
+        river_zone: Optional[RiverZone] = None
+        if river_params_arr.size > 0:
+            river_config = config["river"]
+            river_zone = RiverZone.from_array(
+                river_params_arr,
+                network=network,
+                do_reactions=river_config.do_reactions,
+                do_speciation=river_config.do_speciation,
+            )
+
         # The model constructor expects a dictionary for RT configuration,
         # so we convert the input list.
 
@@ -425,4 +439,5 @@ class Model(ReactiveTransportModel):
             scales=hydro_mod.scales,
             network=network,
             rt_zones=rt_zones,
+            river_zone=river_zone,
         )

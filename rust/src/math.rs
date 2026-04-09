@@ -332,7 +332,7 @@ pub fn find_root(
 ) -> PyResult<f64> {
     // 1. Try to see if 'func' is actually one of our Rust Zone classes
     // (This is the most performant way)
-    if let Ok(zone) = func.downcast::<HydrologicZone>() {
+    if let Ok(zone) = func.cast::<HydrologicZone>() {
         let zone_ref = zone.borrow();
         let forcing = d.extract::<HydroForcing>()?; // Extract Rust struct from Python object
 
