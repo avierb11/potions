@@ -105,7 +105,11 @@ class HydrologicalModel:
 
     @property
     def hydro_zones(self) -> dict[str, HydrologicZone]:
-        raise NotImplementedError()
+        zones: dict[str, HydrologicZone] = {}
+        for zone_name in self.zone_names:
+            zones[zone_name] = self.__zones[zone_name]
+
+        return zones
 
     @classmethod
     def get_zone_names(cls: type[HydrologicalModel]) -> list[str]:
@@ -132,7 +136,10 @@ class HydrologicalModel:
         Raises:
             ValueError: If no zone with the given name exists in the model.
         """
-        raise NotImplementedError()
+        if zone_name not in self.zone_names:
+            raise ValueError(f"Model does not contain zone {zone_name}")
+        else:
+            return self.__zones[zone_name]
 
     @property
     def num_surface_zones(self) -> int:
@@ -1113,7 +1120,7 @@ class HydrologicalModel:
         zones: dict[str, HydrologicZone] = {}
         for zone_name in zone_names:
             zone_param_dict = zone_params[zone_name]
-            zone_type: type[HydrologicZone] = cls.get_zone_type(zone_name)
+            zone_type: type[HydrologicZone] = cls.get_zone_type(zone_name)  # type: ignore
 
             new_zone = zone_type.from_dict(zone_param_dict)  # type: ignore
             zones[zone_name] = new_zone
@@ -1147,7 +1154,7 @@ class HydrologicalModel:
         #     param_dict = {}
         #     for _, key, val in v:
         #         param_dict[key] = val
-        #     lapse_rates.append(LapseRateParameters.from_dict(param_dict))  # type: ignore
+        #     lapse_rates.append(LapseRateParameters.from_dict(param_dict))
 
         return cls(zones=zones, scales=scales)
 

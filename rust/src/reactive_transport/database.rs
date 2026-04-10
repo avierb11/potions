@@ -468,6 +468,50 @@ pub struct ExchangeReaction {
     pub charge: f64,
 }
 
+#[pymethods]
+impl ExchangeReaction {
+    #[new]
+    pub fn new(
+        name: String,
+        stoichiometry: HashMap<String, f64>,
+        log10_k_eq: f64,
+        charge: f64,
+    ) -> Self {
+        Self {
+            name,
+            stoichiometry,
+            log10_k_eq,
+            charge,
+        }
+    }
+
+    pub fn __getstate__(&self) -> (String, HashMap<String, f64>, f64, f64) {
+        (
+            self.name.clone(),
+            self.stoichiometry.clone(),
+            self.log10_k_eq,
+            self.charge,
+        )
+    }
+
+    pub fn __setstate__(&mut self, state: (String, HashMap<String, f64>, f64, f64)) {
+        let (name, stoichiometry, log10_k_eq, charge) = state;
+        self.name = name;
+        self.stoichiometry = stoichiometry;
+        self.log10_k_eq = log10_k_eq;
+        self.charge = charge
+    }
+
+    pub fn __getnewargs__(&self) -> (String, HashMap<String, f64>, f64, f64) {
+        (
+            self.name.clone(),
+            self.stoichiometry.clone(),
+            self.log10_k_eq,
+            self.charge,
+        )
+    }
+}
+
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChemicalDatabase {

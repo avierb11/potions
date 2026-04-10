@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::find_root_multi,
+    math::levenberg_marquardt,
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -198,7 +198,7 @@ impl RtZone {
     ) -> PyResult<Array1<f64>> {
         let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
 
-        let res = find_root_multi(&residual, c_0.clone(), verbose);
+        let res = levenberg_marquardt(&residual, c_0.clone(), verbose);
 
         res
     }

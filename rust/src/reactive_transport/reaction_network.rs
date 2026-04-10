@@ -688,6 +688,35 @@ impl ReactionNetwork {
         conc.to_pyarray(py)
     }
 
+    #[getter]
+    pub fn mineral_names(&self) -> Vec<String> {
+        self.mineral.iter().map(|x| x.name.clone()).collect()
+    }
+
+    #[getter]
+    pub fn primary_names(&self) -> Vec<String> {
+        self.primary_aqueous
+            .iter()
+            .map(|x| x.name.clone())
+            .collect()
+    }
+
+    #[getter]
+    pub fn secondary_names(&self) -> Vec<String> {
+        self.secondary.iter().map(|x| x.name.clone()).collect()
+    }
+
+    #[getter]
+    pub fn exchange_names(&self) -> Vec<String> {
+        let mut spec_names: Vec<String> = vec!["X-".to_string()];
+
+        for x in self.exchange_species.iter() {
+            spec_names.push(x.name.clone());
+        }
+
+        spec_names
+    }
+
     pub fn __getstate__(
         &self,
     ) -> (
@@ -695,12 +724,14 @@ impl ReactionNetwork {
         Vec<MineralSpecies>,
         Vec<SecondarySpecies>,
         MineralKineticData,
+        Vec<ExchangeReaction>,
     ) {
         (
             self.primary_aqueous.clone(),
             self.mineral.clone(),
             self.secondary.clone(),
             self.mineral_kinetics.clone(),
+            self.exchange_species.clone(),
         )
     }
 
@@ -711,9 +742,10 @@ impl ReactionNetwork {
             Vec<MineralSpecies>,
             Vec<SecondarySpecies>,
             MineralKineticData,
+            Vec<ExchangeReaction>,
         ),
     ) {
-        let (pa, m, s, mk) = state;
+        let (pa, m, s, mk, exch) = state;
 
         // Regenerate the derived species DataFrame
         let mut species_types = Vec::new();
@@ -733,6 +765,16 @@ impl ReactionNetwork {
             names.push(x.name.clone());
         }
 
+        if self.has_exchange() {
+            names.push("X-".to_string());
+            for x in &exch {
+                names.push(x.name.clone());
+            }
+
+            let num_exchange = 1 + exch.len();
+            species_types.extend(vec!["exchange".to_string(); num_exchange]);
+        }
+
         let species_df = df!(
             "name" => names,
             "type" => species_types
@@ -743,6 +785,7 @@ impl ReactionNetwork {
         self.mineral = m;
         self.secondary = s;
         self.mineral_kinetics = mk;
+        self.exchange_species = exch;
         self.species = PyDataFrame(species_df);
     }
 
@@ -753,12 +796,14 @@ impl ReactionNetwork {
         Vec<MineralSpecies>,
         Vec<SecondarySpecies>,
         MineralKineticData,
+        Vec<ExchangeReaction>,
     ) {
         (
             self.primary_aqueous.clone(),
             self.mineral.clone(),
             self.secondary.clone(),
             self.mineral_kinetics.clone(),
+            self.exchange_species.clone(),
         )
     }
 }

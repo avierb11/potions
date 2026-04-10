@@ -6,7 +6,6 @@ from multiprocessing import Pool
 from typing import (
     Callable,
     Final,
-    Iterable,
     Optional,
 )
 
@@ -22,6 +21,7 @@ from .reactive_transport_model import ReactiveTransportModel
 
 from .common_types import (
     BatchParams,
+    ChemicalState,
     ForcingData,
     HydroModelResults,
     RtModelResults,
@@ -30,7 +30,7 @@ from .common_types import (
     BatchResults,
 )
 
-from potions.core import (  # type: ignore
+from .core import (
     # Hydrology
     HydrologicZone,
     RiverZone,
@@ -253,7 +253,7 @@ class Model(ReactiveTransportModel):
                 batch_params,
             )  # type: ignore
             for i, row in params.iterrows()
-        ]
+        ]  # ty:ignore[invalid-assignment]
 
         if num_threads < 1:
             num_threads = os.cpu_count()  # type: ignore
@@ -281,16 +281,14 @@ class Model(ReactiveTransportModel):
 
     def run_both_models(
         self,
+        # Hydrology
         forc: ForcingData | list[ForcingData],
+        # Reactive transport
         precip_conc: NDArray,
-        mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
-        exchange_conc: Optional[dict[str, float]] = None,
-        init_conc: Optional[NDArray | Series] = None,
+        init_conc: dict[str, ChemicalState],
+        # Optional data
         init_hydro_state: Optional[NDArray[f64]] = None,
         meas_streamflow: Optional[Series] = None,
-        average_elevation: Optional[float] = None,
-        elevations: Optional[list[float]] = None,
-        check_water_balance: bool = False,
         meas_river_conc: Optional[DataFrame] = None,
         objective_functions: Optional[
             list[tuple[str, Callable[[Series, Series], float]]]
@@ -304,9 +302,6 @@ class Model(ReactiveTransportModel):
             forc=forc,
             init_state=init_hydro_state,
             meas_streamflow=meas_streamflow,
-            average_elevation=average_elevation,
-            elevations=elevations,
-            check_water_balance=check_water_balance,
             objective_functions=objective_functions,
         )
 
@@ -317,7 +312,7 @@ class Model(ReactiveTransportModel):
         rt_res: RtModelResults = self.run_rt_model(
             hydro_res=hydro_res,
             precip_conc=precip_conc,
-            init_conc=init_conc,  # type: ignore
+            initial_state=init_conc,
             meas_river_conc=meas_river_conc,
             verbose=verbose,
             return_partial=False,
@@ -359,7 +354,7 @@ class Model(ReactiveTransportModel):
         num_river_params: int = 0
         for zone_name, zone in config.items():
             if zone_name == "river":
-                num_river_params += 3 + PARAMETERS_PER_MINERAL * zone.do_reactions
+                num_river_params += 2 + PARAMETERS_PER_MINERAL * zone.do_reactions
             else:
                 num_min_params += PARAMETERS_PER_MINERAL * zone.do_reactions
         num_expected: int = (
@@ -369,8 +364,8 @@ class Model(ReactiveTransportModel):
         if arr.size != num_expected:
             raise PotionsError(
                 f"""Incorrect number of parameters for creating RT model. Expected {num_expected}, received {arr.size},
-                with {num_hydro_params} hydrological parameters, {num_dim_params} zone parameters, and
-                {num_min_params} mineral parameters"""
+                with {num_hydro_params} hydrological parameters, {num_dim_params} zone parameters,
+                {num_min_params} mineral parameters, and {num_river_params} river parameters"""
             )
         if verbose:
             print(f"Number of zones in the model: {num_zones}")

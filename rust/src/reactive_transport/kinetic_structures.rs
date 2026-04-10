@@ -9,7 +9,7 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{approx_fprime, find_root_multi, matmul, null_space_scipy, pinv_scipy},
+    math::{approx_fprime, levenberg_marquardt, matmul, null_space_scipy, pinv_scipy},
     molar, molar_per_time,
 };
 const PARAMETERS_PER_MINERAL: usize = 4;
@@ -265,7 +265,7 @@ impl EquilibriumParameters {
         let initial_guess: Array1<f64> = Array1::zeros(c_tot.shape()[0]);
 
         // Solve the problem
-        match find_root_multi(&f_to_solve, initial_guess, verbose) {
+        match levenberg_marquardt(&f_to_solve, initial_guess, verbose) {
             Ok(v) => Ok(self.conc_func_rust(&v)),
             Err(e) => Err(e),
         }

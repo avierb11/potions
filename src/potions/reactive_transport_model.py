@@ -180,7 +180,8 @@ class ReactiveTransportModel(HydrologicalModel):
         num_minerals: int = network.num_minerals
         params_per_zone: list[int] = [
             3 + z.do_reactions * num_minerals * PARAMETERS_PER_MINERAL
-            for z in configs.values()
+            for zone_name, z in configs.items()
+            if zone_name != "river"
         ]
 
         if len(arr) != sum(params_per_zone):
@@ -568,7 +569,7 @@ class ReactiveTransportModel(HydrologicalModel):
             if return_partial:
                 final_completed = i  # type: ignore
             else:
-                print(f"Failed on step {i}")  # type: ignore
+                # print(f"Failed on step {i}")  # type: ignore
                 raise e
 
         # ================================ #

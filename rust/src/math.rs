@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ndarray_linalg::Solve;
+use ndarray_linalg::{Solve, SVD};
 use numpy::{
     ndarray::{Array1, Array2},
     PyArray2, PyArrayMethods,
@@ -8,19 +8,22 @@ use numpy::{
 use pyo3::{
     exceptions::{PyException, PyRuntimeError, PyValueError},
     prelude::*,
-    IntoPyObjectExt, PyErrArguments,
+    IntoPyObjectExt,
 };
 
 use crate::{common_types::HydroForcing, hydro::HydrologicZone};
 
-const FIND_ROOT_TOL: f64 = 1e-8;
+const FIND_ROOT_TOL: f64 = 1e-6;
 const FIND_ROOT_MAXITER: usize = 100;
 const MULTI_MAXITER: usize = 100;
-const MULTI_TOL: f64 = 1e-12;
+const MULTI_TOL: f64 = 1e-6;
 const APPROX_FPRIME_DX: f64 = 1e-8;
 const APPROX_FPRIME_REL_DX: f64 = 1e-3;
 const F_PRIME_MIN_VAL: f64 = 1e-22;
-const TIKHONOV_LAMBDA: f64 = 1e-12;
+const TIKHONOV_OFFSET: f64 = -3.0;
+const TIKHONOV_MAX: f64 = -3.0;
+const TIKHONOV_MIN: f64 = -12.0;
+const TIKHONOV_VAL: f64 = 1e-8;
 
 pub trait ObjectiveFunctionScalar {
     fn evaluate(&self, x: f64) -> f64;
@@ -38,7 +41,6 @@ pub enum ScalarRootFindingError {
 pub struct IterationError;
 
 #[pyclass(extends=PyException, subclass)]
-#[derive(Clone)] // Clone is useful for the conversion layer
 pub struct OptimizationError {
     #[pyo3(get)]
     pub iterations: usize,
@@ -53,12 +55,28 @@ pub struct OptimizationError {
     #[pyo3(get)]
     pub jacobian: Vec<Vec<f64>>,
     #[pyo3(get)]
+    pub errors: Vec<f64>,
+    #[pyo3(get)]
+    pub xs: Vec<Vec<f64>>,
+    #[pyo3(get)]
+    pub fxs: Vec<Vec<f64>>,
+    #[pyo3(get)]
+    pub jacobians: Vec<Vec<Vec<f64>>>,
+    #[pyo3(get)]
+    pub lambdas: Vec<f64>,
+    #[pyo3(get)]
     pub message: String,
 }
 
 impl OptimizationError {
     pub fn from_state(state: OptimizerState, message: String) -> Self {
-        let jac = arr_to_vec(state.jacobian.clone());
+        let xs: Vec<Vec<f64>> = state.xs.iter().map(|x| x.to_vec()).collect();
+        let fxs: Vec<Vec<f64>> = state.fxs.iter().map(|x| x.to_vec()).collect();
+        let jacobians: Vec<Vec<Vec<f64>>> = state
+            .jacobians
+            .iter()
+            .map(|x| arr_to_vec(x.clone()))
+            .collect();
 
         Self {
             iterations: state.iteration,
@@ -66,7 +84,12 @@ impl OptimizationError {
             last_x: state.final_x.to_vec(),
             last_f_x: state.last_f_x.to_vec(),
             initial_x: state.initial_x.to_vec(),
-            jacobian: jac,
+            jacobian: arr_to_vec(state.jacobian),
+            errors: state.errors,
+            xs,
+            fxs,
+            jacobians,
+            lambdas: state.lambdas,
             message,
         }
     }
@@ -78,10 +101,15 @@ impl OptimizationError {
     pub fn new(
         iterations: usize,
         final_err: f64,
+        errors: Vec<f64>,
         last_x: Vec<f64>,
         last_f_x: Vec<f64>,
         initial_x: Vec<f64>,
         jacobian: Vec<Vec<f64>>,
+        xs: Vec<Vec<f64>>,
+        fxs: Vec<Vec<f64>>,
+        jacobians: Vec<Vec<Vec<f64>>>,
+        lambdas: Vec<f64>,
         message: String,
     ) -> Self {
         Self {
@@ -91,6 +119,11 @@ impl OptimizationError {
             last_f_x,
             initial_x,
             jacobian,
+            errors,
+            xs,
+            fxs,
+            jacobians,
+            lambdas,
             message,
         }
     }
@@ -106,71 +139,26 @@ impl OptimizationError {
 #[pyclass]
 #[derive(Debug, Clone)]
 pub struct OptimizerState {
-    iteration: usize,
-    final_x: Array1<f64>,
-    last_f_x: Array1<f64>,
-    initial_x: Array1<f64>,
-    jacobian: Array2<f64>,
-    error: f64,
+    pub iteration: usize,
+    pub final_x: Array1<f64>,
+    pub last_f_x: Array1<f64>,
+    pub initial_x: Array1<f64>,
+    pub jacobian: Array2<f64>,
+    pub error: f64,
+    pub errors: Vec<f64>,
+    pub xs: Vec<Array1<f64>>,
+    pub fxs: Vec<Array1<f64>>,
+    pub jacobians: Vec<Array2<f64>>,
+    pub lambdas: Vec<f64>,
 }
 
 #[pyclass(extends=PyException)]
 #[derive(Debug, Clone)]
 pub struct OtherError;
 
-#[derive(Debug, Clone)]
-pub enum RootFindingError {
-    IterationError(OptimizerState),
-    LinearSystemError(OptimizerState),
-    Other(OptimizerState),
-}
-
 fn arr_to_vec(x: Array2<f64>) -> Vec<Vec<f64>> {
     let arrs: Vec<Vec<f64>> = x.rows().into_iter().map(|x| x.to_vec()).collect();
     arrs
-}
-
-impl PyErrArguments for RootFindingError {
-    fn arguments(self, py: Python<'_>) -> Py<PyAny> {
-        match self {
-            RootFindingError::IterationError(x) => {
-                let args = (
-                    x.iteration,
-                    x.error,
-                    x.final_x.to_vec(),
-                    x.initial_x.to_vec(),
-                    arr_to_vec(x.jacobian),
-                    "Exceeded maximum iterations without finding root".to_string(),
-                );
-
-                args.into_py_any(py).unwrap()
-            }
-            RootFindingError::LinearSystemError(x) => {
-                let args = (
-                    x.iteration,
-                    x.error,
-                    x.final_x.to_vec(),
-                    x.initial_x.to_vec(),
-                    arr_to_vec(x.jacobian),
-                    "Linear algebra when solving system".to_string(),
-                );
-
-                args.into_py_any(py).unwrap()
-            }
-            RootFindingError::Other(x) => {
-                let args = (
-                    x.iteration,
-                    x.error,
-                    x.final_x.to_vec(),
-                    x.initial_x.to_vec(),
-                    arr_to_vec(x.jacobian),
-                    "Other error when solving optimizer".to_string(),
-                );
-
-                args.into_py_any(py).unwrap()
-            }
-        }
-    }
 }
 
 impl pyo3::PyErrArguments for OptimizationError {
@@ -178,10 +166,15 @@ impl pyo3::PyErrArguments for OptimizationError {
         (
             self.iterations,
             self.final_err,
+            self.errors,
             self.last_x,
             self.last_f_x,
             self.initial_x,
             self.jacobian,
+            self.xs,
+            self.fxs,
+            self.jacobians,
+            self.lambdas,
             self.message,
         )
             .into_py_any(py)
@@ -189,43 +182,12 @@ impl pyo3::PyErrArguments for OptimizationError {
     }
 }
 
-impl From<RootFindingError> for PyErr {
-    fn from(err: RootFindingError) -> Self {
-        match &err {
-            RootFindingError::IterationError(x) => PyErr::new::<OptimizationError, _>(err),
-            RootFindingError::LinearSystemError(x) => PyErr::new::<OptimizationError, _>(err),
-            RootFindingError::Other(x) => PyErr::new::<OptimizationError, _>(err),
-        }
-    }
-}
-
-// #[pyclass(extends=PyException)]
 #[derive(Debug, Clone)]
 pub struct MatMulError;
 
 impl fmt::Display for ScalarRootFindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Failed to find root")
-    }
-}
-
-impl fmt::Display for RootFindingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let msg: String = match self {
-            Self::IterationError(x) => {
-                format!("Maximum iterations reached")
-            }
-            Self::LinearSystemError(s) => {
-                format!(
-                    "Failed to solve linear system on iteration {} with:\njac={}\nx={}\nx0={}",
-                    s.iteration, s.jacobian, s.final_x, s.initial_x
-                )
-            }
-            Self::Other(x) => {
-                format!("Other error")
-            }
-        };
-        write!(f, "{}", msg)
     }
 }
 
@@ -364,6 +326,354 @@ pub fn find_root(
     }
 }
 
+pub fn approx_fprime<F>(f: F, x: &Array1<f64>, verbose: bool) -> Array2<f64>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let n: usize = x.len();
+    let mut jac_x: Array2<f64> = Array2::zeros((n, n));
+
+    for (i, x_i) in x.iter().enumerate() {
+        let dx = match x_i.abs() < F_PRIME_MIN_VAL {
+            true => APPROX_FPRIME_DX,
+            false => APPROX_FPRIME_REL_DX * x_i.abs(),
+        };
+
+        let mut x_up: Array1<f64> = x.clone();
+        let mut x_dn: Array1<f64> = x.clone();
+        x_up[i] = x_i + dx;
+        x_dn[i] = x_i - dx;
+
+        let fx_up: Array1<f64> = f(&x_up);
+        let fx_dn: Array1<f64> = f(&x_dn);
+
+        let jac_x_i: Array1<f64> = (&fx_up - &fx_dn) / (2.0 * dx);
+
+        // if verbose {
+        //     Python::attach(|py| {
+        //         py.detach(|| {
+        //             eprintln!("i={}, x_i={:e}, dx={:e}", i, x_i, dx);
+        //             eprintln!("x_up={}", &x_up);
+        //             eprintln!("x_dn={}", &x_dn);
+        //             eprintln!("fx_up={}", &fx_up);
+        //             eprintln!("fx_dn={}", &fx_dn);
+        //             eprintln!("jac_x_i={}", &jac_x_i);
+        //         })
+        //     });
+        // }
+
+        jac_x.column_mut(i).assign(&jac_x_i);
+    }
+
+    jac_x
+}
+
+fn condition_number(mat: &Array2<f64>) -> f64 {
+    let (_, s, _) = mat.svd(false, false).unwrap();
+
+    s[0] / s[s.len() - 1]
+}
+
+/// Find the root of the linear problem using Damped Least squares with a constant regularization term
+pub fn find_root_multi<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let mut x: Array1<f64> = x_0.clone();
+    let mut f_x: Array1<f64> = f(&x);
+    let mut err: f64 = f_x.abs().mean().unwrap();
+    let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
+    let mut errors: Vec<f64> = Vec::with_capacity(MULTI_MAXITER + 1);
+    let mut xs: Vec<Array1<f64>> = vec![x.clone()];
+    let mut fxs: Vec<Array1<f64>> = vec![f_x.clone()];
+    let mut jacobians: Vec<Array2<f64>> = Vec::new();
+    errors.push(err);
+
+    for i in 0..MULTI_MAXITER {
+        if err <= MULTI_TOL {
+            return Ok(x);
+        }
+
+        jac_x = approx_fprime(f, &x, verbose);
+        jacobians.push(jac_x.clone());
+        let kappa = condition_number(&jac_x);
+
+        if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
+            let final_state = OptimizerState {
+                iteration: i,
+                final_x: x.clone(),
+                last_f_x: f_x.clone(),
+                initial_x: x_0.clone(),
+                jacobian: jac_x.clone(),
+                error: err,
+                errors: errors,
+                xs,
+                fxs,
+                jacobians,
+                lambdas: Vec::new(),
+            };
+
+            let err = OptimizationError::from_state(
+                final_state,
+                "Got NaN values in an array".to_string(),
+            );
+            return Err(PyErr::new::<OptimizationError, _>(err));
+        }
+
+        let jac_x_t = jac_x.t();
+        let mut a_mat: Array2<f64> = jac_x_t.dot(&jac_x);
+        for i in 0..a_mat.nrows() {
+            a_mat[(i, i)] += TIKHONOV_VAL;
+        }
+        let b: Array1<f64> = jac_x_t.dot(&f_x);
+
+        let step_res = match kappa < 1e8 {
+            true => jac_x.solve(&f_x),
+            false => a_mat.solve(&b),
+        };
+
+        let step: Array1<f64> = match step_res {
+            Ok(v) => v,
+            Err(e) => {
+                let final_state = OptimizerState {
+                    iteration: i,
+                    final_x: x.clone(),
+                    last_f_x: f_x.clone(),
+                    initial_x: x_0.clone(),
+                    jacobian: jac_x.clone(),
+                    error: err,
+                    errors,
+                    xs,
+                    fxs,
+                    jacobians,
+                    lambdas: Vec::new(),
+                };
+
+                let err = OptimizationError::from_state(
+                    final_state,
+                    format!("Linear algebra error: {}", e.to_string()),
+                );
+                return Err(PyErr::new::<OptimizationError, _>(err));
+            }
+        };
+
+        // let step: Array1<f64> = match jac_x.solve(&f_x) {
+        //     Ok(v) => v,
+        //     Err(e) => {
+        //         // First try failed, try with damped iteration
+
+        //         match a_mat.solve(&b) {
+        //             Ok(v) => v,
+        //             Err(e) => {
+        //                 // Both attempts failed, have to return exception
+        //                 let final_state = OptimizerState {
+        //                     iteration: i,
+        //                     final_x: x.clone(),
+        //                     last_f_x: f_x.clone(),
+        //                     initial_x: x_0.clone(),
+        //                     jacobian: jac_x.clone(),
+        //                     error: err,
+        //                     errors,
+        //                 };
+        //                 let err = OptimizationError::from_state(
+        //                     final_state,
+        //                     format!("Linear algebra error: {}", e.to_string()),
+        //                 );
+        //                 return Err(PyErr::new::<OptimizationError, _>(err));
+        //             }
+        //         }
+        //     }
+        // };
+        let x_new: Array1<f64> = &x - &step;
+        x = x_new;
+        f_x = f(&x);
+        err = f_x.abs().mean().unwrap();
+        errors.push(err);
+
+        xs.push(x.clone());
+        fxs.push(f_x.clone());
+
+        if verbose {
+            Python::attach(|py| {
+                py.detach(|| {
+                    eprintln!("x after i={}: {}", i, &x);
+                    eprintln!("err: {}", err);
+                    eprintln!("\n\n");
+                })
+            });
+        }
+    }
+
+    let final_state = OptimizerState {
+        iteration: MULTI_MAXITER,
+        final_x: x.clone(),
+        last_f_x: f_x.clone(),
+        initial_x: x_0.clone(),
+        jacobian: jac_x.clone(),
+        error: err,
+        errors,
+        xs,
+        fxs,
+        jacobians,
+        lambdas: Vec::new(),
+    };
+
+    let err = OptimizationError::from_state(final_state, "Exceeded maximum".to_string());
+    Err(PyErr::new::<OptimizationError, _>(err))
+}
+
+pub fn levenberg_marquardt<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let mut x: Array1<f64> = x_0.clone();
+    let mut f_x: Array1<f64> = f(&x);
+    let mut err: f64 = f_x.abs().mean().unwrap();
+    let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
+    let mut errors: Vec<f64> = Vec::with_capacity(MULTI_MAXITER + 1);
+    let mut xs: Vec<Array1<f64>> = vec![x.clone()];
+    let mut fxs: Vec<Array1<f64>> = vec![f_x.clone()];
+    let mut jacobians: Vec<Array2<f64>> = Vec::new();
+    let mut lambda = 1e-6;
+    let mut lambdas: Vec<f64> = vec![lambda];
+    errors.push(err);
+
+    for i in 0..MULTI_MAXITER {
+        if err <= MULTI_TOL {
+            return Ok(x);
+        }
+
+        jac_x = approx_fprime(f, &x, verbose);
+        jacobians.push(jac_x.clone());
+
+        if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
+            let final_state = OptimizerState {
+                iteration: i,
+                final_x: x.clone(),
+                last_f_x: f_x.clone(),
+                initial_x: x_0.clone(),
+                jacobian: jac_x.clone(),
+                error: err,
+                errors,
+                xs,
+                fxs,
+                jacobians,
+                lambdas,
+            };
+
+            let err = OptimizationError::from_state(
+                final_state,
+                "Got NaN values in an array".to_string(),
+            );
+            return Err(PyErr::new::<OptimizationError, _>(err));
+        }
+
+        let jac_x_t = jac_x.t();
+        let mut a_mat: Array2<f64> = jac_x_t.dot(&jac_x);
+
+        for i in 0..a_mat.nrows() {
+            a_mat[(i, i)] += lambda * a_mat[(i, i)].max(1e-12);
+        }
+
+        let b: Array1<f64> = jac_x_t.dot(&f_x);
+
+        let step: Array1<f64> = match a_mat.solve(&b) {
+            Ok(v) => v,
+            Err(e) => {
+                let final_state = OptimizerState {
+                    iteration: i,
+                    final_x: x.clone(),
+                    last_f_x: f_x.clone(),
+                    initial_x: x_0.clone(),
+                    jacobian: jac_x.clone(),
+                    error: err,
+                    errors,
+                    xs,
+                    fxs,
+                    jacobians,
+                    lambdas,
+                };
+
+                let err = OptimizationError::from_state(
+                    final_state,
+                    format!("Linear algebra error: {}", e.to_string()),
+                );
+                return Err(PyErr::new::<OptimizationError, _>(err));
+            }
+        };
+
+        let x_test: Array1<f64> = &x - &step;
+        let f_x_test: Array1<f64> = f(&x_test);
+        let err_test: f64 = f_x_test.abs().mean().unwrap();
+
+        if err_test < err {
+            x = x_test;
+            f_x = f_x_test;
+            err = err_test;
+            lambda /= 10.0;
+        } else {
+            lambda *= 10.0;
+        }
+
+        // let x_new: Array1<f64> = &x - &step;
+        // x = x_new;
+        // f_x = f(&x);
+        // err = f_x.abs().mean().unwrap();
+        errors.push(err);
+
+        xs.push(x.clone());
+        fxs.push(f_x.clone());
+        lambdas.push(lambda);
+
+        if verbose {
+            Python::attach(|py| {
+                py.detach(|| {
+                    eprintln!("x after i={}: {}", i, &x);
+                    eprintln!("err: {}", err);
+                    eprintln!("\n\n");
+                })
+            });
+        }
+    }
+
+    let final_state = OptimizerState {
+        iteration: MULTI_MAXITER,
+        final_x: x.clone(),
+        last_f_x: f_x.clone(),
+        initial_x: x_0.clone(),
+        jacobian: jac_x.clone(),
+        error: err,
+        errors,
+        xs,
+        fxs,
+        jacobians,
+        lambdas,
+    };
+
+    let err = OptimizationError::from_state(final_state, "Exceeded maximum".to_string());
+    Err(PyErr::new::<OptimizationError, _>(err))
+}
+
+pub fn matmul(a: &Array2<f64>, x: &Array1<f64>) -> Result<Array1<f64>, MatMulError> {
+    let n_out = a.shape()[0];
+    let mut output: Array1<f64> = Array1::zeros(n_out);
+
+    if a.shape()[1] != x.shape()[0] {
+        return Err(MatMulError);
+    }
+
+    for i in 0..n_out {
+        let mut row_sum = 0.0;
+        for (j, x_j) in x.iter().enumerate() {
+            row_sum += a[(i, j)] * x_j;
+        }
+
+        output[i] = row_sum;
+    }
+
+    Ok(output)
+}
+
 /// Calculate the null space using Scipy
 pub fn null_space_scipy(mat: &Array2<f64>) -> PyResult<Array2<f64>> {
     let res: PyResult<Array2<f64>> = Python::attach(|py| {
@@ -411,154 +721,4 @@ pub fn pinv_scipy(mat: &Array2<f64>) -> PyResult<Array2<f64>> {
     });
 
     res
-}
-
-pub fn approx_fprime<F>(f: F, x: &Array1<f64>, verbose: bool) -> Array2<f64>
-where
-    F: Fn(&Array1<f64>) -> Array1<f64>,
-{
-    let n: usize = x.len();
-    let mut jac_x: Array2<f64> = Array2::zeros((n, n));
-
-    for (i, x_i) in x.iter().enumerate() {
-        let dx = match x_i.abs() < F_PRIME_MIN_VAL {
-            true => APPROX_FPRIME_DX,
-            false => APPROX_FPRIME_REL_DX * x_i.abs(),
-        };
-
-        let mut x_up: Array1<f64> = x.clone();
-        let mut x_dn: Array1<f64> = x.clone();
-        x_up[i] = x_i + dx;
-        x_dn[i] = x_i - dx;
-
-        let fx_up: Array1<f64> = f(&x_up);
-        let fx_dn: Array1<f64> = f(&x_dn);
-
-        let jac_x_i: Array1<f64> = (&fx_up - &fx_dn) / (2.0 * dx);
-
-        if verbose {
-            Python::attach(|py| {
-                py.detach(|| {
-                    eprintln!("i={}, x_i={:e}, dx={:e}", i, x_i, dx);
-                    eprintln!("x_up={}", &x_up);
-                    eprintln!("x_dn={}", &x_dn);
-                    eprintln!("fx_up={}", &fx_up);
-                    eprintln!("fx_dn={}", &fx_dn);
-                    eprintln!("jac_x_i={}", &jac_x_i);
-                })
-            });
-        }
-
-        jac_x.column_mut(i).assign(&jac_x_i);
-    }
-
-    jac_x
-}
-
-/// Find the root of the linear problem using Damped Least squares with a constant regularization term
-pub fn find_root_multi<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
-where
-    F: Fn(&Array1<f64>) -> Array1<f64>,
-{
-    let mut x: Array1<f64> = x_0.clone();
-    let mut f_x: Array1<f64> = f(&x);
-    let mut err: f64 = f_x.abs().mean().unwrap();
-    let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
-
-    for i in 0..MULTI_MAXITER {
-        if err <= MULTI_TOL {
-            return Ok(x);
-        }
-
-        jac_x = approx_fprime(f, &x, verbose);
-        let jac_x_t = jac_x.t();
-        let mut a_mat: Array2<f64> = jac_x_t.dot(&jac_x);
-        for i in 0..a_mat.nrows() {
-            a_mat[(i, i)] += TIKHONOV_LAMBDA;
-        }
-        let b: Array1<f64> = jac_x_t.dot(&f_x);
-
-        if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
-            let final_state = OptimizerState {
-                iteration: i,
-                final_x: x.clone(),
-                last_f_x: f_x.clone(),
-                initial_x: x_0.clone(),
-                jacobian: jac_x.clone(),
-                error: err,
-            };
-            let err = OptimizationError::from_state(
-                final_state,
-                "Got NaN values in an array".to_string(),
-            );
-            return Err(PyErr::new::<OptimizationError, _>(err));
-        }
-
-        let step: Array1<f64> = match a_mat.solve(&b) {
-            Ok(v) => v,
-            Err(e) => {
-                return {
-                    let final_state = OptimizerState {
-                        iteration: i,
-                        final_x: x.clone(),
-                        last_f_x: f_x.clone(),
-                        initial_x: x_0.clone(),
-                        jacobian: jac_x.clone(),
-                        error: err,
-                    };
-                    let err = OptimizationError::from_state(
-                        final_state,
-                        format!("Linear algebra error: {}", e.to_string()),
-                    );
-                    Err(PyErr::new::<OptimizationError, _>(err))
-                }
-            }
-        };
-        let x_new: Array1<f64> = &x - &step;
-        x = x_new;
-        f_x = f(&x);
-        err = (f_x.pow2()).mean().unwrap();
-
-        if verbose {
-            Python::attach(|py| {
-                py.detach(|| {
-                    eprintln!("x after i={}: {}", i, &x);
-                    eprintln!("err: {}", err);
-                    eprintln!("\n\n");
-                })
-            });
-        }
-    }
-
-    let final_state = OptimizerState {
-        iteration: MULTI_MAXITER,
-        final_x: x.clone(),
-        last_f_x: f_x.clone(),
-        initial_x: x_0.clone(),
-        jacobian: jac_x.clone(),
-        error: err,
-    };
-
-    let err = OptimizationError::from_state(final_state, "Exceeded maximum".to_string());
-    Err(PyErr::new::<OptimizationError, _>(err))
-}
-
-pub fn matmul(a: &Array2<f64>, x: &Array1<f64>) -> Result<Array1<f64>, MatMulError> {
-    let n_out = a.shape()[0];
-    let mut output: Array1<f64> = Array1::zeros(n_out);
-
-    if a.shape()[1] != x.shape()[0] {
-        return Err(MatMulError);
-    }
-
-    for i in 0..n_out {
-        let mut row_sum = 0.0;
-        for (j, x_j) in x.iter().enumerate() {
-            row_sum += a[(i, j)] * x_j;
-        }
-
-        output[i] = row_sum;
-    }
-
-    Ok(output)
 }

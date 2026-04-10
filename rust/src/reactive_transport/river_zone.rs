@@ -173,7 +173,7 @@ impl RiverZone {
 #[pymethods]
 impl RiverZone {
     #[new]
-    #[pyo3(signature = (network, params, do_reactions = true, do_speciation = true, name = "unnamed".to_string()))]
+    #[pyo3(signature = (network, params, do_reactions = true, do_speciation = true, name = "river".to_string()))]
     pub fn new<'py>(
         py: Python<'py>,
         network: ReactionNetwork,
@@ -467,7 +467,7 @@ impl RiverZone {
     }
 
     #[staticmethod]
-    #[pyo3(signature=(arr, network, do_reactions, do_speciation, name, natural_scales=true))]
+    #[pyo3(signature=(arr, network, do_reactions, do_speciation, name="river".to_string(), natural_scales=true))]
     fn from_array<'py>(
         py: Python<'py>,
         arr: PyReadonlyArray1<f64>,
