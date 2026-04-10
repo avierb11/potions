@@ -8,7 +8,7 @@ from typing import (
     Final,
     Optional,
 )
-
+import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
@@ -360,6 +360,7 @@ class Model(ReactiveTransportModel):
         num_expected: int = (
             num_hydro_params + num_dim_params + num_min_params + num_river_params
         )
+        num_rt_zone_params: int = num_dim_params + num_min_params
 
         if arr.size != num_expected:
             raise PotionsError(
@@ -370,16 +371,18 @@ class Model(ReactiveTransportModel):
         if verbose:
             print(f"Number of zones in the model: {num_zones}")
             print(f"Number of hydrological parameters: {num_hydro_params}")
-            print(
-                f"Total number of reactive transport parameters: {
-                  num_dim_params}"
-            )
+            print(f"Number of mineral parameters: {num_hydro_params}")
+            print(f"Total number of dimension parameters: {num_dim_params}")
 
         # Split the main array into hydrologic and RT parts.
         # Slicing from the end is safer than calculating the hydro param count.
         hydro_params_arr: NDArray = arr[0:num_hydro_params]
-        rt_zone_params_arr: NDArray = arr[num_hydro_params:-num_river_params]
-        river_params_arr: NDArray = arr[-num_river_params:]
+        rt_zone_params_arr: NDArray = arr[
+            num_hydro_params : num_hydro_params + num_rt_zone_params
+        ]
+        river_params_arr = np.array([])
+        if num_river_params > 0:
+            river_params_arr: NDArray = arr[-num_river_params:]
 
         if verbose:
             print(f"Hydrological parameters: {hydro_params_arr}")

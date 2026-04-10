@@ -544,7 +544,7 @@ where
         }
 
         jac_x = approx_fprime(f, &x, verbose);
-        jacobians.push(jac_x.clone());
+        // jacobians.push(jac_x.clone());
 
         if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
             let final_state = OptimizerState {
@@ -621,8 +621,8 @@ where
         // err = f_x.abs().mean().unwrap();
         errors.push(err);
 
-        xs.push(x.clone());
-        fxs.push(f_x.clone());
+        // xs.push(x.clone());
+        // fxs.push(f_x.clone());
         lambdas.push(lambda);
 
         if verbose {
