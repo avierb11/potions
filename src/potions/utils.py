@@ -130,13 +130,13 @@ def objective_function(
     cls,
     forc: ForcingData,
     meas_streamflow: Series,
-    metric: Literal["kge", "nse", "combined"] | Callable[[dict], float],
+    metric: Literal["kge", "nse", "combined"] | Callable[[HydroModelResults], float],
     print_value: bool,
 ) -> float:
-    model = cls.hydro_from_array(x, latent=True)
+    model = cls.hydro_from_array(x)
 
     try:
-        results: dict[str, float | DataFrame] = model.run_hydro_model(
+        results: HydroModelResults = model.run_hydro_model(
             init_state=cls.default_hydro_init_state(),
             forc=forc,
             meas_streamflow=meas_streamflow,
@@ -146,15 +146,15 @@ def objective_function(
         obj_val: float
 
         if metric == "kge":
-            obj_val = -results["objective_functions"]["kge"]  # type: ignore
+            obj_val = -results.objective_functions["kge"]  # type: ignore
         elif metric == "nse":
-            obj_val = -results["objective_functions"]["nse"]  # type: ignore
+            obj_val = -results.objective_functions["nse"]  # type: ignore
         elif metric == "combined":
             obj_val = (
-                -results["objective_functions"]["kge"]  # type: ignore
-                - results["objective_functions"]["nse"]  # type: ignore
-                - results["objective_functions"]["log_nse"]  # type: ignore
-                - results["objective_functions"]["log_kge"]  # type: ignore
+                -results.objective_functions["kge"]  # type: ignore
+                - results.objective_functions["nse"]  # type: ignore
+                - results.objective_functions["log_nse"]  # type: ignore
+                - results.objective_functions["log_kge"]  # type: ignore
             )  # type: ignore
         else:
             obj_val = metric(results)
@@ -162,9 +162,10 @@ def objective_function(
         if print_value and isinstance(obj_val, str):
             print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
 
-        return obj_val
-    except Exception:
+        return obj_val  # type: ignore
+    except Exception as e:
         print(f"Failed with parameters {x}")
+        print(e)
         return np.inf
 
 

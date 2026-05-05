@@ -11,7 +11,7 @@ use crate::{celsius, mm_water, molar, moles};
 
 pub const ZERO_CONC: f64 = 1e-20;
 
-#[pyclass(from_py_object)]
+#[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug)]
 pub struct LapseRateParameters {
     #[pyo3(get, set)]
@@ -58,7 +58,7 @@ impl LapseRateParameters {
     }
 }
 
-#[pyclass(from_py_object)]
+#[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug)]
 pub struct HydroForcing {
     #[pyo3(get, set)]
@@ -107,9 +107,24 @@ impl HydroForcing {
     pub fn copy(&self) -> Self {
         self.clone()
     }
+
+    pub fn __getstate__(&self) -> (f64, f64, f64, f64) {
+        (self.precip, self.temp, self.pet, self.q_in)
+    }
+
+    pub fn __setstate__(&mut self, state: (f64, f64, f64, f64)) -> () {
+        self.precip = state.0;
+        self.temp = state.1;
+        self.pet = state.2;
+        self.q_in = state.3;
+    }
+
+    pub fn __getnewargs__(&self) -> (f64, f64, f64, f64) {
+        (self.precip, self.temp, self.pet, self.q_in)
+    }
 }
 
-#[pyclass(from_py_object)]
+#[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug)]
 pub struct HydroStep {
     #[pyo3(get, set)]
@@ -195,12 +210,59 @@ impl HydroStep {
         diffs.iter().map(|x| x.abs()).all(|x| x <= 1e-12)
     }
 
+    pub fn __getstate__(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+        (
+            self.state,
+            self.forc_flux,
+            self.lat_flux,
+            self.vert_flux,
+            self.vap_flux,
+            self.q_in,
+            self.lat_flux_ext,
+            self.vert_flux_ext,
+        )
+    }
+
+    pub fn __setstate__(&mut self, state: (f64, f64, f64, f64, f64, f64, f64, f64)) {
+        let (
+            state_val,
+            forc_flux,
+            lat_flux,
+            vert_flux,
+            vap_flux,
+            q_in,
+            lat_flux_ext,
+            vert_flux_ext,
+        ) = state;
+        self.state = state_val;
+        self.forc_flux = forc_flux;
+        self.lat_flux = lat_flux;
+        self.vert_flux = vert_flux;
+        self.vap_flux = vap_flux;
+        self.q_in = q_in;
+        self.lat_flux_ext = lat_flux_ext;
+        self.vert_flux_ext = vert_flux_ext;
+    }
+
+    pub fn __getnewargs__(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+        (
+            self.state,
+            self.forc_flux,
+            self.lat_flux,
+            self.vert_flux,
+            self.vap_flux,
+            self.q_in,
+            self.lat_flux_ext,
+            self.vert_flux_ext,
+        )
+    }
+
     pub fn copy(&self) -> Self {
         self.clone()
     }
 }
 
-#[pyclass(from_py_object)]
+#[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug)]
 pub struct RtForcing {
     pub _conc_in: Array1<molar>,
@@ -232,6 +294,44 @@ impl RtForcing {
             s_w,
             z_w,
         })
+    }
+
+    pub fn __getstate__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64, f64) {
+        (
+            self._conc_in.to_pyarray(py),
+            self.hydro_step.clone(),
+            self.hydro_forc.clone(),
+            self.s_w,
+            self.z_w,
+        )
+    }
+
+    pub fn __setstate__(
+        &mut self,
+        state: (PyReadonlyArray1<f64>, HydroStep, HydroForcing, f64, f64),
+    ) {
+        let (conc_in, hydro_step, hydro_forc, s_w, z_w) = state;
+        self._conc_in = conc_in.to_owned_array();
+        self.hydro_step = hydro_step;
+        self.hydro_forc = hydro_forc;
+        self.s_w = s_w;
+        self.z_w = z_w;
+    }
+
+    pub fn __getnewargs__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64, f64) {
+        (
+            self._conc_in.to_pyarray(py),
+            self.hydro_step.clone(),
+            self.hydro_forc.clone(),
+            self.s_w,
+            self.z_w,
+        )
     }
 
     #[getter]
@@ -287,7 +387,7 @@ impl RtForcing {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "potions.core")]
 #[derive(Debug)]
 pub struct RtStep {
     #[pyo3(get, set)]
@@ -308,6 +408,115 @@ pub struct RtStep {
     pub vert_mass: Py<PyArray1<moles>>,
     #[pyo3(get, set)]
     pub mineral_rates: Py<PyArray1<f64>>,
+}
+
+#[pymethods]
+impl RtStep {
+    #[new]
+    pub fn new(
+        state: Py<PyArray1<f64>>,
+        total_moles: Py<PyArray1<f64>>,
+        conc_in: Py<PyArray1<f64>>,
+        mass_in: Py<PyArray1<f64>>,
+        lat_conc: Py<PyArray1<f64>>,
+        vert_conc: Py<PyArray1<f64>>,
+        lat_mass: Py<PyArray1<f64>>,
+        vert_mass: Py<PyArray1<f64>>,
+        mineral_rates: Py<PyArray1<f64>>,
+    ) -> Self {
+        Self {
+            state,
+            total_moles,
+            conc_in,
+            mass_in,
+            lat_conc,
+            vert_conc,
+            lat_mass,
+            vert_mass,
+            mineral_rates,
+        }
+    }
+
+    pub fn __getstate__(
+        &self,
+        py: Python<'_>,
+    ) -> (
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+    ) {
+        (
+            self.state.clone_ref(py),
+            self.total_moles.clone_ref(py),
+            self.conc_in.clone_ref(py),
+            self.mass_in.clone_ref(py),
+            self.lat_conc.clone_ref(py),
+            self.vert_conc.clone_ref(py),
+            self.lat_mass.clone_ref(py),
+            self.vert_mass.clone_ref(py),
+            self.mineral_rates.clone_ref(py),
+        )
+    }
+
+    pub fn __setstate__(
+        &mut self,
+        state: (
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+            Py<PyArray1<f64>>,
+        ),
+    ) {
+        let (
+            state_val,
+            total_moles,
+            conc_in,
+            mass_in,
+            lat_conc,
+            vert_conc,
+            lat_mass,
+            vert_mass,
+            mineral_rates,
+        ) = state;
+
+        self.state = state_val;
+        self.total_moles = total_moles;
+        self.conc_in = conc_in;
+        self.mass_in = mass_in;
+        self.lat_conc = lat_conc;
+        self.vert_conc = vert_conc;
+        self.lat_mass = lat_mass;
+        self.vert_mass = vert_mass;
+        self.mineral_rates = mineral_rates;
+    }
+
+    pub fn __getnewargs__(
+        &self,
+        py: Python<'_>,
+    ) -> (
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+        Py<PyArray1<f64>>,
+    ) {
+        self.__getstate__(py)
+    }
 }
 
 #[pyclass(from_py_object)]

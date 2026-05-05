@@ -31,6 +31,18 @@ pub struct ReactionNetwork {
     pub species: PyDataFrame,
 }
 
+impl ReactionNetwork {
+    pub fn mobile_mask_rust(&self) -> Array1<bool> {
+        let mut mask: Array1<bool> = Array1::from_elem(self.num_species(), true);
+
+        for i in self.num_aqueous_species()..mask.len() {
+            mask[i] = false;
+        }
+
+        mask
+    }
+}
+
 #[pymethods]
 impl ReactionNetwork {
     #[new]
@@ -126,7 +138,7 @@ impl ReactionNetwork {
         }
 
         if self.has_exchange() {
-            charge_vec.push(-1.0);
+            charge_vec.push(0.0);
             for exch in self.exchange_species.iter() {
                 charge_vec.push(exch.charge);
             }
@@ -805,5 +817,11 @@ impl ReactionNetwork {
             self.mineral_kinetics.clone(),
             self.exchange_species.clone(),
         )
+    }
+
+    // All of the species that are mobile
+    #[getter]
+    pub fn mobile_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.mobile_mask_rust().to_pyarray(py)
     }
 }

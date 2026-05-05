@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ndarray_linalg::{Solve, SVD};
+use ndarray_linalg::{LeastSquaresSvd, Solve, SVD};
 use numpy::{
     ndarray::{Array1, Array2},
     PyArray2, PyArrayMethods,
@@ -16,7 +16,7 @@ use crate::{common_types::HydroForcing, hydro::HydrologicZone};
 const FIND_ROOT_TOL: f64 = 1e-6;
 const FIND_ROOT_MAXITER: usize = 100;
 const MULTI_MAXITER: usize = 100;
-const MULTI_TOL: f64 = 1e-6;
+const MULTI_TOL: f64 = 1e-16;
 const APPROX_FPRIME_DX: f64 = 1e-8;
 const APPROX_FPRIME_REL_DX: f64 = 1e-3;
 const F_PRIME_MIN_VAL: f64 = 1e-22;
@@ -332,35 +332,28 @@ where
 {
     let n: usize = x.len();
     let mut jac_x: Array2<f64> = Array2::zeros((n, n));
+    const EPSILON: f64 = f64::EPSILON;
+    let rel_step = EPSILON.sqrt();
+
+    let f_x: Array1<f64> = f(x);
 
     for (i, x_i) in x.iter().enumerate() {
-        let dx = match x_i.abs() < F_PRIME_MIN_VAL {
-            true => APPROX_FPRIME_DX,
-            false => APPROX_FPRIME_REL_DX * x_i.abs(),
-        };
+        // let dx = match x_i.abs() < F_PRIME_MIN_VAL {
+        //     true => APPROX_FPRIME_DX,
+        //     false => APPROX_FPRIME_REL_DX * x_i.abs(),
+        // };
+        let dx = rel_step * x_i.abs().max(1.0);
+        let inv_dx = 1.0 / dx;
 
         let mut x_up: Array1<f64> = x.clone();
-        let mut x_dn: Array1<f64> = x.clone();
+        // let mut x_dn: Array1<f64> = x.clone();
         x_up[i] = x_i + dx;
-        x_dn[i] = x_i - dx;
+        // x_dn[i] = x_i - dx;
 
         let fx_up: Array1<f64> = f(&x_up);
-        let fx_dn: Array1<f64> = f(&x_dn);
+        // let fx_dn: Array1<f64> = f(&x_dn);
 
-        let jac_x_i: Array1<f64> = (&fx_up - &fx_dn) / (2.0 * dx);
-
-        // if verbose {
-        //     Python::attach(|py| {
-        //         py.detach(|| {
-        //             eprintln!("i={}, x_i={:e}, dx={:e}", i, x_i, dx);
-        //             eprintln!("x_up={}", &x_up);
-        //             eprintln!("x_dn={}", &x_dn);
-        //             eprintln!("fx_up={}", &fx_up);
-        //             eprintln!("fx_dn={}", &fx_dn);
-        //             eprintln!("jac_x_i={}", &jac_x_i);
-        //         })
-        //     });
-        // }
+        let jac_x_i: Array1<f64> = inv_dx * (&fx_up - &f_x);
 
         jac_x.column_mut(i).assign(&jac_x_i);
     }
@@ -421,16 +414,8 @@ where
         }
 
         let jac_x_t = jac_x.t();
-        let mut a_mat: Array2<f64> = jac_x_t.dot(&jac_x);
-        for i in 0..a_mat.nrows() {
-            a_mat[(i, i)] += TIKHONOV_VAL;
-        }
-        let b: Array1<f64> = jac_x_t.dot(&f_x);
 
-        let step_res = match kappa < 1e8 {
-            true => jac_x.solve(&f_x),
-            false => a_mat.solve(&b),
-        };
+        let step_res = jac_x.solve(&f_x);
 
         let step: Array1<f64> = match step_res {
             Ok(v) => v,
@@ -457,33 +442,6 @@ where
             }
         };
 
-        // let step: Array1<f64> = match jac_x.solve(&f_x) {
-        //     Ok(v) => v,
-        //     Err(e) => {
-        //         // First try failed, try with damped iteration
-
-        //         match a_mat.solve(&b) {
-        //             Ok(v) => v,
-        //             Err(e) => {
-        //                 // Both attempts failed, have to return exception
-        //                 let final_state = OptimizerState {
-        //                     iteration: i,
-        //                     final_x: x.clone(),
-        //                     last_f_x: f_x.clone(),
-        //                     initial_x: x_0.clone(),
-        //                     jacobian: jac_x.clone(),
-        //                     error: err,
-        //                     errors,
-        //                 };
-        //                 let err = OptimizationError::from_state(
-        //                     final_state,
-        //                     format!("Linear algebra error: {}", e.to_string()),
-        //                 );
-        //                 return Err(PyErr::new::<OptimizationError, _>(err));
-        //             }
-        //         }
-        //     }
-        // };
         let x_new: Array1<f64> = &x - &step;
         x = x_new;
         f_x = f(&x);
@@ -528,7 +486,8 @@ where
 {
     let mut x: Array1<f64> = x_0.clone();
     let mut f_x: Array1<f64> = f(&x);
-    let mut err: f64 = f_x.abs().mean().unwrap();
+    // let mut err: f64 = f_x.abs().mean().unwrap();
+    let mut err: f64 = 0.5 * f_x.dot(&f_x);
     let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
     let mut errors: Vec<f64> = Vec::with_capacity(MULTI_MAXITER + 1);
     let mut xs: Vec<Array1<f64>> = vec![x.clone()];
@@ -544,7 +503,6 @@ where
         }
 
         jac_x = approx_fprime(f, &x, verbose);
-        // jacobians.push(jac_x.clone());
 
         if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
             let final_state = OptimizerState {
@@ -569,61 +527,80 @@ where
         }
 
         let jac_x_t = jac_x.t();
-        let mut a_mat: Array2<f64> = jac_x_t.dot(&jac_x);
+        let a_mat_base: Array2<f64> = jac_x_t.dot(&jac_x);
+        let diag_a = a_mat_base.diag().to_owned();
+        let mut a_mat_damped = a_mat_base.clone();
 
-        for i in 0..a_mat.nrows() {
-            a_mat[(i, i)] += lambda * a_mat[(i, i)].max(1e-12);
+        for i in 0..a_mat_damped.nrows() {
+            a_mat_damped[(i, i)] += lambda * diag_a[i];
         }
 
         let b: Array1<f64> = jac_x_t.dot(&f_x);
 
-        let step: Array1<f64> = match a_mat.solve(&b) {
+        let step: Array1<f64> = match a_mat_damped.solve(&b) {
             Ok(v) => v,
-            Err(e) => {
-                let final_state = OptimizerState {
-                    iteration: i,
-                    final_x: x.clone(),
-                    last_f_x: f_x.clone(),
-                    initial_x: x_0.clone(),
-                    jacobian: jac_x.clone(),
-                    error: err,
-                    errors,
-                    xs,
-                    fxs,
-                    jacobians,
-                    lambdas,
-                };
-
-                let err = OptimizationError::from_state(
-                    final_state,
-                    format!("Linear algebra error: {}", e.to_string()),
-                );
-                return Err(PyErr::new::<OptimizationError, _>(err));
-            }
+            Err(e) => match a_mat_damped.least_squares(&b) {
+                Ok(v) => v.solution,
+                Err(e2) => {
+                    let final_state = OptimizerState {
+                        iteration: i,
+                        final_x: x.clone(),
+                        last_f_x: f_x.clone(),
+                        initial_x: x_0.clone(),
+                        jacobian: jac_x.clone(),
+                        error: err,
+                        errors,
+                        xs,
+                        fxs,
+                        jacobians,
+                        lambdas,
+                    };
+                    let err = OptimizationError::from_state(
+                        final_state,
+                        format!("Linear algebra error: {}", e.to_string()),
+                    );
+                    return Err(PyErr::new::<OptimizationError, _>(err));
+                }
+            },
         };
 
         let x_test: Array1<f64> = &x - &step;
         let f_x_test: Array1<f64> = f(&x_test);
-        let err_test: f64 = f_x_test.abs().mean().unwrap();
+        // let err_test: f64 = f_x_test.abs().mean().unwrap();
+        let err_test: f64 = 0.5 * f_x_test.dot(&f_x_test);
 
-        if err_test < err {
+        // Calculate gain ratio
+        let actual_reduction = err - err_test;
+        let predicted_reduction = step.dot(&b) - 0.5 * step.dot(&a_mat_base.dot(&step));
+        let rho = if predicted_reduction.abs() < 1e-12 {
+            0.0
+        } else {
+            actual_reduction / predicted_reduction
+        };
+
+        if rho > 0.0 {
+            // The step was good, accept it
             x = x_test;
             f_x = f_x_test;
             err = err_test;
-            lambda /= 10.0;
+
+            // Update lambda based on how good the prediction was
+            lambda *= ((1.0 / 3.0) as f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
+            lambda = lambda.max(1e-16); // Lower bound for lambda
+
+            // Only record state on successful steps
+            errors.push(err);
+            xs.push(x.clone());
+            fxs.push(f_x.clone());
+            lambdas.push(lambda);
+            jacobians.push(jac_x.clone());
         } else {
-            lambda *= 10.0;
+            // The step was bad, reject it and become more cautious
+            lambda *= 2.0;
+            lambda = lambda.min(1e16); // Upper bound for lambda
+
+            // Do not record the state, as we haven't moved
         }
-
-        // let x_new: Array1<f64> = &x - &step;
-        // x = x_new;
-        // f_x = f(&x);
-        // err = f_x.abs().mean().unwrap();
-        errors.push(err);
-
-        // xs.push(x.clone());
-        // fxs.push(f_x.clone());
-        lambdas.push(lambda);
 
         if verbose {
             Python::attach(|py| {

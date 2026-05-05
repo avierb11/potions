@@ -28,8 +28,6 @@ __all__ = [
     "HydrologicZone",
     "SnowZone",
     "SurfaceZone",
-    "StepResult",
-    "Zone",
     "BatchResults",
     "ForcingData",
     "HbvLateralModel",
@@ -69,6 +67,7 @@ __all__ = [
     "RiverDimensions",
     "RiverParameters",
     "RiverZone",
+    "WaterVolumeError",
 ]
 from .common_types import (
     ChemicalState,
@@ -132,6 +131,7 @@ from .model import (
     RtZoneConfiguration,
 )
 
+
 from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
 from .reactive_transport import (
     # ChemicalDatabase,
@@ -155,6 +155,7 @@ from .reactive_transport import (
     # RtStep,
     calculate_water_table_depth,
     calculate_moisture_fraction,
+    WaterVolumeError,
 )
 from .utils import objective_function, RtNumericalError, HydrologyNumericalError
 

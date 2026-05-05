@@ -9,7 +9,9 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{approx_fprime, levenberg_marquardt, matmul, null_space_scipy, pinv_scipy},
+    math::{
+        approx_fprime, find_root_multi, levenberg_marquardt, matmul, null_space_scipy, pinv_scipy,
+    },
     molar, molar_per_time,
 };
 const PARAMETERS_PER_MINERAL: usize = 4;
@@ -265,9 +267,9 @@ impl EquilibriumParameters {
         let initial_guess: Array1<f64> = Array1::zeros(c_tot.shape()[0]);
 
         // Solve the problem
-        match levenberg_marquardt(&f_to_solve, initial_guess, verbose) {
+        match find_root_multi(&f_to_solve, initial_guess.clone(), verbose) {
             Ok(v) => Ok(self.conc_func_rust(&v)),
-            Err(e) => Err(e),
+            Err(_) => levenberg_marquardt(&f_to_solve, initial_guess, verbose),
         }
     }
 }
@@ -711,6 +713,22 @@ impl MineralParameters {
             q_10: Array1::from_vec(q_10s),
             ssa: Array1::from_vec(ssas),
         })
+    }
+
+    pub fn get_ssa<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.ssa.to_pyarray(py);
+    }
+
+    pub fn get_sw_threshold<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.sw_threshold.to_pyarray(py);
+    }
+
+    pub fn get_sw_exp<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.sw_exp.to_pyarray(py);
+    }
+
+    pub fn get_q_10<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.q_10.to_pyarray(py);
     }
 }
 

@@ -214,9 +214,7 @@ class Model(ReactiveTransportModel):
                 cur_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 new_output_dir: str = f"{output_dir}.{cur_time}"
                 print(
-                    f"Specified directory at {output_dir} exists, saving to {
-                        new_output_dir
-                    }"
+                    f"Specified directory at {output_dir} exists, saving to {new_output_dir}"
                 )
                 output_dir = new_output_dir
 
@@ -380,9 +378,9 @@ class Model(ReactiveTransportModel):
         rt_zone_params_arr: NDArray = arr[
             num_hydro_params : num_hydro_params + num_rt_zone_params
         ]
-        river_params_arr = np.array([])
+        river_params_arr: np.ndarray = np.array([])
         if num_river_params > 0:
-            river_params_arr: NDArray = arr[-num_river_params:]
+            river_params_arr = arr[-num_river_params:]
 
         if verbose:
             print(f"Hydrological parameters: {hydro_params_arr}")

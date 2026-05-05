@@ -1,6 +1,6 @@
 use numpy::{
-    ndarray::{s, Array1},
-    PyArray1, PyArrayMethods, PyReadonlyArray1, ToPyArray,
+    ndarray::{s, Array1, Array2},
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray,
 };
 use polars::prelude::Float64Type;
 use pyo3::{
@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::levenberg_marquardt,
+    math::{approx_fprime, find_root_multi, levenberg_marquardt},
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -50,10 +50,21 @@ impl RtZone {
     fn mass_balance_ode_rust(&self, chms: &Array1<f64>, d: &RtForcing) -> Array1<molar_per_time> {
         let transport_rate_vec: Array1<molar_per_time> = self.transport_rate_rust(chms, d);
 
-        match self.do_reactions {
+        let mass_balance_vec: Array1<f64> = match self.do_reactions {
             true => transport_rate_vec + self.reaction_rate_rust(chms, d, false),
             false => transport_rate_vec,
-        }
+        };
+
+        // Get only the mobile species
+        // let num_mobile = self.network.num_aqueous_species();
+        // let mut mobile_mass_balance: Array1<f64> = Array1::zeros(num_mobile);
+
+        // for (i, c_i) in mass_balance_vec.into_iter().enumerate() {
+        //     mobile_mass_balance[i] = c_i;
+        // }
+
+        // mobile_mass_balance
+        mass_balance_vec
     }
 
     fn reaction_rate_rust(
@@ -85,9 +96,12 @@ impl RtZone {
         }
 
         let num_min: usize = self.monod.inhib_np.shape()[0];
+        let num_ads: usize = self.network.num_exchange_species();
+        let num_aq: usize = self.network.num_aqueous_species();
         let num_spec: usize = chms.len();
-        let min_start_ind: usize = num_spec - num_min;
-        let min_conc: Array1<molar> = chms.slice(s![min_start_ind..]).to_owned();
+        let min_start_ind: usize = num_aq;
+        let min_end_ind: usize = num_aq + num_min;
+        let min_conc: Array1<molar> = chms.slice(s![min_start_ind..min_end_ind]).to_owned();
 
         let mineral_conc_rates: Array1<molar_per_time> = 86_400.0
             * &self.misc.rate_const
@@ -177,6 +191,10 @@ impl RtZone {
         d: &RtForcing,
         dt_days: f64,
     ) -> Array1<f64> {
+        // if c_0.len() != conc.len() {
+        //     panic!("c_0 size: {}, conc size: {}", c_0.len(), conc.len());
+        // }
+
         let res = (c_0 - conc) + dt_days * self.mass_balance_ode_rust(conc, d);
 
         if cfg!(debug_assertions) {
@@ -186,6 +204,20 @@ impl RtZone {
         }
 
         res
+    }
+
+    pub fn jacobian_residual_function_rust(
+        &self,
+        c_0: &Array1<f64>,
+        conc: &Array1<f64>,
+        d: &RtForcing,
+        dt_days: f64,
+    ) -> Array2<f64> {
+        let f = |c: &Array1<f64>| self.residual_function_rust(c_0, c, d, dt_days);
+
+        let jac_x: Array2<f64> = approx_fprime(f, conc, false);
+
+        jac_x
     }
 
     pub fn solve_rt_step_rust(
@@ -198,7 +230,12 @@ impl RtZone {
     ) -> PyResult<Array1<f64>> {
         let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
 
-        let res = levenberg_marquardt(&residual, c_0.clone(), verbose);
+        let res = match find_root_multi(&residual, c_0.clone(), verbose) {
+            Ok(v) => Ok(v),
+            Err(_) => levenberg_marquardt(&residual, c_0.clone(), verbose),
+        };
+
+        // let res = levenberg_marquardt(&residual, c_0.clone(), verbose);
 
         res
     }
@@ -353,6 +390,20 @@ impl RtZone {
             .to_pyarray(py)
     }
 
+    pub fn jacobian_residual_function<'py>(
+        &self,
+        py: Python<'py>,
+        c_0: PyReadonlyArray1<f64>,
+        conc: PyReadonlyArray1<f64>,
+        d: &RtForcing,
+        dt_days: f64,
+    ) -> Bound<'py, PyArray2<f64>> {
+        let c_0_arr = c_0.to_owned_array();
+        let conc_arr = conc.to_owned_array();
+        self.jacobian_residual_function_rust(&c_0_arr, &conc_arr, d, dt_days)
+            .to_pyarray(py)
+    }
+
     #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
     pub fn solve_rt_step<'py>(
         &self,
@@ -382,6 +433,7 @@ impl RtZone {
         verbose: bool,
     ) -> PyResult<RtStep> {
         // Solve kinetic reactions first
+        let num_spec: usize = self.network.num_species();
         let c_0_arr: Array1<molar> = c_0.to_owned_array(); // Initial concentrations in the zone
         let c_in: &Array1<molar> = &d._conc_in;
         let tot_moles_init: Array1<moles> = self.get_tot_moles_rust(&c_0_arr, d); // Initial moles of each species at the start of the step
@@ -398,8 +450,19 @@ impl RtZone {
             x
         };
 
+        // let mobile_mask: Array1<bool> = self.network.mobile_mask_rust();
+
+        // let num_mobile = self.network.num_aqueous_species();
+        // let mut c_mobile = Array1::zeros(num_mobile);
+        // for i in 0..num_mobile {
+        //     c_mobile[i] = c_0_arr[i];
+        // }
         let c_after_rt: Array1<molar> =
             self.solve_rt_step_rust(py, &c_0_arr, d, dt_days, verbose)?;
+        // let mut c_after_rt = c_0_arr.clone();
+        // for (i, c_i) in c_mobile_after_rt.iter().enumerate() {
+        //     c_after_rt[i] = *c_i;
+        // }
 
         // dbg!(&c_after_rt);
         if verbose {
@@ -410,6 +473,14 @@ impl RtZone {
             false => c_after_rt.clone(),
             true => self.eq.solve_equilibrium_rust(&c_after_rt, verbose)?,
         };
+
+        if c_after_eq.len() != num_spec {
+            let msg = format!(
+                "c_after_eq has the wrong shape, should have length {}, but is {}",
+                num_spec, &c_after_eq
+            );
+            return Err(PyValueError::new_err(msg));
+        }
 
         if verbose {
             eprintln!("c_after_eq={}", &c_after_eq);

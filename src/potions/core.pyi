@@ -191,10 +191,10 @@ class ZoneDimensions:
 
 @dataclass
 class MineralParameters:
-    sw_threshold: np.ndarray
-    sw_exp: np.ndarray
-    q_10: np.ndarray
-    ssa: np.ndarray
+    # sw_threshold: np.ndarray
+    # sw_exp: np.ndarray
+    # q_10: np.ndarray
+    # ssa: np.ndarray
 
     def to_array(self) -> np.ndarray: ...
     @staticmethod
@@ -208,6 +208,10 @@ class MineralParameters:
     def from_mineral_parameters(
         minerals: list[MineralAuxParams],
     ) -> MineralParameters: ...
+    def get_ssa(self) -> np.ndarray: ...
+    def get_q_10(self) -> np.ndarray: ...
+    def get_sw_threshold(self) -> np.ndarray: ...
+    def get_sw_exp(self) -> np.ndarray: ...
 
 @dataclass
 class RtParameters:
@@ -282,6 +286,9 @@ class RtZone:
     def moles_from_conc(self, tot_moles: np.ndarray, d: RtForcing) -> np.ndarray: ...
     def aux_factor(self, d: RtForcing) -> np.ndarray: ...
     def residual_function(
+        self, c_0: np.ndarray, conc: np.ndarray, d: RtForcing, dt_days: float
+    ) -> np.ndarray: ...
+    def jacobian_residual_function(
         self, c_0: np.ndarray, conc: np.ndarray, d: RtForcing, dt_days: float
     ) -> np.ndarray: ...
     def solve_rt_step(
@@ -410,6 +417,8 @@ class ReactionNetwork:
     def primary_names(self) -> list[str]: ...
     @property
     def exchange_names(self) -> list[str]: ...
+    @property
+    def mobile_mask(self) -> np.ndarray: ...
 
 # Database and stuff
 @dataclass

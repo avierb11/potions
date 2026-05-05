@@ -104,6 +104,8 @@ class ReactiveTransportModel(HydrologicalModel):
 
         if river_zone is not None:
             self._river_zone: RiverZone = river_zone
+        else:
+            self._river_zone = None  # type: ignore
 
         return
 
@@ -472,14 +474,14 @@ class ReactiveTransportModel(HydrologicalModel):
                 if prim_aq.name in zone_conc.primary:
                     zone_state[prim_aq.name] = zone_conc.primary[prim_aq.name]
                 else:
-                    zone_state[prim_aq.name] = 1e-6  # default value
+                    zone_state[prim_aq.name] = 1e-3  # default value
 
             # Secondary species
             for sec in self.network.secondary:
                 if sec.name in zone_conc.secondary:
                     zone_state[sec.name] = zone_conc.secondary[sec.name]
                 else:
-                    zone_state[sec.name] = 1e-6  # default value
+                    zone_state[sec.name] = 1e-3  # default value
 
             # Mineral species
             for min_val in self.network.mineral:
@@ -520,6 +522,10 @@ class ReactiveTransportModel(HydrologicalModel):
             zone_initial_states.append(np.array(zone_init_conc_list, dtype=np.float64))
 
         state: np.ndarray = np.array(zone_initial_states)
+        if verbose:
+            print("Initial state: ")
+            for zone_name, zone_conc in zip(self.zone_names, state):
+                print(f"{zone_name}: {zone_conc}")
         # ============================ #
 
         # ==== Run the model forwards ==== #
