@@ -1,0 +1,8 @@
+[build.env]
+passthrough = [
+    "PYO3_CONFIG_FILE",
+    "PYO3_CROSS_PYTHON_VERSION"
+]
+
+[target.x86_64-pc-windows-gnu]
+image = "custom-cross-windows"
