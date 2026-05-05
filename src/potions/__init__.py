@@ -1,8 +1,6 @@
 __all__ = [
     # Sub-modules
     "common_types",
-    "common_types_compiled",
-    "hydro",
     "interfaces",
     "model",
     "objective_functions",
@@ -15,23 +13,21 @@ __all__ = [
     "HydroForcing",
     "HydroStep",
     "ChemicalDatabase",
-    "ExchangeReaction",
-    "MineralKineticReaction",
+    # "ExchangeReaction",
+    # "MineralKineticReaction",
     "MineralSpecies",
     "MonodReaction",
     "PrimaryAqueousSpecies",
     "SecondarySpecies",
-    "SurfaceComplexationReaction",
+    # "SurfaceComplexationReaction",
     "TstReaction",
     "GroundZone",
     "GroundZoneB",
-    "GroundZoneLinear",
-    "GroundZoneLinearB",
+    # "GroundZoneLinear",
+    # "GroundZoneLinearB",
     "HydrologicZone",
     "SnowZone",
     "SurfaceZone",
-    "StepResult",
-    "Zone",
     "BatchResults",
     "ForcingData",
     "HbvLateralModel",
@@ -62,60 +58,106 @@ __all__ = [
     "calculate_moisture_fraction",
     "RtZoneConfiguration",
     "ModelResults",
+    "MineralKineticData",
+    "RtModelResults",
+    "RtNumericalError",
+    "HydrologyNumericalError",
+    "OptimizationError",
+    # River things
+    "RiverDimensions",
+    "RiverParameters",
+    "RiverZone",
+    "WaterVolumeError",
 ]
-from .common_types import ChemicalState, LapseRateParameters
-from .common_types_compiled import HydroForcing, HydroStep, RtForcing
-from .hydro import (
+from .common_types import (
+    ChemicalState,
+    LapseRateParameters,
+    HydroModelResults,
+    RtModelResults,
+    ModelResults,
+    ForcingData,
+)
+
+from .core import (
+    HydroForcing,
+    HydroStep,
+    RtForcing,
     GroundZone,
     GroundZoneB,
-    GroundZoneLinear,
-    GroundZoneLinearB,
-    HydrologicZone,
     SnowZone,
     SurfaceZone,
-)
-from .interfaces import StepResult, Zone
-from .model import (
-    BatchResults,
-    ForcingData,
-    HbvLateralModel,
-    HbvModel,
-    HbvNonlinearModel,
-    Hillslope,
-    HydroModelResults,
-    Layer,
-    Model,
-    ThreeLayerModel,
-    RtZoneConfiguration,
-    ModelResults,
-)
-from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
-from .reactive_transport import (
-    ChemicalDatabase,
-    ExchangeReaction,
-    MineralKineticReaction,
-    MineralSpecies,
-    MonodReaction,
-    PrimaryAqueousSpecies,
-    SecondarySpecies,
-    SurfaceComplexationReaction,
-    TstReaction,
+    HydrologicZone,
+    # Database and things
+    RtZone,
+    RtStep,
     MineralParameters,
     EquilibriumParameters,
     MonodParameters,
-    ReactionNetwork,
     TstParameters,
     MineralAuxParams,
     RtParameters,
     ZoneDimensions,
-    RtZone,
-    RtStep,
+    ReactionNetwork,
+    PrimaryAqueousSpecies,
+    SecondarySpecies,
+    MineralSpecies,
+    TstReaction,
+    MonodReaction,
+    MineralKineticData,
+    ChemicalDatabase,
+    OptimizationError,
+    # River
+    RiverDimensions,
+    RiverParameters,
+    RiverZone,
+)
+
+
+from .common_models import (
+    HbvLateralModel,
+    HbvModel,
+    HbvNonlinearModel,
+    ThreeLayerModel,
+)
+
+from .model_components import (
+    Hillslope,
+    Layer,
+)
+
+from .model import (
+    BatchResults,
+    Model,
+    RtZoneConfiguration,
+)
+
+
+from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
+from .reactive_transport import (
+    # ChemicalDatabase,
+    # ExchangeReaction,
+    # MineralKineticReaction,
+    # MineralSpecies,
+    # MonodReaction,
+    # PrimaryAqueousSpecies,
+    # SecondarySpecies,
+    # SurfaceComplexationReaction,
+    # TstReaction,
+    # MineralParameters,
+    # EquilibriumParameters,
+    # MonodParameters,
+    # ReactionNetwork,
+    # TstParameters,
+    # MineralAuxParams,
+    # RtParameters,
+    # ZoneDimensions,
+    # RtZone,
+    # RtStep,
     calculate_water_table_depth,
     calculate_moisture_fraction,
+    WaterVolumeError,
 )
-from .utils import (
-    objective_function,
-)
+from .utils import objective_function, RtNumericalError, HydrologyNumericalError
 
 from .math import (
     find_root_multi,

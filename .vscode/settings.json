@@ -2,5 +2,10 @@
   "python.testing.pytestArgs": ["src/potions/tests"],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true,
-  "typewriterAutoScroll.enable": false
+  "typewriterAutoScroll.enable": false,
+  "terminal.integrated.autoReplies": {},
+  "terminal.integrated.sendKeybindingsToShell": true,
+  "terminal.integrated.shellIntegration.enabled": false,
+  "terminal.integrated.enableKeyboardReporting": false
+
 }

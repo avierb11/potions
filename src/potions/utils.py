@@ -1,15 +1,23 @@
 import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-from multiprocessing import Pool
 import os
-from typing import Callable, Final, Iterable, Literal, Optional, TypeVar, TypedDict
+from typing import Callable, Final, Iterable, Literal, Optional, TypeVar
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from .common_types import ForcingData
+from potions.core import (
+    HydroForcing,
+    HydrologicZone,
+    OptimizationError,
+    RtForcing,
+    RtZone,
+)
+
+
+from .common_types import ForcingData, HydroModelResults
 
 # ==== Logger ==== #
 DO_LOGGING = os.environ.get("POTIONSLOGGING") is not None
@@ -59,23 +67,62 @@ NumSpec = TypeVar(
 ZERO_CONC: Final[float] = 1e-20
 
 
-class HydroModelResults(TypedDict):
-    """A dictionary containing the results of a hydrologic model run.
-
-    Attributes:
-        simulation (DataFrame): A DataFrame with time series of states and
-            fluxes for all zones, plus simulated and measured streamflow.
-        objective_functions (Series): A Series with the values of each of the objective functions as keys
-    """
-
-    simulation: DataFrame
-    objective_functions: Series
+# ==== Error Types ==== #
+class PotionsError(Exception):
+    pass
 
 
-class RtModelResults(TypedDict):
-    rt_simulation: DataFrame
-    hydro_simulation: DataFrame
-    objective_functions: Optional[DataFrame]
+class HydrologyError(PotionsError):
+    pass
+
+
+class HydrologyNumericalError(HydrologyError):
+
+    def __init__(
+        self,
+        model_type: type,
+        zone: HydrologicZone,
+        parameters: np.ndarray,
+        state: float,
+        hydro_forcing: HydroForcing,
+        *args: object,
+    ) -> None:
+        super().__init__(*args)
+        self.model_type: type = model_type
+        self.zone: HydrologicZone = zone
+        self.parameters: np.ndarray = parameters
+        self.state: float = state
+        self.hydro_forcing: HydroForcing = hydro_forcing
+
+
+class ReactiveTransportError(PotionsError):
+    pass
+
+
+class RtNumericalError(ReactiveTransportError):
+
+    def __init__(
+        self,
+        error_type: Literal["iteration", "linear_system", "other"],
+        model_type: type,
+        zone: RtZone,
+        parameters: np.ndarray,
+        state: np.ndarray,
+        rt_forcing: RtForcing,
+        math_err: OptimizationError,
+        *args: object,
+    ) -> None:
+        super().__init__(*args)
+        self.error_type = error_type
+        self.model_type: type = model_type
+        self.zone: RtZone = zone
+        self.parameters: np.ndarray = parameters
+        self.state: np.ndarray = state
+        self.rt_forcing: RtForcing = rt_forcing
+        self.math_err = math_err
+
+
+# ===================== #
 
 
 def objective_function(
@@ -83,32 +130,43 @@ def objective_function(
     cls,
     forc: ForcingData,
     meas_streamflow: Series,
-    metric: Literal["kge", "nse", "combined"] | Callable[[dict], float],
+    metric: Literal["kge", "nse", "combined"] | Callable[[HydroModelResults], float],
     print_value: bool,
 ) -> float:
-    model = cls.from_array(x, latent=True)
-    results: dict[str, float | DataFrame] = model.run(
-        init_state=cls.default_init_state(),
-        forc=forc,
-        meas_streamflow=meas_streamflow,
-        verbose=False,
-    )
+    model = cls.hydro_from_array(x)
 
-    obj_val: float
+    try:
+        results: HydroModelResults = model.run_hydro_model(
+            init_state=cls.default_hydro_init_state(),
+            forc=forc,
+            meas_streamflow=meas_streamflow,
+            verbose=False,
+        )
 
-    if metric == "kge":
-        obj_val = -results["objective_functions"]["kge"]  # type: ignore
-    elif metric == "nse":
-        obj_val = -results["objective_functions"]["nse"]  # type: ignore
-    elif metric == "combined":
-        obj_val = -results["objective_functions"]["kge"] - results["objective_functions"]["nse"]  # type: ignore
-    else:
-        obj_val = metric(results)
+        obj_val: float
 
-    if print_value and isinstance(obj_val, str):
-        print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
+        if metric == "kge":
+            obj_val = -results.objective_functions["kge"]  # type: ignore
+        elif metric == "nse":
+            obj_val = -results.objective_functions["nse"]  # type: ignore
+        elif metric == "combined":
+            obj_val = (
+                -results.objective_functions["kge"]  # type: ignore
+                - results.objective_functions["nse"]  # type: ignore
+                - results.objective_functions["log_nse"]  # type: ignore
+                - results.objective_functions["log_kge"]  # type: ignore
+            )  # type: ignore
+        else:
+            obj_val = metric(results)
 
-    return obj_val
+        if print_value and isinstance(obj_val, str):
+            print(f"{metric.upper()}: {-round(obj_val, 2)}")  # type: ignore
+
+        return obj_val  # type: ignore
+    except Exception as e:
+        print(f"Failed with parameters {x}")
+        print(e)
+        return np.inf
 
 
 def find_root(f: Callable[[float], float], x_0: float, tol: float = 1e-5) -> float:
@@ -169,7 +227,7 @@ def log_probability(
             forc=forc, meas_streamflow=meas_streamflow, elevations=elevation
         )  # type: ignore
 
-        obj = model_res["objective_functions"].to_dict()
+        obj = model_res.objective_functions.to_dict()
 
         aux_values = [
             obj["kge"] if "kge" in obj else np.nan,
@@ -181,9 +239,9 @@ def log_probability(
 
         if isinstance(metric, str):
             if metric == "kge":
-                return lp + model_res["objective_functions"]["kge"], aux_values
+                return lp + model_res.objective_functions["kge"], aux_values
             elif metric == "nse":
-                return lp + model_res["objective_functions"]["nse"], aux_values
+                return lp + model_res.objective_functions["nse"], aux_values
             else:
                 raise ValueError(f"Unknown metric: {metric}")
         else:
@@ -196,15 +254,20 @@ def rt_minerals_to_array(
     mineral_conc: Iterable | dict[str, Iterable | dict[str, float]],
     mineral_order: list[str],
     zone_order: list[str],
-) -> NDArray:
+) -> Optional[NDArray]:
+
     rows: list[np.ndarray] = []
 
     if isinstance(mineral_conc, (np.ndarray, list, tuple)):
+        if len(mineral_conc) == 0:
+            return None
         rows = [x_i for x_i in mineral_conc]
         for row in rows:
             if len(row) != len(mineral_order):
                 raise ValueError(
-                    f"When passing array-like object as `mineral_conc`, the array must have shape ({len(zone_order)}, {len(mineral_order)})"
+                    f"When passing array-like object as `mineral_conc`, the array must have shape ({
+                        len(zone_order)
+                    }, {len(mineral_order)})"
                 )
     elif isinstance(mineral_conc, dict):
         if set(mineral_conc.keys()) != set(zone_order):
@@ -217,7 +280,8 @@ def rt_minerals_to_array(
                     for min_name in mineral_order:
                         if min_name not in zm:
                             raise ValueError(
-                                f"Zone '{zone}' is missing mineral species '{min_name}'"
+                                f"Zone '{zone}' is missing mineral species '{
+                                    min_name}'"
                             )
                         else:
                             vals.append(zm[min_name])
@@ -226,51 +290,6 @@ def rt_minerals_to_array(
                     rows.append(np.array([x_i for x_i in zm]))
 
     return np.vstack(rows)
-
-
-def _run_twice(
-    f: Callable[[NDArray], float], x1: NDArray, x2: NDArray
-) -> tuple[float, float]:
-    return (f(x1), f(x2))
-
-
-def parallel_numerical_gradient(
-    f: Callable[[NDArray], float],
-    x: NDArray,
-    num_threads: Optional[int] = None,
-    rel_dx: float = 1e-2,
-    dx: float = 1e-6,
-) -> NDArray:
-    """Calculate the gradient of the function in parallel"""
-    dxs_list: list[float] = []
-    args: list[tuple[Callable, NDArray, NDArray]] = []
-
-    for i, x_i in enumerate(x):
-        dx_i: float
-        if abs(x_i) <= 1e-8:
-            dx_i = dx
-        else:
-            dx_i = abs(rel_dx * x_i)
-
-        dxs_list.append(dx_i)
-        xs_dn: NDArray = x.copy()
-        xs_dn[i] -= dx_i
-        xs_up: NDArray = x.copy()
-        xs_up[i] += dx_i
-
-        args.append((f, xs_dn, xs_up))
-
-    if num_threads is not None:
-        num_threads = os.cpu_count()
-
-    with Pool(num_threads) as pool:
-        res: list[tuple[float, float]] = pool.starmap(_run_twice, args)
-
-    fx_dn: NDArray = np.array([x[0] for x in res])
-    fx_up: NDArray = np.array([x[1] for x in res])
-    dxs: NDArray = np.array(dxs_list)
-
-    return (fx_up - fx_dn) / (2.0 * dxs)
 
 
 # ======================== #

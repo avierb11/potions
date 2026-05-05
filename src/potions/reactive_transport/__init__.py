@@ -28,6 +28,7 @@ __all__ = [
     "MonodReaction",
     "ExchangeReaction",
     "ChemicalDatabase",
+    "WaterVolumeError",
 ]
 
 from .kinetic_structures import (
@@ -47,6 +48,7 @@ from .rt_zone import (
     MiscData,
     RtStep,
     RtZone,
+    WaterVolumeError,
 )
 from .database import (
     PrimaryAqueousSpecies,

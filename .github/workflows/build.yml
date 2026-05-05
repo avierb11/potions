@@ -1,0 +1,92 @@
+name: Compile Cross-Platform Wheels
+
+# This configuration saves your free minutes.
+# It only runs when you push a version tag (e.g., git tag v0.0.1 && git push --tags)
+# or when you manually click "Run workflow" in the GitHub Actions tab.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------
+  # 1. LINUX BUILD (Native)
+  # ---------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev gfortran
+
+      - name: Build Linux Wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-wheel
+          path: dist/*.whl
+
+  # ---------------------------------------------------
+  # 2. WINDOWS BUILD (Cross-Compiled via Docker)
+  # ---------------------------------------------------
+  windows:
+    runs-on: ubuntu-latest # Running on Linux to use your custom Docker setup!
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install cross & maturin
+        run: |
+          cargo install cross
+          pip install maturin
+
+      - name: Build Custom Windows Image
+        run: docker build -t custom-cross-windows -f Dockerfile.windows .
+
+      - name: Build Windows Wheel
+        # Passing the env vars exactly as we did locally
+        run: PYO3_CROSS_PYTHON_VERSION=3.13 CARGO=cross maturin build --release --target x86_64-pc-windows-gnu --out dist -i python
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wheel
+          path: dist/*.whl
+
+  # ---------------------------------------------------
+  # 3. MACOS BUILD (Native)
+  # ---------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install macOS Build Dependencies
+        # Homebrew is built into the macOS runner
+        run: brew install pkg-config openssl gfortran
+
+      - name: Build macOS Wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          # 'universal2' builds for both Intel and Apple Silicon Macs simultaneously
+          args: --release --target universal2-apple-darwin --out dist
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-wheel
+          path: dist/*.whl

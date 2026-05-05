@@ -12,6 +12,10 @@ from .database import (
     PrimaryAqueousSpecies,
     SecondarySpecies,
 )
+
+# from potions.core import
+# from .kinetic_structures import EquilibriumParameters, TstParameters, MonodParameters
+
 from .kinetic_structures import (
     EquilibriumParameters,
     TstParameters,

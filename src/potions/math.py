@@ -1,29 +1,16 @@
-# cython: language_level=3
-# cython: cdivision=True
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: profile=False
-# cython: linetrace=False
-import numpy as np
-import cython  # type: ignore
 from typing import Callable
 from scipy.optimize import approx_fprime
-
-from .common_types_compiled import HydroForcing
-
-if not cython.compiled:
-    print("WARNING: 'potions.math' is not compiled and may be slower as a result")
+import numpy as np
+from potions.core import HydroForcing
 
 
-@cython.ccall
-@cython.locals(h_diff=cython.double, lambda_val=cython.double)
 def ode_is_stable(
-    f: Callable[[cython.double, HydroForcing], cython.double],
-    x: cython.double,
+    f: Callable[[float, HydroForcing], float],
+    x: float,
     d: HydroForcing,
-    dt: cython.double,
+    dt: float,
 ) -> bool:
-    dt_diff: cython.double = 1e-3
+    dt_diff: float = 1e-3
     lambda_val = (f(x + dt_diff, d) - f(x - dt_diff, d)) / (2 * dt_diff)
     if lambda_val < 0 and dt < 2 / (abs(lambda_val)):
         return True
@@ -31,37 +18,23 @@ def ode_is_stable(
         return False
 
 
-@cython.ccall
-@cython.locals(x_mid=cython.double)
 def midpoint_method(
-    mass_balance_func: Callable[[cython.double, HydroForcing], cython.double],
-    x_init: cython.double,
+    mass_balance_func: Callable[[float, HydroForcing], float],
+    x_init: float,
     d: HydroForcing,
     dt: float,
-) -> cython.double:
+) -> float:
     x_mid = x_init + 0.5 * dt * mass_balance_func(x_init, d)
     return x_init + dt * mass_balance_func(x_mid, d)
 
 
-@cython.ccall
-@cython.locals(
-    x_0=cython.double,
-    x_1=cython.double,
-    tol=cython.double,
-    err=cython.double,
-    fx_0=cython.double,
-    fx_1=cython.double,
-    x_n=cython.double,
-    counter=cython.int,
-    max_iter=cython.int,
-)
 def find_root(
     f: Callable,
-    x_init: cython.double,
+    x_init: float,
     d: HydroForcing,
     dt: float,
-    tol: cython.double = 1e-6,
-) -> cython.double:
+    tol: float = 1e-6,
+) -> float:
     """
     Optimized Secant method root finder.
     """
@@ -105,8 +78,7 @@ def find_root(
     return x_1
 
 
-@cython.ccall
-def sign(x: cython.double) -> cython.int:
+def sign(x: float) -> int:
     """Check the sign of a number. Negative means negative, positive means the number is positive, and zero means the number is zero"""
     if x > 0.0:
         return 1
@@ -116,25 +88,16 @@ def sign(x: cython.double) -> cython.int:
         return 0
 
 
-@cython.ccall
-@cython.locals(
-    x_m=cython.double,
-    fx_l=cython.double,
-    fx_r=cython.double,
-    fx_m=cython.double,
-    err=cython.double,
-    cur_iter=cython.int,
-)
 def bisect(
     f: Callable,
-    x_l: cython.double,
-    x_r: cython.double,
-    x_init: cython.double,
+    x_l: float,
+    x_r: float,
+    x_init: float,
     d: HydroForcing,
-    dt: cython.double,
-    tol: cython.double = 1e-6,
-    max_iters: cython.int = 50,
-) -> cython.double:
+    dt: float,
+    tol: float = 1e-6,
+    max_iters: int = 50,
+) -> float:
     """
     Bisection method root solver
     """
@@ -178,9 +141,6 @@ def bisect(
     return x_m
 
 
-@cython.ccall
-@cython.boundscheck(False)
-@cython.wraparound(False)
 def find_root_multi(
     f: Callable[[np.ndarray], np.ndarray],
     x_0: np.ndarray,
@@ -196,7 +156,7 @@ def find_root_multi(
         print(f"Initial f(x): {f_x}")
         print(f"Initial error: {err}")
 
-    i: cython.int
+    i: int
     for i in range(max_iter):
         if err <= tol:
             return x
@@ -227,24 +187,20 @@ def find_root_multi(
     raise ValueError(f"Failed to find root starting at {x_0=} with final error {err}")
 
 
-@cython.boundscheck(False)  # Deactivate bounds checking
-@cython.wraparound(False)  # Deactivate negative indexing
-@cython.cdivision(True)  # Deactivate zero-division checks for speed
-@cython.ccall  # Equivalent to cpdef: C-speed with Python access
 def fast_matvec(
-    matrix: cython.double[:, :], vector: cython.double[:], out: cython.double[:]  # type: ignore
-) -> cython.void:  # type: ignore
+    matrix: np.ndarray, vector: np.ndarray, out: np.ndarray  # type: ignore
+) -> None:  # type: ignore
     """
     Performs out = matrix * vector.
     Inputs must be memoryviews (e.g., NumPy arrays).
     """
 
     # Declare C types for all local variables
-    i: cython.int
-    j: cython.int
-    m: cython.int = matrix.shape[0]  # type: ignore
-    n: cython.int = matrix.shape[1]  # type: ignore
-    dot_product: cython.double
+    i: int
+    j: int
+    m: int = matrix.shape[0]  # type: ignore
+    n: int = matrix.shape[1]  # type: ignore
+    dot_product: float
 
     # 'prange' enables OpenMP parallelism and releases the GIL
     # 'nogil=True' ensures no Python objects are accessed inside the loop
