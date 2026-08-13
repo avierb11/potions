@@ -1,6 +1,85 @@
+use faer::prelude::*;
+// Solver types need explicit imports
+use faer::linalg::solvers::{PartialPivLu, Qr};
 use std::fmt;
 
-use ndarray_linalg::{LeastSquaresSvd, Solve, SVD};
+fn mat_from_arr(arr: &Array2<f64>) -> Mat<f64> {
+    let (rows, cols) = arr.dim();
+    let mut m = Mat::<f64>::zeros(rows, cols);
+    for i in 0..rows {
+        for j in 0..cols {
+            m[(i, j)] = arr[[i, j]];
+        }
+    }
+    m
+}
+
+fn arr_from_mat(m: Mat<f64>) -> Array2<f64> {
+    let rows = m.nrows();
+    let cols = m.ncols();
+    let mut arr = Array2::<f64>::zeros((rows, cols));
+    for i in 0..rows {
+        for j in 0..cols {
+            arr[[i, j]] = m[(i, j)];
+        }
+    }
+    arr
+}
+
+fn vec_from_vec(v: &Array1<f64>) -> Col<f64> {
+    let mut c = Col::<f64>::zeros(v.len());
+    for (i, x) in v.iter().enumerate() {
+        c[i] = *x;
+    }
+    c
+}
+
+fn arr_from_col(c: &Col<f64>) -> Array1<f64> {
+    let len = c.nrows();
+    let mut a = Array1::<f64>::zeros(len);
+    for (i, x) in c.iter().enumerate() {
+        a[i] = *x;
+    }
+    a
+}
+
+fn solve_f64(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
+    let ma = mat_from_arr(a);
+    let mb = vec_from_vec(b);
+    // Use faer's PartialPivLu solver via the Solve trait
+    let mut sol_col: Col<f64> = mb;
+    // Create the PartialPivLu solver and solve in place
+    let lu = PartialPivLu::<f64>::new(ma.as_ref());
+    lu.solve_in_place(sol_col.as_mat_mut());
+    Ok(arr_from_col(&sol_col))
+}
+
+fn least_squares_f64(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
+    let ma = mat_from_arr(a);
+    let mb = vec_from_vec(b);
+    let qr = Qr::new(ma.as_ref());
+    // solve_lstsq_in_place expects a MatMut for in-place write
+    // Only the first min(m,n) rows of sol_col are valid results
+    let mut sol_col: Col<f64> = mb;
+    qr.solve_lstsq_in_place(sol_col.as_mat_mut());
+    Ok(arr_from_col(&sol_col))
+}
+
+fn svd_condition_f64(a: &Array2<f64>) -> (usize, Array1<f64>, usize) {
+    // Get singular values directly from the matrix — docs say .singular_values()
+    // returns them in nonincreasing order without needing an Svd struct.
+    let ma = mat_from_arr(a);
+    let m = ma.nrows();
+    let n = ma.ncols();
+    let s_vals = Array1::from_vec(ma.singular_values().expect("singular values failed"));
+    (m, s_vals, n)
+}
+fn solve_with_fallback_f64(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
+    match solve_f64(a, b) {
+        Ok(v) => Ok(v),
+        Err(e) => least_squares_f64(a, b).map_err(|e2| e2),
+    }
+}
 use numpy::{
     ndarray::{Array1, Array2},
     PyArray2, PyArrayMethods,
@@ -362,7 +441,7 @@ where
 }
 
 fn condition_number(mat: &Array2<f64>) -> f64 {
-    let (_, s, _) = mat.svd(false, false).unwrap();
+    let (_, s, _) = svd_condition_f64(mat);
 
     s[0] / s[s.len() - 1]
 }
@@ -410,12 +489,12 @@ where
                 final_state,
                 "Got NaN values in an array".to_string(),
             );
-            return Err(PyErr::new::<OptimizationError, _>(err));
+            return Err(PyException::new_err(err.message));
         }
 
         let jac_x_t = jac_x.t();
 
-        let step_res = jac_x.solve(&f_x);
+        let step_res = solve_with_fallback_f64(&jac_x, &f_x);
 
         let step: Array1<f64> = match step_res {
             Ok(v) => v,
@@ -434,11 +513,11 @@ where
                     lambdas: Vec::new(),
                 };
 
-                let err = OptimizationError::from_state(
+                let opt_err = OptimizationError::from_state(
                     final_state,
-                    format!("Linear algebra error: {}", e.to_string()),
+                    format!("Linear algebra error: {}", e),
                 );
-                return Err(PyErr::new::<OptimizationError, _>(err));
+                return Err(PyException::new_err(opt_err.message));
             }
         };
 
@@ -477,7 +556,7 @@ where
     };
 
     let err = OptimizationError::from_state(final_state, "Exceeded maximum".to_string());
-    Err(PyErr::new::<OptimizationError, _>(err))
+    Err(PyException::new_err(err.message))
 }
 
 pub fn levenberg_marquardt<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
@@ -523,7 +602,7 @@ where
                 final_state,
                 "Got NaN values in an array".to_string(),
             );
-            return Err(PyErr::new::<OptimizationError, _>(err));
+            return Err(PyException::new_err(err.message));
         }
 
         let jac_x_t = jac_x.t();
@@ -537,31 +616,28 @@ where
 
         let b: Array1<f64> = jac_x_t.dot(&f_x);
 
-        let step: Array1<f64> = match a_mat_damped.solve(&b) {
+        let step: Array1<f64> = match solve_with_fallback_f64(&a_mat_damped, &b) {
             Ok(v) => v,
-            Err(e) => match a_mat_damped.least_squares(&b) {
-                Ok(v) => v.solution,
-                Err(e2) => {
-                    let final_state = OptimizerState {
-                        iteration: i,
-                        final_x: x.clone(),
-                        last_f_x: f_x.clone(),
-                        initial_x: x_0.clone(),
-                        jacobian: jac_x.clone(),
-                        error: err,
-                        errors,
-                        xs,
-                        fxs,
-                        jacobians,
-                        lambdas,
-                    };
-                    let err = OptimizationError::from_state(
-                        final_state,
-                        format!("Linear algebra error: {}", e.to_string()),
-                    );
-                    return Err(PyErr::new::<OptimizationError, _>(err));
-                }
-            },
+            Err(e) => {
+                let final_state = OptimizerState {
+                    iteration: i,
+                    final_x: x.clone(),
+                    last_f_x: f_x.clone(),
+                    initial_x: x_0.clone(),
+                    jacobian: jac_x.clone(),
+                    error: err,
+                    errors,
+                    xs,
+                    fxs,
+                    jacobians,
+                    lambdas,
+                };
+                let opt_err = OptimizationError::from_state(
+                    final_state,
+                    format!("Linear algebra error: {}", e),
+                );
+                return Err(PyException::new_err(opt_err.message));
+            }
         };
 
         let x_test: Array1<f64> = &x - &step;
@@ -628,7 +704,7 @@ where
     };
 
     let err = OptimizationError::from_state(final_state, "Exceeded maximum".to_string());
-    Err(PyErr::new::<OptimizationError, _>(err))
+    Err(PyException::new_err(err.message))
 }
 
 pub fn matmul(a: &Array2<f64>, x: &Array1<f64>) -> Result<Array1<f64>, MatMulError> {

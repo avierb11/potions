@@ -1,92 +1,137 @@
 name: Compile Cross-Platform Wheels
 
-# This configuration saves your free minutes.
-# It only runs when you push a version tag (e.g., git tag v0.0.1 && git push --tags)
-# or when you manually click "Run workflow" in the GitHub Actions tab.
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*'
+      - "v*"
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  # ---------------------------------------------------
-  # 1. LINUX BUILD (Native)
-  # ---------------------------------------------------
-  linux:
-    runs-on: ubuntu-latest
+  build-wheels:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        python-version:
+          - "3.14"
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - name: Install Linux Build Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev gfortran
-
-      - name: Build Linux Wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --out dist
-
-      - name: Upload Linux Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-wheel
-          path: dist/*.whl
-
-  # ---------------------------------------------------
-  # 2. WINDOWS BUILD (Cross-Compiled via Docker)
-  # ---------------------------------------------------
-  windows:
-    runs-on: ubuntu-latest # Running on Linux to use your custom Docker setup!
-    steps:
-      - uses: actions/checkout@v4
-
+      # setup-python is used for native Windows and macOS builds.
+      # Linux runs inside a manylinux container, so its Python
+      # interpreter is selected in the maturin arguments instead.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python-version }}
+          architecture: x64
 
-      - name: Install cross & maturin
-        run: |
-          cargo install cross
-          pip install maturin
-
-      - name: Build Custom Windows Image
-        run: docker build -t custom-cross-windows -f Dockerfile.windows .
-
-      - name: Build Windows Wheel
-        # Passing the env vars exactly as we did locally
-        run: PYO3_CROSS_PYTHON_VERSION=3.13 CARGO=cross maturin build --release --target x86_64-pc-windows-gnu --out dist -i python
-
-      - name: Upload Windows Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-wheel
-          path: dist/*.whl
-
-  # ---------------------------------------------------
-  # 3. MACOS BUILD (Native)
-  # ---------------------------------------------------
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install macOS Build Dependencies
-        # Homebrew is built into the macOS runner
-        run: brew install pkg-config openssl gfortran
-
-      - name: Build macOS Wheel
+      - name: Build Linux wheel
+        if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          # 'universal2' builds for both Intel and Apple Silicon Macs simultaneously
-          args: --release --target universal2-apple-darwin --out dist
+          target: x86_64
+          manylinux: "2_28"
+          rust-toolchain: stable
+          sccache: true
+          args: >-
+            --release
+            --locked
+            --out dist
+            --interpreter python${{ matrix.python-version }}
 
-      - name: Upload macOS Artifact
+      - name: Build Windows or macOS wheel
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          rust-toolchain: stable
+          sccache: true
+          args: >-
+            --release
+            --locked
+            --out dist
+            --interpreter python
+
+      - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-wheel
+          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
           path: dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          rust-toolchain: stable
+          args: >-
+            --locked
+            --out dist
+
+      - name: Upload source distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-distribution
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-wheels
+      - build-sdist
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+      url: https://pypi.org/project/YOUR-PACKAGE-NAME/
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: source-distribution
+          path: dist
+
+      - name: Show distributions
+        run: ls -la dist
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
