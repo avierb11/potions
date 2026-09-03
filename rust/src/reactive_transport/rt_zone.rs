@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::{approx_fprime, find_root_multi, levenberg_marquardt},
+    math::{find_root_multi_analytic_fused, levenberg_marquardt},
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -20,6 +20,33 @@ use crate::{
         reaction_network::ReactionNetwork,
     },
 };
+
+/// Warm-start cache for the speciation solve. Stores the `x_free` solution from
+/// the previous time step, which is usually an excellent initial guess for the
+/// next one (concentrations move slowly between steps).
+///
+/// It wraps an `Arc<Mutex<_>>` so the owning zone can update the cache in place
+/// during `step` without `&mut self`, while remaining `Send + Sync + Clone +
+/// Debug` (a requirement of `#[pyclass]`, which a bare `RefCell` is not).
+#[derive(Debug, Clone, Default)]
+pub struct SpeciationCache {
+    inner: std::sync::Arc<std::sync::Mutex<Option<Array1<f64>>> >,
+}
+
+impl SpeciationCache {
+    /// Return the cached `x_free` with the expected length, or zeros if it is
+    /// not cached / mismatched.
+    pub fn get(&self, n: usize) -> Array1<f64> {
+        let g = self.inner.lock().unwrap();
+        match g.as_ref() {
+            Some(p) if p.len() == n => p.clone(),
+            _ => Array1::zeros(n),
+        }
+    }
+    pub fn set(&self, v: Array1<f64>) {
+        *self.inner.lock().unwrap() = Some(v);
+    }
+}
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -44,6 +71,8 @@ pub struct RtZone {
     pub aux: Option<MineralParameters>,
     #[pyo3(get)]
     pub misc: MiscData,
+    // Warm start for the speciation solve
+    last_x_free: SpeciationCache,
 }
 
 impl RtZone {
@@ -213,11 +242,37 @@ impl RtZone {
         d: &RtForcing,
         dt_days: f64,
     ) -> Array2<f64> {
-        let f = |c: &Array1<f64>| self.residual_function_rust(c_0, c, d, dt_days);
-
-        let jac_x: Array2<f64> = approx_fprime(f, conc, false);
-
+        let n: usize = conc.len();
+        let ode_jac: Array2<f64> = self.odes_jacobian_rust(conc, d);
+        // d/dc [ c_0 - c + dt * ODE(c) ] = -I + dt * dODE/dc
+        let jac_x: Array2<f64> = (-Array2::eye(n)) + (dt_days * ode_jac);
         jac_x
+    }
+
+    // The free-variable dimension of the speciation problem (used to size the
+    // warm-start vector)
+    fn num_free(&self) -> usize {
+        self.eq.num_free()
+    }
+
+    // The analytical Jacobian of the *unscaled* mass-balance ODE,
+    // d(transport + reaction)/d(conc), i.e. the derivative of
+    // `mass_balance_ode_rust` with respect to its second argument.
+    fn odes_jacobian_rust(&self, conc: &Array1<f64>, d: &RtForcing) -> Array2<f64> {
+        let moles_to_conc = |s: &Array1<f64>| self.moles_to_conc_rust(s, d);
+        residual_jacobian_impl(
+            &self.network,
+            &self.monod,
+            &self.tst,
+            self.aux.as_ref(),
+            &self.misc,
+            self.dimensions().depth,
+            d.hydro_step.q_in,
+            &moles_to_conc,
+            conc,
+            d,
+            self.do_reactions,
+        )
     }
 
     pub fn solve_rt_step_rust(
@@ -228,14 +283,52 @@ impl RtZone {
         dt_days: f64,
         verbose: bool,
     ) -> PyResult<Array1<f64>> {
-        let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
+        let depth = self.dimensions().depth;
+        let num_aq = self.network.num_aqueous_species();
+        // For RtZone the mineral concentrations sit immediately after the
+        // aqueous species, and transport is driven by q_in directly.
+        let min_start = num_aq;
+        let q_in = d.hydro_step.q_in;
+        let network = &self.network;
+        let monod = &self.monod;
+        let tst = &self.tst;
+        let aux = self.aux.as_ref();
+        let misc = &self.misc;
+        let do_reactions = self.do_reactions;
 
-        let res = match find_root_multi(&residual, c_0.clone(), verbose) {
+        let moles_to_conc = |s: &Array1<f64>| self.moles_to_conc_rust(s, d);
+        let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
+        // Fused residual + analytic Jacobian: the expensive Monod/TST kinetics
+        // are evaluated once per Newton iteration (shared by the residual and the
+        // Jacobian) rather than once by each. Falls back to Levenberg-Marquardt
+        // only on non-convergence, as before.
+        let fused = |conc: &Array1<molar>| {
+            kinetic_residual_and_jacobian_impl(
+                network,
+                monod,
+                tst,
+                aux,
+                misc,
+                depth,
+                q_in,
+                &moles_to_conc,
+                c_0,
+                conc,
+                d,
+                dt_days,
+                min_start,
+                do_reactions,
+            )
+        };
+
+        // Use Newton's method with the analytical Jacobian. This is much faster
+        // than the finite-difference version because each iteration only needs a
+        // single residual and a single Jacobian evaluation. If it fails to
+        // converge, fall back to Levenberg-Marquardt.
+        let res = match find_root_multi_analytic_fused(&fused, c_0.clone(), verbose) {
             Ok(v) => Ok(v),
             Err(_) => levenberg_marquardt(&residual, c_0.clone(), verbose),
         };
-
-        // let res = levenberg_marquardt(&residual, c_0.clone(), verbose);
 
         res
     }
@@ -308,6 +401,7 @@ impl RtZone {
             eq: eq,
             aux: minerals,
             misc: misc,
+            last_x_free: SpeciationCache::default(),
         })
     }
 
@@ -471,7 +565,23 @@ impl RtZone {
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),
-            true => self.eq.solve_equilibrium_rust(&c_after_rt, verbose)?,
+            true => {
+                if self.num_free() == 0 {
+                    // The network has no equilibrium reactions (empty null space,
+                    // e.g. the simple carbon network), so there are no free
+                    // variables to solve for: nothing to re-speciate. The kinetic
+                    // concentrations are already the final answer.
+                    c_after_rt.clone()
+                } else {
+                    // Warm-start the speciation Newton iteration with the `x_free`
+                    // solution from the previous time step (concentrations move
+                    // slowly, so it is an excellent initial guess).
+                    let initial_x = self.last_x_free.get(self.num_free());
+                    let x_free = self.eq.x_free_solve_rust(&c_after_rt, &initial_x, verbose)?;
+                    self.last_x_free.set(x_free.clone());
+                    self.eq.conc_func_rust(&x_free)
+                }
+            }
         };
 
         if c_after_eq.len() != num_spec {
@@ -629,4 +739,390 @@ impl RtZone {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Analytical Jacobian of the mass-balance ODE with respect to the concentration
+/// vector, i.e. the derivative of `mass_balance_ode_rust` with respect to its
+/// second argument.
+///
+/// # Derivation
+///
+/// The ODE (for the full species vector `c`, length `num_spec`) is
+/// ```text
+/// ODE(c) = transport(c) [ if do_reactions: + reaction(c) ]
+/// ```
+///
+/// * **Transport** (aqueous species only, `j < num_aq`):
+///   `t_j = (q_in / v0) * (c_in[j] - c[j])` so `dt_j/dc_j = -q_in / v0`
+///   (zero elsewhere). This is the only contribution to the diagonal for the
+///   `do_reactions == false` case.
+///
+/// * **Reaction** (both zone types re-normalise the state first):
+///   `R(c) = S @ M(chms)` where `chms = moles_to_conc(c)` (a diagonal scaling of
+///   `c`), `M` is the per-mineral kinetic rate vector and `S` is the mineral
+///   stoichiometry. Its Jacobian is `S @ (dM/dchms) @ P` with
+///   `P = d(moles_to_conc)/dc` a diagonal. For mineral `i`
+///   `M_i = A_i * chms[m_i] * (Mn_i + T_i)` with `m_i = num_aq + i`, so
+///   ```text
+///   dM_i/dchms_j = A_i * ( δ_{j,m_i} (Mn_i+T_i) + chms[m_i] * d(Mn_i+T_i)/dchms_j )
+///   ```
+///   where the log-derivative of the Monod product is
+///   `dMn_i/dchms_j = Mn_i * ( Kmonod_ij/(Kmonod_ij+chms_j)² − Kinhib_ij/(Kinhib_ij+chms_j)² )`
+///   (a term present only when that entry is finite), and the TST term
+///   `T_i = D_i (1 − Q_i/K_i)` with `Q_i = 10^(E_q_i)`, `D_i = 10^(E_d_i)`:
+///   ```text
+///   dT_i/dchms_j = D_i dep_ij / chms_j (1 − Q_i/K_i)
+///                 − D_i Q_i stoich_ij / (chms_j K_i)
+///   ```
+///
+/// Only the aqueous rows `r < num_aq` are non-empty (the mineral/exchange rows of
+/// the ODE are fixed at zero, so their Jacobian rows are zero).
+///
+/// Compared with the previous finite-difference Jacobian, which required `n+1`
+/// full ODE evaluations per Newton iteration (each re-evaluating all kinetics),
+/// this touches each mineral kinetics value a constant number of times.
+///
+/// The expensive shared kinetics are factored out into [`reaction_terms_impl`];
+/// this entry point simply assembles the Jacobian from the previously computed
+/// terms so that it is bit-for-bit identical to the historical monolithic
+/// implementation (it is what the finite-difference verification checks).
+pub(crate) fn residual_jacobian_impl<M2C>(
+    network: &ReactionNetwork,
+    monod: &MonodParameters,
+    tst: &TstParameters,
+    aux: Option<&MineralParameters>,
+    misc: &MiscData,
+    depth: f64,
+    q_in: f64,
+    moles_to_conc: &M2C,
+    conc: &Array1<f64>,
+    d: &RtForcing,
+    do_reactions: bool,
+) -> Array2<f64>
+where
+    M2C: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let terms = reaction_terms_impl(
+        network, monod, tst, aux, misc, moles_to_conc, conc, d, do_reactions,
+    );
+    assemble_ode_jacobian(network, &terms, misc, depth, q_in, d, do_reactions)
+}
+
+/// Shared kinetic terms for the mass-balance ODE at a single state `conc`,
+/// computed once so that both the residual (the ODE itself) and the Jacobian
+/// (its derivative) reuse the same Monod / TST rate values, solubility products
+/// and dependence terms instead of recomputing them separately.
+#[derive(Debug, Clone)]
+pub(crate) struct KineticReactionTerms {
+    /// Renormalised concentrations `chms = moles_to_conc(conc)`.
+    pub(crate) chms: Array1<f64>,
+    /// `dM/dchms`, shape (num_min × num_spec). Row `i` is the derivative of the
+    /// per-mineral kinetic rate with respect to the (renormalised) concentration
+    /// vector. Rows of inactive minerals are zero.
+    pub(crate) dm: Array2<f64>,
+    /// Per-mineral kinetic prefactor `A_i = 86400 · rc_i · ssa_i · mm_i · aux_i`.
+    pub(crate) base: Array1<f64>,
+    /// Per-mineral full kinetic rate `Mn_i + D_i·(1 − Q_i/K_i)`.
+    pub(crate) r_full: Array1<f64>,
+}
+
+/// Compute the shared kinetic terms at state `conc`. This mirrors, factor for
+/// factor, the reaction block that [`residual_jacobian_impl`] used to contain,
+/// so the resulting `dm` is bit-for-bit identical to the historical one. When
+/// `do_reactions` is false the terms hold the renormalised concentrations and
+/// empty kinetic blocks (the Jacobian / ODE then reduce to pure transport).
+pub(crate) fn reaction_terms_impl<M2C>(
+    network: &ReactionNetwork,
+    monod: &MonodParameters,
+    tst: &TstParameters,
+    aux: Option<&MineralParameters>,
+    misc: &MiscData,
+    moles_to_conc: &M2C,
+    conc: &Array1<f64>,
+    d: &RtForcing,
+    do_reactions: bool,
+) -> KineticReactionTerms
+where
+    M2C: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let num_aq = network.num_aqueous_species();
+    let num_spec = network.num_species();
+    let chms = moles_to_conc(conc);
+
+    if !do_reactions {
+        return KineticReactionTerms {
+            chms,
+            dm: Array2::zeros((0, num_spec)),
+            base: Array1::zeros(0),
+            r_full: Array1::zeros(0),
+        };
+    }
+
+    // ---- Reaction contribution ----
+    let num_min = monod.inhib_np().shape()[0];
+    let monod_np = monod.monod_np();
+    let inhib_np = monod.inhib_np();
+    let stoich_np = tst.stoich_np();
+    let dep_np = tst.dep_np();
+    let k_min = tst.eq_const_np();
+    let rate_const = &misc.rate_const;
+    let molar_mass = &misc.mineral_molar_mass;
+
+    // Kinetic values (computed once, reused for M and dM/dchms)
+    let mn_vals = monod.rate_rust(&chms); // Mn_i = monod_i * inhib_i
+    let (q_vals, _) = tst.calculate_solubility_product(&chms); // Q_i
+    let (d_vals, _) = tst.calculate_dependence_term(&chms); // D_i
+
+    // Which minerals may actually have a non-zero reaction term at this state.
+    // This subsumes all possible NaN paths (e.g. missing aux parameters) and
+    // keeps the Jacobian finite.
+    let mineral_active: Vec<bool> = (0..num_min).map(|i| {
+        rate_const[i].is_finite()
+            && molar_mass[i].is_finite()
+            && chms[num_aq + i].is_finite()
+            && mn_vals[i].is_finite()
+            && d_vals[i].is_finite()
+            && q_vals[i].is_finite()
+            && k_min[i].is_finite()
+            && k_min[i].abs() > 0.0
+    }).collect();
+
+    let aux_present = aux.is_some();
+    let empty_ssa = Array1::<f64>::zeros(0);
+    let ssa: &Array1<f64> = match aux {
+        Some(a) => &a.ssa,
+        None => &empty_ssa,
+    };
+    let aux_factor: Array1<f64> = match aux {
+        Some(a) => a.factor_rust(d),
+        None => Array1::zeros(num_min),
+    };
+
+    // Per-mineral kinetic prefactor and full rate (used by the residual ODE).
+    let mut base: Array1<f64> = Array1::zeros(num_min);
+    let mut r_full: Array1<f64> = Array1::zeros(num_min);
+    for i in 0..num_min {
+        r_full[i] = mn_vals[i] + d_vals[i] * (1.0 - q_vals[i] / k_min[i]);
+        if aux_present && ssa[i].is_finite() {
+            base[i] = 86_400.0 * rate_const[i] * ssa[i] * molar_mass[i] * aux_factor[i];
+        }
+    }
+
+    // dM/dchms : (num_min x num_spec)
+    let mut dm: Array2<f64> = Array2::zeros((num_min, num_spec));
+    for i in 0..num_min {
+        if !mineral_active[i] || !aux_present || !ssa[i].is_finite() {
+            continue; // this mineral contributes nothing to the ODE (or its aux is undefined)
+        }
+        let a = 86_400.0 * rate_const[i] * ssa[i] * molar_mass[i] * aux_factor[i];
+        let r_full_i = mn_vals[i] + d_vals[i] * (1.0 - q_vals[i] / k_min[i]);
+        let c_min = chms[num_aq + i];
+        let mn_i = mn_vals[i];
+        let d_i = d_vals[i];
+        let q_i = q_vals[i];
+        let k_i = k_min[i];
+        for jidx in 0..num_spec {
+            let c_j = chms[jidx];
+            let (inv_cj, safe_cj) = if c_j.abs() > 0.0 {
+                (1.0 / c_j, c_j)
+            } else {
+                (0.0, 0.0)
+            };
+
+            // dMn_i/dchms_j, where Mn_i = Π_f c/(K_f+c) · Π_h K_h/(K_h+c)
+            //   d ln(Mn)/dc_j = [ K_f/(c_j(c_j+K_f)) ]_finite-monod
+            //                  − [ K_h/(c_j(c_j+K_h)) ]_finite-inhib
+            let mut g = 0.0;
+            let mk = monod_np[(i, jidx)];
+            if mk.is_finite() && safe_cj.abs() > 0.0 {
+                g += mk / (safe_cj * (mk + safe_cj));
+            }
+            let ikv = inhib_np[(i, jidx)];
+            if ikv.is_finite() && safe_cj.abs() > 0.0 {
+                g -= ikv / (safe_cj * (ikv + safe_cj));
+            }
+            let dmn = mn_i * g;
+
+            // dT_i/dchms_j, where T_i = D_i (1 − Q_i/K_i), Q_i=D_i·10^(Σ ν log10 c)
+            //   dT = D·dep_j (1−Q/K)/c_j  − D·Q·stoich_j/(K·c_j)
+            let dts = if safe_cj.abs() > 0.0 {
+                d_i * dep_np[(i, jidx)] * inv_cj * (1.0 - q_i / k_i)
+                    - d_i * q_i * stoich_np[(i, jidx)] * inv_cj / k_i
+            } else {
+                0.0
+            };
+
+            let delta = if jidx == num_aq + i { 1.0 } else { 0.0 };
+            dm[(i, jidx)] = a * (delta * r_full_i + c_min * (dmn + dts));
+        }
+    }
+
+    KineticReactionTerms {
+        chms,
+        dm,
+        base,
+        r_full,
+    }
+}
+
+/// Assemble the analytic ODE Jacobian `d(transport + reaction)/d(conc)` from the
+/// pre-computed [`KineticReactionTerms`]: the transport diagonal over the aqueous
+/// species plus `S @ dm @ P`, where `P` is `d(moles_to_conc)/dc`.
+fn assemble_ode_jacobian(
+    network: &ReactionNetwork,
+    terms: &KineticReactionTerms,
+    misc: &MiscData,
+    depth: f64,
+    q_in: f64,
+    d: &RtForcing,
+    do_reactions: bool,
+) -> Array2<f64> {
+    let num_aq = network.num_aqueous_species();
+    let num_spec = network.num_species();
+    let v0 = d.hydro_step.state;
+    let v0_ok = v0.abs() >= 1e-6;
+
+    let mut j: Array2<f64> = Array2::zeros((num_spec, num_spec));
+
+    // ---- Transport contribution (diagonal over aqueous species) ----
+    if v0_ok {
+        let f = q_in / v0;
+        for r in 0..num_aq {
+            j[(r, r)] = -f;
+        }
+    }
+
+    if !do_reactions {
+        return j;
+    }
+
+    let num_min = terms.dm.shape()[0];
+
+    // Diagonal P = d(moles_to_conc)/dc. Note: in the true `moles_to_conc_rust` a
+    // very small water volume makes the aqueous entries a constant (zero
+    // derivative). We keep the smooth 1/v0 here; the difference is bounded by the
+    // reaction term and is negligible compared with the finite-difference noise.
+    let mut p: Array1<f64> = Array1::zeros(num_spec);
+    for i in 0..num_spec {
+        p[i] = if i < num_aq {
+            if v0_ok {
+                1.0 / v0
+            } else {
+                0.0
+            }
+        } else {
+            if depth.abs() > 0.0 {
+                1.0 / depth
+            } else {
+                0.0
+            }
+        };
+    }
+
+    // J += S @ dM @ P  (only aqueous rows r < num_aq); zero out r >= num_aq.
+    let s = &misc.mineral_stoichiometry; // (num_spec x num_min)
+    for r in 0..num_aq {
+        for jidx in 0..num_spec {
+            let pj = p[jidx];
+            if pj == 0.0 {
+                continue;
+            }
+            let mut acc = 0.0;
+            for m in 0..num_min {
+                acc += s[(r, m)] * terms.dm[(m, jidx)];
+            }
+            j[(r, jidx)] += acc * pj;
+        }
+    }
+
+    j
+}
+
+/// Evaluate the mass-balance ODE (transport + reaction) at state `conc` from the
+/// pre-computed [`KineticReactionTerms`]. `min_start` is the index of the first
+/// mineral concentration in the (renormalised) state; it is `num_aqueous` for
+/// `RtZone` and `num_species - num_minerals` for `RiverZone` (the two are equal
+/// for networks without exchange species). `q_in` is the water flux that drives
+/// transport into the zone (per-zone; `d.hydro_step.q_in` for `RtZone`,
+/// `q_internal()` for `RiverZone`).
+fn kinetic_ode_from_terms(
+    network: &ReactionNetwork,
+    terms: &KineticReactionTerms,
+    misc: &MiscData,
+    d: &RtForcing,
+    conc: &Array1<f64>,
+    q_in: f64,
+    min_start: usize,
+    do_reactions: bool,
+) -> Array1<f64> {
+    let num_aq = network.num_aqueous_species();
+    let num_spec = network.num_species();
+    let v0 = d.hydro_step.state;
+
+    let mut ode: Array1<f64> = Array1::zeros(num_spec);
+
+    // ---- Transport (aqueous species only) ----
+    if v0.abs() >= 1e-6 {
+        let f = q_in / v0;
+        let c_in: &Array1<molar> = &d._conc_in;
+        for r in 0..num_aq {
+            ode[r] = f * (c_in[r] - conc[r]);
+        }
+    }
+
+    // ---- Reaction (S @ M(chms), mineral/exchange rows fixed at zero) ----
+    if do_reactions {
+        let num_min = terms.base.shape()[0];
+        let mut mcr: Array1<f64> = Array1::zeros(num_min);
+        for i in 0..num_min {
+            mcr[i] = terms.base[i] * terms.chms[min_start + i] * terms.r_full[i];
+        }
+        let s = &misc.mineral_stoichiometry; // (num_spec x num_min)
+        let mut react = s.dot(&mcr);
+        for i in min_start..num_spec {
+            react[i] = 0.0;
+        }
+        for r in 0..num_spec {
+            ode[r] += react[r];
+        }
+    }
+
+    ode
+}
+
+/// Fused evaluation: computes the residual
+/// `r(c) = c_0 - c + dt · ODE(c)` and its analytic Jacobian
+/// `J(c) = -I + dt · dODE/dc` in a single pass, sharing the kinetic terms.
+///
+/// This is what the Newton driver consumes: one invocation yields both, so each
+/// iteration performs a single Monod/TST rate evaluation instead of the separate
+/// ones the residual and Jacobian used to each trigger.
+pub(crate) fn kinetic_residual_and_jacobian_impl<M2C>(
+    network: &ReactionNetwork,
+    monod: &MonodParameters,
+    tst: &TstParameters,
+    aux: Option<&MineralParameters>,
+    misc: &MiscData,
+    depth: f64,
+    q_in: f64,
+    moles_to_conc: &M2C,
+    c_0: &Array1<f64>,
+    conc: &Array1<f64>,
+    d: &RtForcing,
+    dt_days: f64,
+    min_start: usize,
+    do_reactions: bool,
+) -> (Array1<f64>, Array2<f64>)
+where
+    M2C: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let terms = reaction_terms_impl(
+        network, monod, tst, aux, misc, moles_to_conc, conc, d, do_reactions,
+    );
+    let num_spec = network.num_species();
+    let j_ode = assemble_ode_jacobian(network, &terms, misc, depth, q_in, d, do_reactions);
+    let jac_x: Array2<f64> = (-Array2::eye(num_spec)) + (dt_days * j_ode);
+    let ode = kinetic_ode_from_terms(network, &terms, misc, d, conc, q_in, min_start, do_reactions);
+    let res = (c_0 - conc) + (dt_days * ode);
+    (res, jac_x)
 }

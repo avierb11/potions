@@ -71,3 +71,13 @@ class ThreeLayerModel(Model):
         [SurfaceZone(name="surface")],
         [GroundZoneB(name="ground")],
     ]
+
+
+class LateralThreeLayerModel(Model):
+    """A simple three-layer model: Snow, Soil, and a single Groundwater zone."""
+
+    structure = [
+        [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
+        [SurfaceZone(name="surface_hs"), SurfaceZone(name="surface_rp")],
+        [GroundZoneB(name="ground_hs"), GroundZoneB(name="ground_rp")],
+    ]

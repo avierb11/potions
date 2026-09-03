@@ -38,6 +38,7 @@ __all__ = [
     "Layer",
     "Model",
     "ThreeLayerModel",
+    "LateralThreeLayerModel",
     "kge",
     "nse",
     "objective_high_flow",
@@ -118,6 +119,7 @@ from .common_models import (
     HbvModel,
     HbvNonlinearModel,
     ThreeLayerModel,
+    LateralThreeLayerModel,
 )
 
 from .model_components import (

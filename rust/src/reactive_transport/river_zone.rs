@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::find_root_multi,
+    math::{find_root_multi_analytic_fused, levenberg_marquardt},
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -18,6 +18,7 @@ use crate::{
             RiverParameters, TstParameters,
         },
         reaction_network::ReactionNetwork,
+        rt_zone::{kinetic_residual_and_jacobian_impl, SpeciationCache},
     },
 };
 
@@ -44,9 +45,14 @@ pub struct RiverZone {
     pub aux: Option<MineralParameters>,
     #[pyo3(get)]
     pub misc: MiscData,
+    last_x_free: SpeciationCache,
 }
 
 impl RiverZone {
+    fn num_free(&self) -> usize {
+        self.eq.num_free()
+    }
+
     fn mass_balance_ode_rust(&self, chms: &Array1<f64>, d: &RtForcing) -> Array1<molar_per_time> {
         let transport_rate_vec: Array1<molar_per_time> = self.transport_rate_rust(chms, d);
 
@@ -237,6 +243,7 @@ impl RiverZone {
             eq: eq,
             aux: minerals,
             misc: misc,
+            last_x_free: SpeciationCache::default(),
         })
     }
 
@@ -335,11 +342,65 @@ impl RiverZone {
             (&c_0_arr - conc) + dt_days * self.mass_balance_ode_rust(conc, d)
         };
 
-        let c_after_rt: Array1<molar> = find_root_multi(&residual, c_0_arr.clone(), verbose)?;
+        // For RiverZone the water flux driving transport is q_internal(), and the
+        // mineral concentrations are indexed from the *end* of the species vector
+        // (the last `num_min` entries), i.e. `num_species - num_minerals`.
+        let num_min = self.monod.inhib_np.shape()[0];
+        let num_spec = self.network.num_species();
+        let min_start = num_spec - num_min;
+        let bed_depth = self.dimensions().bed_depth;
+        let q_in = d.hydro_step.q_internal();
+        let network = &self.network;
+        let monod = &self.monod;
+        let tst = &self.tst;
+        let aux = self.aux.as_ref();
+        let misc = &self.misc;
+        let do_reactions = self.do_reactions;
+        let moles_to_conc = |s: &Array1<f64>| self.moles_to_conc_rust(s, d);
+        let fused = |conc: &Array1<molar>| {
+            kinetic_residual_and_jacobian_impl(
+                network,
+                monod,
+                tst,
+                aux,
+                misc,
+                bed_depth,
+                q_in,
+                &moles_to_conc,
+                &c_0_arr,
+                conc,
+                d,
+                dt_days,
+                min_start,
+                do_reactions,
+            )
+        };
+
+        // Newton's method with the fused (single-evaluation) residual + analytic
+        // Jacobian, falling back to Levenberg-Marquardt if that fails to converge.
+        let c_after_rt: Array1<molar> =
+            match find_root_multi_analytic_fused(&fused, c_0_arr.clone(), verbose) {
+                Ok(v) => v,
+                Err(_) => levenberg_marquardt(&residual, c_0_arr.clone(), verbose)?,
+            };
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),
-            true => self.eq.solve_equilibrium_rust(&c_after_rt, verbose)?,
+            true => {
+                if self.num_free() == 0 {
+                    // No equilibrium reactions in this network (empty null
+                    // space), so there is nothing to re-speciate; the kinetic
+                    // concentrations are already the final answer.
+                    c_after_rt.clone()
+                } else {
+                    let initial_x = self.last_x_free.get(self.num_free());
+                    let x_free = self
+                        .eq
+                        .x_free_solve_rust(&c_after_rt, &initial_x, verbose)?;
+                    self.last_x_free.set(x_free.clone());
+                    self.eq.conc_func_rust(&x_free)
+                }
+            }
         };
 
         let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);

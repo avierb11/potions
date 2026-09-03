@@ -123,28 +123,31 @@ def get_hydro_steps(sim_res: DataFrame) -> NDArray:
         (len(zone_names), len(sim_res)), dtype=object)
 
     for i, z in enumerate(zone_names):
-        s: Series = sim_res[f"s_{z}"]
-        q_forc: Series = sim_res[f"q_forc_{z}"]
-        q_vap: Series = sim_res[f"q_vap_{z}"]
-        q_lat: Series = sim_res[f"q_lat_{z}"]
-        q_lat_ext: Series = sim_res[f"q_lat_ext_{z}"]
-        q_vert: Series = sim_res[f"q_vert_{z}"]
-        q_vert_ext: Series = sim_res[f"q_vert_ext_{z}"]
-        q_in: Series = sim_res[f"q_in_{z}"]
+        # Convert each column to a contiguous NumPy array *once* per zone, then
+        # index it positionally. The previous implementation issued a pandas
+        # `.iloc` gather for every step of every zone (~hundreds of thousands of
+        # slow index lookups); a single `to_numpy()` per column plus array
+        # indexing removes that entirely.
+        state: NDArray = sim_res[f"s_{z}"].to_numpy()
+        q_forc: NDArray = sim_res[f"q_forc_{z}"].to_numpy()
+        q_vap: NDArray = sim_res[f"q_vap_{z}"].to_numpy()
+        q_lat: NDArray = sim_res[f"q_lat_{z}"].to_numpy()
+        q_lat_ext: NDArray = sim_res[f"q_lat_ext_{z}"].to_numpy()
+        q_vert: NDArray = sim_res[f"q_vert_{z}"].to_numpy()
+        q_vert_ext: NDArray = sim_res[f"q_vert_ext_{z}"].to_numpy()
+        q_in: NDArray = sim_res[f"q_in_{z}"].to_numpy()
 
-        for j, s_j in enumerate(s):
-            hs = HydroStep(
-                state=s_j,
-                forc_flux=q_forc.iloc[j],
-                vap_flux=q_vap.iloc[j],
-                lat_flux=q_lat.iloc[j],
-                lat_flux_ext=q_lat_ext.iloc[j],
-                vert_flux=q_vert.iloc[j],
-                vert_flux_ext=q_vert_ext.iloc[j],
-                q_in=q_in.iloc[j],
+        for j in range(len(state)):
+            hydro_steps[i, j] = HydroStep(
+                state=state[j],
+                forc_flux=q_forc[j],
+                vap_flux=q_vap[j],
+                lat_flux=q_lat[j],
+                lat_flux_ext=q_lat_ext[j],
+                vert_flux=q_vert[j],
+                vert_flux_ext=q_vert_ext[j],
+                q_in=q_in[j],
             )
-
-            hydro_steps[i, j] = hs
 
     return hydro_steps
 

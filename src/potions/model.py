@@ -151,7 +151,7 @@ class Model(ReactiveTransportModel):
             zones (Optional[dict[str, HydrologicZone]]): A dictionary to
                 override the default zones in the structure with custom-
                 parameterized ones. Keys are zone names. Defaults to None.
-            scales (Optional[list[float]]): A list of fractional areas for each
+            scales (Optional[list[float]]): A list of fractional areas `for each
                 surface zone, defining their contribution to the total catchment.
                 Must sum to 1. Defaults to equal scaling.
             lapse_rates (Optional[list[LapseRateParameters]]): A list of lapse

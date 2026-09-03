@@ -1,4 +1,5 @@
 from __future__ import annotations
+import traceback
 from typing import Callable, Iterable, Optional
 
 import numpy as np
@@ -304,6 +305,91 @@ class ReactiveTransportModel(HydrologicalModel):
         """Convert this model and turn it into a numpy array"""
         return np.concat([self.hydro_to_array(), self.rt_to_array()])
 
+    def _failed_repro_context(
+        self,
+        index: int,
+        zone: RtZone,
+        day_index: int,
+        dt_days: float,
+        s_i: NDArray,
+        d_i: RtForcing,
+        err: BaseException,
+    ) -> dict:
+        """Build a self-describing, fully-reproducible context for a step failure.
+
+        The returned dict carries everything needed to reconstruct the exact
+        failing ``zone.step(s_i, d_i, dt_days)`` call in isolation: the zone
+        identity, its flags, its own parameter array (``RtParameters``/
+        ``RtZone`` are not picklable, so they are stored as their ``to_array()``
+        values), the network (which *is* picklable), the full model parameter
+        array, the state, the full forcing (``RtForcing`` is picklable), and the
+        raw exception (type, string, and traceback).
+
+        Args:
+            index: Integer position of the zone in the iteration order.
+            zone: The ``RtZone`` that failed to step.
+            day_index: Step / time index that was being advanced when the
+                failure occurred (so a run-up replay can target it).
+            dt_days: Time-step length in days.
+            s_i: State (concentrations) of the zone at the start of the step.
+            d_i: The full forcing applied to the zone for the step.
+            err: The exception that caused the step failure.
+
+        Returns:
+            A picklable dictionary describing the failure.
+        """
+        zone_network = zone.network
+
+        try:
+            zone_param_array: list[float] = (
+                zone.parameters.to_array().astype(float).tolist()
+            )
+        except Exception:
+            zone_param_array = []
+
+        opt = err if isinstance(err, OptimizationError) else None
+        math_info: Optional[dict] = None
+        if opt is not None:
+            try:
+                math_info = {
+                    "iterations": opt.iterations,
+                    "final_err": opt.final_err,
+                    "last_x": opt.last_x,
+                    "last_f_x": opt.last_f_x,
+                    "jacobian": opt.jacobian,
+                    "message": opt.message,
+                }
+            except Exception:
+                math_info = {"message": str(opt)}
+
+        summary = (
+            f"reactive-transport step failure: zone '{zone.name}' (index {index}) "
+            f"at step {day_index} (dt={dt_days}d) | do_reactions={zone.do_reactions}, "
+            f"do_speciation={zone.do_speciation} | "
+            f"{type(err).__name__}: {err}"
+        )
+
+        return {
+            "model_type": type(self).__name__,
+            "zone_name": zone.name,
+            "zone_index": index,
+            "do_reactions": zone.do_reactions,
+            "do_speciation": zone.do_speciation,
+            "species_names": zone.all_species,
+            "step_index": day_index,
+            "dt_days": float(dt_days),
+            "state_s_i": s_i.astype(float).tolist(),
+            "forcing": d_i.copy(),
+            "zone_parameter_array": zone_param_array,
+            "model_parameter_array": self.to_array().astype(float).tolist(),
+            "network": zone_network,
+            "exception_type": type(err).__name__,
+            "exception": str(err),
+            "exception_traceback": traceback.format_exc(),
+            "optimization_error": math_info,
+            "summary": summary,
+        }
+
     def step_rt_model(
         self,
         model: dict[str, RtZone],
@@ -312,6 +398,7 @@ class ReactiveTransportModel(HydrologicalModel):
         dt_days: float,
         verbose: bool = False,
         failed_dir: Optional[str] = None,
+        step_index: int = 0,
     ) -> list[RtStep]:
         num_zones: int = len(model)
         zones: list[RtZone] = list(model.values())
@@ -366,7 +453,16 @@ class ReactiveTransportModel(HydrologicalModel):
             try:
                 step: RtStep = zone.step(s_i, d_i, dt_days, verbose=verbose)
             except OptimizationError as e:
-                raise RtNumericalError(
+                # A solver (Newton / Levenberg-Marquardt) failure: the Rust
+                # `OptimizationError` message already carries the iteration,
+                # residual, offending vector and Jacobian diagnostics. Wrap and
+                # attach the full repro context as well.
+                context: dict = self._failed_repro_context(
+                    i, zone, step_index, dt_days, s_i, d_i, e
+                )
+                e.__rt_repro__ = context  # type: ignore[attr-defined]
+                print(f"Failed on zone {i} ('{zone.name}') step {step_index}: {e}")
+                rt_err: RtNumericalError = RtNumericalError(
                     "other",
                     model_type=type(self),
                     zone=zone,
@@ -374,12 +470,22 @@ class ReactiveTransportModel(HydrologicalModel):
                     state=s_i,
                     rt_forcing=d_i.copy(),
                     math_err=e,
-                ) from e
+                )
+                rt_err.__rt_repro__ = context  # type: ignore[attr-defined]
+                raise rt_err from e
             except Exception as e:
-                print(f"Failed on zone {i} with values:")
+                # Any other (hard) failure: name the zone, the step and the
+                # *actual* exception (type + message), and attach the full
+                # repro context so the caller can persist it.
+                context = self._failed_repro_context(
+                    i, zone, step_index, dt_days, s_i, d_i, e
+                )
+                e.__rt_repro__ = context  # type: ignore[attr-defined]
+                print(f"Failed on zone {i} ('{zone.name}') step {step_index}:")
                 print(f"{s_i=}")
                 print(f"{d_i=}")
                 print(f"{dt_days=}")
+                print(f"exception: {type(e).__name__}: {e}")
                 raise e
             lat_mass[i] = step.lat_mass
             vert_mass[i] = step.vert_mass
@@ -557,6 +663,7 @@ class ReactiveTransportModel(HydrologicalModel):
                     time_step_days[i],
                     verbose=verbose,
                     failed_dir=failed_dir,
+                    step_index=i,
                 )
                 steps.append(step)
                 new_state = np.array([x.state.copy() for x in step]).copy()
