@@ -31,6 +31,7 @@ from .core import (
     RiverZone,
     RtStep,
     RtZone,
+    run_zone_steps,
 )
 
 from .hydro_model import HydrologicalModel
@@ -402,57 +403,39 @@ class ReactiveTransportModel(HydrologicalModel):
     ) -> list[RtStep]:
         num_zones: int = len(model)
         zones: list[RtZone] = list(model.values())
+        ds_list: list[RtForcing] = list(ds)
 
-        num_species: int = zones[0].num_species
+        # Run the entire per-zone sweep (Gauss-Seidel coupling of each zone's
+        # incoming concentration from the upstream zones already solved this
+        # step) in a single pure-Rust call. This replaces a Python loop that
+        # made one `zone.step(...)` call per zone, so the per-step overhead
+        # (Python dispatch + per-zone array copies + GIL round-trips) is gone.
+        #
+        # Returns `(steps, failure)` where `failure` is `None` on success or a
+        # `(zone_index, exception, conc_in)` triple on a per-zone solver failure.
+        steps, failure = run_zone_steps(
+            zones,
+            np.asarray(state, dtype=np.float64),
+            ds_list,
+            np.asarray(self.lat_mat, dtype=np.float64),
+            np.asarray(self.vert_mat, dtype=np.float64),
+            list(self.surface_zone_ids),
+            dt_days,
+            verbose=verbose,
+        )
 
-        lat_mass: NDArray = np.zeros(
-            (num_zones, num_species), dtype=np.float64
-        )  # Lateral mass transfered by a zone
-        vert_mass: NDArray = lat_mass.copy()  # Mass transferred vertically by a zone
+        if failure is not None:
+            i: int = failure[0]
+            e: Exception = failure[1]
+            # Reconstruct the failing forcing exactly as the Python loop built
+            # it: a copy of the zone's forcing with the (computed) incoming
+            # concentration that the zone was about to step from.
+            d_i: RtForcing = ds_list[i].copy()
+            d_i.conc_in = np.asarray(failure[2], dtype=np.float64)  # type: ignore
+            s_i: NDArray = np.asarray(state[i], dtype=np.float64).copy()
+            zone: RtZone = zones[i]
 
-        steps: list[RtStep] = []
-
-        i: int
-        zone: RtZone
-        s_i: NDArray
-        d_i: RtForcing
-        for i, (zone, s_i, d_i) in enumerate(  # type: ignore
-            zip(model.values(), state.copy(), ds, strict=True)
-        ):
-            d_i = d_i.copy()
-
-            if verbose:
-                print(f"Starting solution for zone on step '{zone.name}'")
-            tot_water_in: float = d_i.hydro_step.q_in + d_i.hydro_step.forc_flux
-            if i not in self.surface_zone_ids:
-                lat_dep_row = self.lat_mat[i]
-                vert_dep_row = self.vert_mat[i]
-
-                lat_mass_in = lat_mass.T @ lat_dep_row
-                vert_mass_in = vert_mass.T @ vert_dep_row
-
-                mass_in = lat_mass_in + vert_mass_in
-
-                if tot_water_in > 1e-6:
-                    conc_in = mass_in / tot_water_in
-                else:
-                    conc_in = np.zeros_like(mass_in)
-                d_i.conc_in = conc_in  # type: ignore
-
-                if verbose:
-                    print(f"Mass entering zone '{zone.name}': \n{mass_in=}")
-                    print(f"Lateral component entering: {lat_mass_in}")
-                    print(f"Vertical component entering: {vert_mass_in}")
-
-            else:  # For surface zones, the incoming precipitation provides the mass flux
-                mass_in = d_i.conc_in * tot_water_in
-
-            if verbose:
-                print(f"Incoming concentration to zone {i}: {d_i.conc_in}")
-
-            try:
-                step: RtStep = zone.step(s_i, d_i, dt_days, verbose=verbose)
-            except OptimizationError as e:
+            if isinstance(e, OptimizationError):
                 # A solver (Newton / Levenberg-Marquardt) failure: the Rust
                 # `OptimizationError` message already carries the iteration,
                 # residual, offending vector and Jacobian diagnostics. Wrap and
@@ -473,7 +456,7 @@ class ReactiveTransportModel(HydrologicalModel):
                 )
                 rt_err.__rt_repro__ = context  # type: ignore[attr-defined]
                 raise rt_err from e
-            except Exception as e:
+            else:
                 # Any other (hard) failure: name the zone, the step and the
                 # *actual* exception (type + message), and attach the full
                 # repro context so the caller can persist it.
@@ -487,22 +470,21 @@ class ReactiveTransportModel(HydrologicalModel):
                 print(f"{dt_days=}")
                 print(f"exception: {type(e).__name__}: {e}")
                 raise e
-            lat_mass[i] = step.lat_mass
-            vert_mass[i] = step.vert_mass
-            steps.append(step)
-            if verbose:
+
+        if verbose:
+            step: RtStep
+            for i, (zone, step) in enumerate(zip(zones, steps)):
+                print(f"Incoming concentration to zone {i}: {step.conc_in}")
                 print(f"Lateral mass transfer outwards: {step.lat_mass}")
                 print(f"Vertical mass transfer outwards: {step.vert_mass}")
                 print(
                     f"Finished zone '{zone.name}', final concentration: {
                         np.array2string(
-                            step.state, formatter={'all': lambda x: f'{x:.2e}'}
+                            step.state, formatter={"all": lambda x: f"{x:.2e}"}
                         )
                     }"
                 )
-
                 print("\n\n")
-        if verbose:
             print("=" * 25 + "\n")
 
         return steps

@@ -1,6 +1,6 @@
 use numpy::{
     ndarray::{s, Array1, Array2},
-    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray,
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, ToPyArray,
 };
 use polars::prelude::Float64Type;
 use pyo3::{
@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::{find_root_multi_analytic_fused, levenberg_marquardt},
+    math::find_root_multi_analytic_fused_then_lm,
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -31,6 +31,7 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct SpeciationCache {
     inner: std::sync::Arc<std::sync::Mutex<Option<Array1<f64>>> >,
+
 }
 
 impl SpeciationCache {
@@ -46,6 +47,23 @@ impl SpeciationCache {
     pub fn set(&self, v: Array1<f64>) {
         *self.inner.lock().unwrap() = Some(v);
     }
+}
+
+/// Plain (Python-free) output of one `RtZone` step. Kept separate from
+/// [`crate::common_types::RtStep`] so that the whole multi-zone / multi-step
+/// driver can run without ever touching the GIL or allocating per-element
+/// NumPy arrays: the driver accumulates these into large strided buffers and
+/// hands a handful of arrays back to Python at the end.
+#[derive(Debug, Clone, Default)]
+pub struct StepResultAll {
+    pub state: Array1<f64>,
+    pub total_moles: Array1<f64>,
+    pub mass_in: Array1<f64>,
+    pub lat_conc: Array1<f64>,
+    pub vert_conc: Array1<f64>,
+    pub lat_mass: Array1<f64>,
+    pub vert_mass: Array1<f64>,
+    pub mineral_rates: Array1<f64>,
 }
 
 #[pyclass(from_py_object)]
@@ -277,7 +295,6 @@ impl RtZone {
 
     pub fn solve_rt_step_rust(
         &self,
-        py: Python<'_>,
         c_0: &Array1<f64>,
         d: &RtForcing,
         dt_days: f64,
@@ -297,7 +314,6 @@ impl RtZone {
         let do_reactions = self.do_reactions;
 
         let moles_to_conc = |s: &Array1<f64>| self.moles_to_conc_rust(s, d);
-        let residual = |conc: &Array1<molar>| self.residual_function_rust(c_0, conc, d, dt_days);
         // Fused residual + analytic Jacobian: the expensive Monod/TST kinetics
         // are evaluated once per Newton iteration (shared by the residual and the
         // Jacobian) rather than once by each. Falls back to Levenberg-Marquardt
@@ -324,14 +340,158 @@ impl RtZone {
         // Use Newton's method with the analytical Jacobian. This is much faster
         // than the finite-difference version because each iteration only needs a
         // single residual and a single Jacobian evaluation. If it fails to
-        // converge, fall back to Levenberg-Marquardt.
-        let res = match find_root_multi_analytic_fused(&fused, c_0.clone(), verbose) {
-            Ok(v) => Ok(v),
-            Err(_) => levenberg_marquardt(&residual, c_0.clone(), verbose),
+        // converge, fall back to Levenberg-Marquardt (itself using the fused
+        // analytic Jacobian) resumed from Newton's best iterate.
+        find_root_multi_analytic_fused_then_lm(&fused, c_0.clone(), verbose)
+    }
+
+    /// Pure-Rust per-zone step returning all output fields as plain
+    /// `ndarray` vectors (no Python objects). This is the fast path the
+    /// `run_zone_steps` driver consumes; the public `step` pymethod simply
+    /// wraps this result into a `RtStep` for backwards compatibility.
+    pub fn step_internal(
+        &self,
+        c_0: &Array1<f64>,
+        d: &RtForcing,
+        dt_days: f64,
+        verbose: bool,
+    ) -> PyResult<StepResultAll> {
+        let num_spec: usize = self.network.num_species();
+        let c_0_arr: Array1<molar> = c_0.clone(); // Initial concentrations in the zone
+        let c_in: &Array1<molar> = &d._conc_in;
+        let tot_moles_init: Array1<moles> = self.get_tot_moles_rust(&c_0_arr, d); // Initial moles of each species at the start of the step
+        let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
+        let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
+        let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
+        let tot_moles_ext: Array1<f64> = q_ext * c_in; // Total moles that just pass through the zone and do not interact with mass balance
+
+        let set_minerals_to_zero = |conc: Array1<f64>| {
+            let mut x = conc.clone();
+            for i in self.network.num_aqueous_species()..self.network.num_species() {
+                x[i] = 0.0
+            }
+            x
         };
 
-        res
+        // let mobile_mask: Array1<bool> = self.network.mobile_mask_rust();
+
+        // let num_mobile = self.network.num_aqueous_species();
+        // let mut c_mobile = Array1::zeros(num_mobile);
+        // for i in 0..num_mobile {
+        //     c_mobile[i] = c_0_arr[i];
+        // }
+        let c_after_rt: Array1<molar> =
+            self.solve_rt_step_rust(&c_0_arr, d, dt_days, verbose)?;
+        // let mut c_after_rt = c_0_arr.clone();
+        // for (i, c_i) in c_mobile_after_rt.iter().enumerate() {
+        //     c_after_rt[i] = *c_i;
+        // }
+
+        // dbg!(&c_after_rt);
+        if verbose {
+            eprintln!("c_after_rt={}", &c_after_rt);
+        }
+
+        let c_after_eq = match self.do_speciation {
+            false => c_after_rt.clone(),
+            true => {
+                if self.num_free() == 0 {
+                    // The network has no equilibrium reactions (empty null space,
+                    // e.g. the simple carbon network), so there are no free
+                    // variables to solve for: nothing to re-speciate. The kinetic
+                    // concentrations are already the final answer.
+                    c_after_rt.clone()
+                } else {
+                    // Warm-start the speciation Newton iteration with the `x_free`
+                    // solution from the previous time step (concentrations move
+                    // slowly, so it is an excellent initial guess).
+                    let initial_x = self.last_x_free.get(self.num_free());
+                    let x_free = self.eq.x_free_solve_rust(&c_after_rt, &initial_x, verbose)?;
+                    self.last_x_free.set(x_free.clone());
+                    self.eq.conc_func_rust(&x_free)
+                }
+            }
+        };
+
+        if c_after_eq.len() != num_spec {
+            let msg = format!(
+                "c_after_eq has the wrong shape, should have length {}, but is {}",
+                num_spec, &c_after_eq
+            );
+            return Err(PyValueError::new_err(msg));
+        }
+
+        if verbose {
+            eprintln!("c_after_eq={}", &c_after_eq);
+        }
+
+        let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);
+
+        let tot_moles_out_internal: Array1<moles> = set_minerals_to_zero(&c_after_eq * q_int); // Minerals are immobile
+
+        let tot_moles_out: Array1<moles> =
+            set_minerals_to_zero(&tot_moles_ext + tot_moles_out_internal);
+
+        let total_q_out_water: f64 = q_int + q_ext;
+        let frac_lat = d.hydro_step.lat_flux_ext / total_q_out_water;
+        let frac_vert = d.hydro_step.vert_flux_ext / total_q_out_water;
+
+        let lat_mass: Array1<moles>;
+        let vert_mass: Array1<moles>;
+        let lat_conc: Array1<molar>;
+        let vert_conc: Array1<molar>;
+        let (lat_mass, vert_mass, lat_conc, vert_conc) = match q_int + q_ext > 1e-6 {
+            true => {
+                let lat: Array1<moles> = &tot_moles_out * frac_lat;
+                let vert: Array1<moles> = &tot_moles_out * frac_vert;
+                let mut lc: Array1<molar> = lat.clone();
+                let mut vc: Array1<molar> = vert.clone();
+
+                let q_lat = d.hydro_step.lat_flux_ext;
+                let q_vert = d.hydro_step.vert_flux_ext;
+
+                for (i, (l_i, v_i)) in lat.iter().zip(&vert).enumerate() {
+                    if i < self.network.num_aqueous_species() {
+                        if q_lat.abs() <= 1e-6 {
+                            lc[i] = ZERO_CONC;
+                        } else {
+                            lc[i] = l_i / q_lat;
+                        }
+                        if q_vert.abs() <= 1e-6 {
+                            vc[i] = ZERO_CONC;
+                        } else {
+                            vc[i] = v_i / q_vert;
+                        }
+                    }
+                }
+
+                (lat, vert, lc, vc)
+            }
+            false => {
+                let num_species = c_0_arr.len();
+                let z: Array1<f64> = Array1::from_elem(num_species, ZERO_CONC);
+
+                (z.clone(), z.clone(), z.clone(), z.clone())
+            }
+        };
+
+        let mineral_rates: Array1<f64> = match self.do_reactions {
+            true => self.reaction_rate_rust(&c_after_eq, d, true),
+            false => Array1::zeros(self.network.num_minerals()),
+        };
+
+        Ok(StepResultAll {
+            state: c_after_eq,
+            total_moles: tot_moles_after_eq,
+            mass_in: tot_mass_in,
+            lat_conc,
+            vert_conc,
+            lat_mass,
+            vert_mass,
+            mineral_rates,
+        })
     }
+
 }
 
 #[pymethods]
@@ -509,13 +669,14 @@ impl RtZone {
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let c_0_arr = c_0.to_owned_array();
 
-        let res = self.solve_rt_step_rust(py, &c_0_arr, d, dt_days, verbose);
+        let res = self.solve_rt_step_rust(&c_0_arr, d, dt_days, verbose);
 
         match res {
             Ok(x) => Ok(x.to_pyarray(py)),
             Err(e) => Err(e),
         }
     }
+
 
     #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
     pub fn step<'py>(
@@ -526,141 +687,19 @@ impl RtZone {
         dt_days: f64,
         verbose: bool,
     ) -> PyResult<RtStep> {
-        // Solve kinetic reactions first
-        let num_spec: usize = self.network.num_species();
-        let c_0_arr: Array1<molar> = c_0.to_owned_array(); // Initial concentrations in the zone
-        let c_in: &Array1<molar> = &d._conc_in;
-        let tot_moles_init: Array1<moles> = self.get_tot_moles_rust(&c_0_arr, d); // Initial moles of each species at the start of the step
-        let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
-        let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
-        let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
-        let tot_moles_ext: Array1<f64> = q_ext * c_in; // Total moles that just pass through the zone and do not interact with mass balance
-
-        let set_minerals_to_zero = |conc: Array1<f64>| {
-            let mut x = conc.clone();
-            for i in self.network.num_aqueous_species()..self.network.num_species() {
-                x[i] = 0.0
-            }
-            x
-        };
-
-        // let mobile_mask: Array1<bool> = self.network.mobile_mask_rust();
-
-        // let num_mobile = self.network.num_aqueous_species();
-        // let mut c_mobile = Array1::zeros(num_mobile);
-        // for i in 0..num_mobile {
-        //     c_mobile[i] = c_0_arr[i];
-        // }
-        let c_after_rt: Array1<molar> =
-            self.solve_rt_step_rust(py, &c_0_arr, d, dt_days, verbose)?;
-        // let mut c_after_rt = c_0_arr.clone();
-        // for (i, c_i) in c_mobile_after_rt.iter().enumerate() {
-        //     c_after_rt[i] = *c_i;
-        // }
-
-        // dbg!(&c_after_rt);
-        if verbose {
-            eprintln!("c_after_rt={}", &c_after_rt);
-        }
-
-        let c_after_eq = match self.do_speciation {
-            false => c_after_rt.clone(),
-            true => {
-                if self.num_free() == 0 {
-                    // The network has no equilibrium reactions (empty null space,
-                    // e.g. the simple carbon network), so there are no free
-                    // variables to solve for: nothing to re-speciate. The kinetic
-                    // concentrations are already the final answer.
-                    c_after_rt.clone()
-                } else {
-                    // Warm-start the speciation Newton iteration with the `x_free`
-                    // solution from the previous time step (concentrations move
-                    // slowly, so it is an excellent initial guess).
-                    let initial_x = self.last_x_free.get(self.num_free());
-                    let x_free = self.eq.x_free_solve_rust(&c_after_rt, &initial_x, verbose)?;
-                    self.last_x_free.set(x_free.clone());
-                    self.eq.conc_func_rust(&x_free)
-                }
-            }
-        };
-
-        if c_after_eq.len() != num_spec {
-            let msg = format!(
-                "c_after_eq has the wrong shape, should have length {}, but is {}",
-                num_spec, &c_after_eq
-            );
-            return Err(PyValueError::new_err(msg));
-        }
-
-        if verbose {
-            eprintln!("c_after_eq={}", &c_after_eq);
-        }
-
-        let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);
-
-        let tot_moles_out_internal: Array1<moles> = set_minerals_to_zero(&c_after_eq * q_int); // Minerals are immobile
-
-        let tot_moles_out: Array1<moles> =
-            set_minerals_to_zero(&tot_moles_ext + tot_moles_out_internal);
-
-        let total_q_out_water: f64 = q_int + q_ext;
-        let frac_lat = d.hydro_step.lat_flux_ext / total_q_out_water;
-        let frac_vert = d.hydro_step.vert_flux_ext / total_q_out_water;
-
-        let lat_mass: Array1<moles>;
-        let vert_mass: Array1<moles>;
-        let lat_conc: Array1<molar>;
-        let vert_conc: Array1<molar>;
-        let (lat_mass, vert_mass, lat_conc, vert_conc) = match q_int + q_ext > 1e-6 {
-            true => {
-                let lat: Array1<moles> = &tot_moles_out * frac_lat;
-                let vert: Array1<moles> = &tot_moles_out * frac_vert;
-                let mut lc: Array1<molar> = lat.clone();
-                let mut vc: Array1<molar> = vert.clone();
-
-                let q_lat = d.hydro_step.lat_flux_ext;
-                let q_vert = d.hydro_step.vert_flux_ext;
-
-                for (i, (l_i, v_i)) in lat.iter().zip(&vert).enumerate() {
-                    if i < self.network.num_aqueous_species() {
-                        if q_lat.abs() <= 1e-6 {
-                            lc[i] = ZERO_CONC;
-                        } else {
-                            lc[i] = l_i / q_lat;
-                        }
-                        if q_vert.abs() <= 1e-6 {
-                            vc[i] = ZERO_CONC;
-                        } else {
-                            vc[i] = v_i / q_vert;
-                        }
-                    }
-                }
-
-                (lat, vert, lc, vc)
-            }
-            false => {
-                let num_species = c_0_arr.len();
-                let z: Array1<f64> = Array1::from_elem(num_species, ZERO_CONC);
-
-                (z.clone(), z.clone(), z.clone(), z.clone())
-            }
-        };
-
-        let mineral_rates: Array1<f64> = match self.do_reactions {
-            true => self.reaction_rate_rust(&c_after_eq, d, true),
-            false => Array1::zeros(self.network.num_minerals()),
-        };
-
+        let c_0_arr: Array1<f64> = c_0.to_owned_array();
+        let r = self.step_internal(&c_0_arr, d, dt_days, verbose)?;
+        let conc_in = d._conc_in.clone();
         Ok(RtStep {
-            state: c_after_eq.to_pyarray(py).unbind(),
-            total_moles: tot_moles_after_eq.to_pyarray(py).unbind(),
-            conc_in: d._conc_in.clone().to_pyarray(py).unbind(),
-            mass_in: (&d._conc_in * d.hydro_step.q_in).to_pyarray(py).unbind(),
-            lat_conc: lat_conc.clone().to_pyarray(py).unbind(),
-            vert_conc: vert_conc.clone().to_pyarray(py).unbind(),
-            lat_mass: lat_mass.to_pyarray(py).unbind(),
-            vert_mass: vert_mass.to_pyarray(py).unbind(),
-            mineral_rates: mineral_rates.to_pyarray(py).unbind(),
+            state: r.state.to_pyarray(py).unbind(),
+            total_moles: r.total_moles.to_pyarray(py).unbind(),
+            conc_in: conc_in.to_pyarray(py).unbind(),
+            mass_in: r.mass_in.to_pyarray(py).unbind(),
+            lat_conc: r.lat_conc.to_pyarray(py).unbind(),
+            vert_conc: r.vert_conc.to_pyarray(py).unbind(),
+            lat_mass: r.lat_mass.to_pyarray(py).unbind(),
+            vert_mass: r.vert_mass.to_pyarray(py).unbind(),
+            mineral_rates: r.mineral_rates.to_pyarray(py).unbind(),
         })
     }
 
@@ -1125,4 +1164,176 @@ where
     let ode = kinetic_ode_from_terms(network, &terms, misc, d, conc, q_in, min_start, do_reactions);
     let res = (c_0 - conc) + (dt_days * ode);
     (res, jac_x)
+}
+
+/// Convert a pure-Rust [`StepResultAll`] into the Python-visible [`RtStep`],
+/// mirroring exactly what the single-zone `step` pymethod builds.
+fn make_rt_step<'py>(py: Python<'py>, r: &StepResultAll, conc_in: &Array1<molar>) -> RtStep {
+    RtStep {
+        state: r.state.to_pyarray(py).unbind(),
+        total_moles: r.total_moles.to_pyarray(py).unbind(),
+        conc_in: conc_in.to_pyarray(py).unbind(),
+        mass_in: r.mass_in.to_pyarray(py).unbind(),
+        lat_conc: r.lat_conc.to_pyarray(py).unbind(),
+        vert_conc: r.vert_conc.to_pyarray(py).unbind(),
+        lat_mass: r.lat_mass.to_pyarray(py).unbind(),
+        vert_mass: r.vert_mass.to_pyarray(py).unbind(),
+        mineral_rates: r.mineral_rates.to_pyarray(py).unbind(),
+    }
+}
+
+/// Pure-Rust driver for one time step across every reactive-transport zone.
+///
+/// This replaces the per-zone Python loop in `ReactiveTransportModel.step_rt_model`
+/// with a single GIL boundary crossing. Zones are advanced in order `i = 0..n`,
+/// and each zone's incoming concentration is computed from the lateral/vertical
+/// mass fluxes of the zones already solved earlier in the same step
+/// (Gauss-Seidel coupling) exactly as the Python loop did:
+///
+/// ```text
+/// mass_in      = lat_mass.T @ lat_mat[i]  +  vert_mass.T @ vert_mat[i]
+/// conc_in      = mass_in / (q_in + forc_flux)   if > 1e-6 else 0
+/// ```
+///
+/// Surface zones skip the coupling (their precipitation `_conc_in` is already set).
+/// Returns one [`RtStep`] per zone in the same order as the input `zones`.
+#[pyfunction]
+#[pyo3(signature = (zones, states, forcings, lat_mat, vert_mat, surface_zone_ids, dt, verbose=false))]
+pub fn run_zone_steps<'py>(
+    py: Python<'py>,
+    zones: Vec<Bound<'py, RtZone>>,
+    states: PyReadonlyArray2<f64>,
+    forcings: Vec<RtForcing>,
+    lat_mat: PyReadonlyArray2<f64>,
+    vert_mat: PyReadonlyArray2<f64>,
+    surface_zone_ids: Vec<usize>,
+    dt: f64,
+    verbose: bool,
+) -> (Vec<RtStep>, Option<(usize, PyErr, Bound<'py, PyArray1<molar>>)>)
+{
+    let n_zones: usize = zones.len();
+    // Get plain ndarray views upfront (cheaper than calling `.shape()` /
+    // indexing on `PyReadonlyArray2` inside the loop).
+    let states_arr: Array2<f64> = states.as_array().to_owned();
+    let lat_mat_arr: Array2<f64> = lat_mat.as_array().to_owned();
+    let vert_mat_arr: Array2<f64> = vert_mat.as_array().to_owned();
+
+    if states_arr.shape()[0] != n_zones {
+        return (
+            Vec::new(),
+            Some((
+                0,
+                PyValueError::new_err("`states` first dimension must equal the number of zones"),
+                Array1::<f64>::zeros(0).to_pyarray(py),
+            )),
+        );
+    }
+    if forcings.len() != n_zones {
+        return (
+            Vec::new(),
+            Some((
+                0,
+                PyValueError::new_err("number of forcings must equal the number of zones"),
+                Array1::<f64>::zeros(0).to_pyarray(py),
+            )),
+        );
+    }
+    if n_zones == 0 {
+        return (Vec::new(), None);
+    }
+    let n_spec: usize = states_arr.shape()[1];
+
+    // Set of surface zones (their incoming concentration is precipitation, not
+    // the upstream mass flux, so the coupling step is skipped for them).
+    // An out-of-range surface id is reported through the same error channel as a
+    // step failure (using the last zone index as a best-effort marker), rather
+    // than aborting the whole GIL boundary.
+    let mut surface = vec![false; n_zones];
+    let mut bad_id = None;
+    for &id in &surface_zone_ids {
+        if id >= n_zones {
+            bad_id = Some(id);
+            break;
+        }
+        surface[id] = true;
+    }
+    if let Some(id) = bad_id {
+        return (
+            Vec::new(),
+            Some((
+                0,
+                PyValueError::new_err(format!(
+                    "surface zone id {id} is out of range (num zones {n_zones})"
+                )),
+                Array1::<f64>::zeros(0).to_pyarray(py),
+            )),
+        );
+    }
+
+    // `forcings` is already an owned clone of the Python list (extraction copies
+    // each pyclass), so we can write each zone's `_conc_in` in place without ever
+    // touching the caller's objects.
+    let mut owns: Vec<RtForcing> = forcings;
+
+    let mut lat_mass: Array2<molar> = Array2::zeros((n_zones, n_spec));
+    let mut vert_mass: Array2<molar> = Array2::zeros((n_zones, n_spec));
+
+    let mut out: Vec<RtStep> = Vec::with_capacity(n_zones);
+
+    for i in 0..n_zones {
+        let d: &mut RtForcing = &mut owns[i];
+        let tot_water_in: f64 = d.hydro_step.q_in + d.hydro_step.forc_flux;
+
+        if !surface[i] {
+            // Mass arriving from the zones already solved earlier this step.
+            // Equivalent to the Python `mass_in = lat_mass.T @ lat_row + vert_mass.T @ vert_row`
+            // (both accumulate over the *rows* k of the mass matrices that have
+            // been filled so far, i.e. the previously-solved zones).
+            let mut mass_in: Array1<molar> = Array1::zeros(n_spec);
+            let lat_row = &lat_mat_arr.row(i);
+            let vert_row = &vert_mat_arr.row(i);
+            for sp in 0..n_spec {
+                let mut li = 0.0;
+                let mut vi = 0.0;
+                for k in 0..n_zones {
+                    li += lat_mass[[k, sp]] * lat_row[k];
+                    vi += vert_mass[[k, sp]] * vert_row[k];
+                }
+                mass_in[sp] = li + vi;
+            }
+            if tot_water_in > 1e-6 {
+                for sp in 0..n_spec {
+                    mass_in[sp] /= tot_water_in;
+                }
+            } else {
+                mass_in.fill(0.0);
+            }
+            d._conc_in = mass_in;
+        }
+
+        let s_i: Array1<f64> = states_arr.row(i).to_owned();
+        // Borrow the zone (no deep clone): `Bound::borrow()` yields a `PyRef<T>`
+        // that derefs to `&T`. The zone is only read (`step_internal` is `&self`),
+        // so a shared borrow is all we need; the speciation cache (an `Arc`)
+        // stays shared with the caller across steps, so warm-starts still work.
+        let zone = zones[i].borrow();
+        match zone.step_internal(&s_i, d, dt, verbose) {
+            Ok(r) => {
+                // Record outgoing mass so downstream zones (k > i) can consume it.
+                lat_mass.row_mut(i).assign(&r.lat_mass);
+                vert_mass.row_mut(i).assign(&r.vert_mass);
+                out.push(make_rt_step(py, &r, &d._conc_in));
+            }
+            Err(e) => {
+                // Hand back everything needed to reproduce the failure in
+                // Python: the failing zone index, the *original* exception
+                // (type preserved, e.g. OptimizationError), and the incoming
+                // concentration that zone was about to step from.
+                let conc_in = d._conc_in.to_pyarray(py);
+                return (out, Some((i, e, conc_in)));
+            }
+        }
+    }
+
+    (out, None)
 }

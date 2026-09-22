@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 authors = [{ name = "Andrew Vierbicher", email = "acv5255@psu.edu" }]
 name = "potions-model"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = ["numpy", "scipy", "pandas>=3", "matplotlib", "emcee", "networkx"]
 description = "A simple and flexible hydrologic modeling package"
 requires-python = ">= 3.10"
@@ -21,3 +21,10 @@ python-source = "src"
 features = ["pyo3/extension-module"]
 manifest-path = "rust/Cargo.toml"
 module-name = "potions.core"
+
+[tool.pytest.ini_options]
+# The pure-Python test suite. Run it in the `potions` conda environment, which
+# has the compiled `potions.core` extension installed (editable):
+#     conda run -n potions python -m pytest -q
+testpaths = ["src/potions/tests"]
+pythonpath = ["src"]

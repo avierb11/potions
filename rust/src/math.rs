@@ -89,8 +89,19 @@ use crate::{common_types::HydroForcing, hydro::HydrologicZone};
 const FIND_ROOT_TOL: f64 = 1e-6;
 const FIND_ROOT_MAXITER: usize = 100;
 const MULTI_MAXITER: usize = 100;
-const MULTI_TOL: f64 = 1e-12;
+/// Absolute-residual convergence bar for the multi-species solvers
+/// (Newton + Levenberg-Marquardt fallback). The error is measured as the
+/// *component-wise maximum* `max|f|` (absolute error per conservation/charge
+/// balance), so `MULTI_TOL = 1e-6` is exactly "absolute error < 1e-6".
+const MULTI_TOL: f64 = 1e-6;
+/// Relative-step bar for declaring an iterate "stopped moving" (a backstop
+/// exit; the primary exit is the `max|f| <= MULTI_TOL` residual test).
 const MULTI_TOL_STEP: f64 = 1e-12;
+/// Sufficient-decrease slope for the Armijo backtracking line search applied
+/// to every full Newton step (in units of the squared residual norm).
+const ARMIJO_C: f64 = 1e-4;
+/// Maximum number of halvings in the Armijo backtracking line search.
+const LINE_SEARCH_MAX: usize = 30;
 const APPROX_FPRIME_DX: f64 = 1e-8;
 const APPROX_FPRIME_REL_DX: f64 = 1e-3;
 const F_PRIME_MIN_VAL: f64 = 1e-22;
@@ -282,7 +293,7 @@ fn describe_vector(v: &Array1<f64>) -> String {
 /// through [`make_error_from_parts`]).
 fn enrich_state_message(state: &OptimizerState, subsystem: &str, reason: &str) -> String {
     let diag = format!(
-        "iteration={}/{} | residual mean|f|={} | x=[{}] | J: {}",
+        "iteration={}/{} | max|f|={} | x=[{}] | J: {}",
         state.iteration,
         MULTI_MAXITER,
         state.error,
@@ -541,6 +552,8 @@ struct MultiFailureParts {
     initial_x: Array1<f64>,
     jacobian: Array2<f64>,
     error: f64,
+    best_x: Array1<f64>,
+    best_err: f64,
     errors: Vec<f64>,
     xs: Vec<Array1<f64>>,
     fxs: Vec<Array1<f64>>,
@@ -554,10 +567,11 @@ fn make_error_from_parts(parts: MultiFailureParts, reason: String) -> PyErr {
     // available via `OptimizationError`'s getters; this is the human-readable
     // line that survives into logs and `str(exception)`.
     let diag = format!(
-        "iteration={}/{} | residual mean|f|={} | residual f=[{}] | x=[{}] | J: {}",
+        "iteration={}/{} | max|f|={} | best max|f|={} | residual f=[{}] | x=[{}] | J: {}",
         parts.iteration,
         MULTI_MAXITER,
         parts.error,
+        parts.best_err,
         describe_vector(&parts.last_f_x),
         describe_vector(&parts.final_x),
         describe_matrix(&parts.jacobian)
@@ -603,6 +617,49 @@ fn max_abs(v: &Array1<f64>) -> f64 {
     v.iter().map(|a| a.abs()).fold(0.0f64, f64::max)
 }
 
+/// Armijo sufficient-decrease test (in squared-residual-norm units) for a trial
+/// step of length `alpha` taken from `f_x` to `f_new`.
+fn satisfies_sufficient_decrease(f_new: &Array1<f64>, f_x: &Array1<f64>, alpha: f64) -> bool {
+    if f_new.is_any_nan() {
+        return false;
+    }
+    let norm_new: f64 = f_new.iter().map(|x| x * x).sum();
+    let norm_x: f64 = f_x.iter().map(|x| x * x).sum();
+    norm_new <= (1.0 - ARMIJO_C * alpha) * norm_x
+}
+
+/// Armijo backtracking along a Newton direction.
+///
+/// Given the current iterate `x`, its residual `f_x`, and a candidate Newton
+/// step `d` (so that `x_new = x - d`), return the residual at the largest step
+/// `alpha` in `{1, 1/2, 1/4, ...}` that achieves a sufficient decrease of the
+/// *squared* residual norm. `alpha = 1` reproduces plain undamped Newton;
+/// halving only occurs when the full step overshoots (e.g. the exponential
+/// `10^(N x + b)` speciation residual, where a large step flings the iterate
+/// across the basin and pure Newton oscillates instead of converging). Returns
+/// `None` if no step as small as `2^-LINE_SEARCH_MAX` reduces the residual: the
+/// iterate has stalled.
+fn backtrack_line_search<F>(
+    f: &F,
+    x: &Array1<f64>,
+    f_x: &Array1<f64>,
+    d: &Array1<f64>,
+) -> Option<(Array1<f64>, Array1<f64>)>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let mut alpha: f64 = 1.0;
+    for _ in 0..LINE_SEARCH_MAX {
+        let x_new: Array1<f64> = x - (alpha * d);
+        let f_new: Array1<f64> = f(&x_new);
+        if satisfies_sufficient_decrease(&f_new, f_x, alpha) {
+            return Some((x_new, f_new));
+        }
+        alpha *= 0.5;
+    }
+    None
+}
+
 fn newton_relative_step_step(x: &Array1<f64>, step: &Array1<f64>) -> bool {
     let x_scale: f64 = f64::max(max_abs(x), 1.0);
     let step_norm: f64 = max_abs(step);
@@ -610,30 +667,17 @@ fn newton_relative_step_step(x: &Array1<f64>, step: &Array1<f64>) -> bool {
 }
 
 /// Fraction of the *initial* objective that a stalled iterate must reach before
-/// it is accepted as a converged plateau (on top of an absolute floor chosen by
-/// the caller). The Newton primaries keep a strict floor of `MULTI_TOL` (1e-12):
-/// when one of them stalls just above that, it must *fail* so the caller can
-/// defer to the Levenberg-Marquardt fallback — loosening the primary here would
-/// accept a transient plateau, skip the fallback, and propagate a coarser state
-/// downstream.
+/// it is accepted as a converged plateau (on top of the absolute floor chosen by
+/// the caller). The absolute floor is `MULTI_TOL` (1e-6, `max|f|`) for both the
+/// Newton primaries and the Levenberg-Marquardt fallback: every accepted solve —
+/// primary or fallback — must satisfy the same "absolute error < 1e-6" bar.
 const STAGNATION_REL_TOL: f64 = 1e-9;
-
-/// Physical-residual floor, in `mean|f|` units, used *only* by the
-/// Levenberg-Marquardt path as its last-chance plateau bar. An ill-conditioned
-/// exponential `10^(N x)` speciation step — especially when warm-started from the
-/// previous time step, which collapses the `STAGNATION_REL_TOL` term toward
-/// zero — legitimately stalls a few decades above `MULTI_TOL`. That is already a
-/// physically-converged state; LM is the fallback of last resort, so accepting it
-/// here cannot suppress a later, better solve. The floor sits ~3 orders of
-/// magnitude below any genuine mis-solve (whose residual stays O(0.1)-O(1)), so
-/// a real failure is still reported.
-const STAGNATION_LM_FLOOR: f64 = 1e-4;
 
 /// The objective `err` must fall below the *larger* of `abs_floor` and
 /// `STAGNATION_REL_TOL` times the objective at the solver's start, for a stalled
-/// iterate to be accepted. Passing `MULTI_TOL` as `abs_floor` reproduces the
-/// strict (Newton-primary) bar; passing `STAGNATION_LM_FLOOR` relaxes the bar
-/// for the LM fallback so a warm-started converged plateau is not over-rejected.
+/// iterate to be accepted. Callers always pass `MULTI_TOL` as `abs_floor`, so an
+/// accepted plateau always meets the absolute-residual bar; `STAGNATION_REL_TOL`
+/// only ever *tightens* the bar for large residuals on cold starts.
 fn stagnation_objective_bar(abs_floor: f64, initial_err: f64) -> f64 {
     abs_floor.max(STAGNATION_REL_TOL * initial_err)
 }
@@ -641,8 +685,7 @@ fn stagnation_objective_bar(abs_floor: f64, initial_err: f64) -> f64 {
 /// Whether a solve should be accepted as a converged plateau: the relative step
 /// `step_converged` is true (the iterate has stopped moving, e.g. LM damping at
 /// its cap) and the best objective found is at or below the stagnation bar for
-/// this solve. `abs_floor` selects the strict (Newton) or relaxed (LM) bar.
-/// Callers pass the best objective seen so the plateau, not the
+/// this solve. Callers pass the best objective seen so the plateau, not the
 /// (possibly-worse) current iterate, decides.
 fn should_accept_stagnation(
     step_converged: bool,
@@ -654,15 +697,15 @@ fn should_accept_stagnation(
 }
 
 /// Find the root of the linear problem using Newton's method with a
-/// finite-difference Jacobian
+/// finite-difference Jacobian, an Armijo backtracking line search, and a
+/// `max|f| <= MULTI_TOL` (1e-6) absolute-residual convergence test.
 pub fn find_root_multi<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
 where
     F: Fn(&Array1<f64>) -> Array1<f64>,
 {
     let mut x: Array1<f64> = x_0.clone();
     let mut f_x: Array1<f64> = f(&x);
-    let mut err: f64 = f_x.abs().mean().unwrap();
-    let initial_err: f64 = err;
+    let mut err: f64 = max_abs(&f_x);
     let mut best_x: Array1<f64> = x.clone();
     let mut best_err: f64 = err;
     let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
@@ -671,6 +714,8 @@ where
     let mut fxs: Vec<Array1<f64>> = vec![f_x.clone()];
     let mut jacobians: Vec<Array2<f64>> = Vec::new();
     errors.push(err);
+
+    let mut converged_iter: Option<usize> = None;
 
     for i in 0..MULTI_MAXITER {
         if err <= MULTI_TOL {
@@ -688,6 +733,8 @@ where
                 initial_x: x_0.clone(),
                 jacobian: jac_x.clone(),
                 error: err,
+                best_x: best_x.clone(),
+                best_err,
                 errors: std::mem::take(&mut errors),
                 xs: std::mem::take(&mut xs),
                 fxs: std::mem::take(&mut fxs),
@@ -706,6 +753,8 @@ where
                         initial_x: x_0.clone(),
                         jacobian: jac_x.clone(),
                         error: err,
+                        best_x: best_x.clone(),
+                        best_err,
                         errors: std::mem::take(&mut errors),
                         xs: std::mem::take(&mut xs),
                         fxs: std::mem::take(&mut fxs),
@@ -716,19 +765,24 @@ where
             }
         };
 
-        let x_new: Array1<f64> = &x - &step;
-        let converged = newton_relative_step_step(&x, &step);
-        x = x_new;
-        f_x = f(&x);
-        err = f_x.abs().mean().unwrap();
-        if err < best_err && !err.is_nan() {
-            best_err = err;
-            best_x = x.clone();
+        match backtrack_line_search(f, &x, &f_x, &step) {
+            Some((x_new, f_new)) => {
+                x = x_new;
+                f_x = f_new;
+                err = max_abs(&f_x);
+                if err < best_err && !err.is_nan() {
+                    best_err = err;
+                    best_x = x.clone();
+                }
+                errors.push(err);
+                xs.push(x.clone());
+                fxs.push(f_x.clone());
+            }
+            None => {
+                converged_iter = Some(i);
+                break;
+            }
         }
-        errors.push(err);
-
-        xs.push(x.clone());
-        fxs.push(f_x.clone());
 
         if verbose {
             Python::attach(|py| {
@@ -739,24 +793,22 @@ where
                 })
             });
         }
-
-        if converged && err <= MULTI_TOL {
-            return Ok(x);
-        }
-        // The iterate has stopped moving; accept the best iterate if the residual
-        // is a physically-converged plateau rather than a genuine failure.
-        if should_accept_stagnation(converged, MULTI_TOL, initial_err, best_err) {
-            return Ok(best_x);
-        }
     }
 
+    // Genuine stall (line search exhausted) or iteration budget used up: accept
+    // the best iterate seen if it meets the absolute-residual bar.
+    if best_err <= MULTI_TOL {
+        return Ok(best_x);
+    }
     Err(newton_failure(MultiFailureParts {
-        iteration: MULTI_MAXITER,
+        iteration: converged_iter.unwrap_or(MULTI_MAXITER),
         final_x: x,
         last_f_x: f_x,
         initial_x: x_0,
         jacobian: jac_x,
         error: err,
+        best_x,
+        best_err,
         errors,
         xs,
         fxs,
@@ -769,7 +821,12 @@ where
 ///
 /// Each iteration evaluates the residual once and the Jacobian once, which is
 /// dramatically cheaper than the `n + 1` residual evaluations required by the
-/// finite-difference version ([`find_root_multi`]).
+/// finite-difference version ([`find_root_multi`]). A full Newton step is tried
+/// first and then pruned by an Armijo backtracking line search; convergence is
+/// declared when the component-wise absolute residual `max|f| <= MULTI_TOL`
+/// (1e-6). When the iteration budget is exhausted or the iterate stalls, the
+/// *best* residual reached (not the possibly-worse current one) is returned if
+/// it meets the bar.
 pub fn find_root_multi_analytic<'a, F, G>(
     f: &F,
     jf: &G,
@@ -780,10 +837,54 @@ where
     F: Fn(&Array1<f64>) -> Array1<f64>,
     G: Fn(&Array1<f64>) -> Array2<f64>,
 {
+    match newton_analytic_core(f, jf, x_0, verbose) {
+        Ok(x) => Ok(x),
+        Err(parts) => Err(newton_failure(parts)),
+    }
+}
+
+/// Newton-with-analytical-Jacobian followed by a Levenberg-Marquardt fallback
+/// that *resumes from the best iterate Newton reached*, rather than restarting
+/// from the original warm start.
+///
+/// Newton is the preferred solver (efficient, analytic Jacobian, line search);
+/// LM is only reached when Newton genuinely cannot reach `max|f| <= MULTI_TOL`.
+/// The fallback also receives the analytic Jacobian, so it is not degraded by
+/// finite-difference noise.
+pub fn find_root_multi_analytic_then_lm<'a, F, G>(
+    f: &F,
+    jf: &G,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+    G: Fn(&Array1<f64>) -> Array2<f64>,
+{
+    match newton_analytic_core(f, jf, x_0, verbose) {
+        Ok(x) => Ok(x),
+        Err(parts) => levenberg_marquardt_with_jacobian(f, jf, parts.best_x, verbose),
+    }
+}
+
+/// Shared Newton iterate body used by the analytic and
+/// analytic-then-Levenberg-Marquardt entry points. Returns `Ok(best_x)` when the
+/// absolute-residual bar is met; otherwise `Err(MultiFailureParts)` carrying the
+/// usual diagnostics *plus* the best iterate (`best_x`) and its error, so a
+/// caller can warm-start a fallback from the best point Newton saw.
+fn newton_analytic_core<F, G>(
+    f: &F,
+    jf: &G,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> Result<Array1<f64>, MultiFailureParts>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+    G: Fn(&Array1<f64>) -> Array2<f64>,
+{
     let mut x: Array1<f64> = x_0.clone();
     let mut f_x: Array1<f64> = f(&x);
-    let mut err: f64 = f_x.abs().mean().unwrap_or(f64::MAX);
-    let initial_err: f64 = err;
+    let mut err: f64 = max_abs(&f_x);
     let mut best_x: Array1<f64> = x.clone();
     let mut best_err: f64 = err;
 
@@ -802,6 +903,7 @@ where
     let mut fxs: Vec<Array1<f64>> = vec![f_x.clone()];
     let mut jacobians: Vec<Array2<f64>> = Vec::new();
     errors.push(err);
+    let mut stall_iter: Option<usize> = None;
 
     for i in 0..MULTI_MAXITER {
         if err <= MULTI_TOL {
@@ -812,54 +914,60 @@ where
         jacobians.push(jac_x.clone());
 
         if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
-            return Err(newton_nan_error(MultiFailureParts {
+            return Err(MultiFailureParts {
                 iteration: i,
                 final_x: x.clone(),
                 last_f_x: f_x.clone(),
                 initial_x: x_0.clone(),
                 jacobian: jac_x.clone(),
                 error: err,
+                best_x: best_x.clone(),
+                best_err,
                 errors: std::mem::take(&mut errors),
                 xs: std::mem::take(&mut xs),
                 fxs: std::mem::take(&mut fxs),
                 jacobians: std::mem::take(&mut jacobians),
-            }));
+            });
         }
 
         let step: Array1<f64> = match solve_with_fallback_f64(&jac_x, &f_x) {
             Ok(v) => v,
             Err(e) => {
-                return Err(newton_linear_error(
-                    MultiFailureParts {
-                        iteration: i,
-                        final_x: x.clone(),
-                        last_f_x: f_x.clone(),
-                        initial_x: x_0.clone(),
-                        jacobian: jac_x.clone(),
-                        error: err,
-                        errors: std::mem::take(&mut errors),
-                        xs: std::mem::take(&mut xs),
-                        fxs: std::mem::take(&mut fxs),
-                        jacobians: std::mem::take(&mut jacobians),
-                    },
-                    e,
-                ))
+                return Err(MultiFailureParts {
+                    iteration: i,
+                    final_x: x.clone(),
+                    last_f_x: f_x.clone(),
+                    initial_x: x_0.clone(),
+                    jacobian: jac_x.clone(),
+                    error: err,
+                    best_x: best_x.clone(),
+                    best_err,
+                    errors: std::mem::take(&mut errors),
+                    xs: std::mem::take(&mut xs),
+                    fxs: std::mem::take(&mut fxs),
+                    jacobians: std::mem::take(&mut jacobians),
+                });
             }
         };
 
-        let x_new: Array1<f64> = &x - &step;
-        let converged = newton_relative_step_step(&x, &step);
-        x = x_new;
-        f_x = f(&x);
-        err = f_x.abs().mean().unwrap();
-        if err < best_err && !err.is_nan() {
-            best_err = err;
-            best_x = x.clone();
+        match backtrack_line_search(f, &x, &f_x, &step) {
+            Some((x_new, f_new)) => {
+                x = x_new;
+                f_x = f_new;
+                err = max_abs(&f_x);
+                if err < best_err && !err.is_nan() {
+                    best_err = err;
+                    best_x = x.clone();
+                }
+                errors.push(err);
+                xs.push(x.clone());
+                fxs.push(f_x.clone());
+            }
+            None => {
+                stall_iter = Some(i);
+                break;
+            }
         }
-        errors.push(err);
-
-        xs.push(x.clone());
-        fxs.push(f_x.clone());
 
         if verbose {
             Python::attach(|py| {
@@ -870,29 +978,27 @@ where
                 })
             });
         }
-
-        if converged && err <= MULTI_TOL {
-            return Ok(x);
-        }
-        // Stalled iterate: accept the best iterate if the residual is a
-        // physically-converged plateau rather than a genuine failure.
-        if should_accept_stagnation(converged, MULTI_TOL, initial_err, best_err) {
-            return Ok(best_x);
-        }
     }
 
-    Err(newton_failure(MultiFailureParts {
-        iteration: MULTI_MAXITER,
+    // Line search exhausted or the iteration budget was used up: accept the best
+    // iterate seen if it meets the absolute-residual bar.
+    if best_err <= MULTI_TOL {
+        return Ok(best_x);
+    }
+    Err(MultiFailureParts {
+        iteration: stall_iter.unwrap_or(MULTI_MAXITER),
         final_x: x,
         last_f_x: f_x,
         initial_x: x_0,
         jacobian: jac_x,
         error: err,
+        best_x,
+        best_err,
         errors,
         xs,
         fxs,
         jacobians,
-    }))
+    })
 }
 
 /// Find the root of a nonlinear system using Newton's method with a *fused*
@@ -912,12 +1018,49 @@ pub fn find_root_multi_analytic_fused<'a, E>(
 where
     E: Fn(&Array1<f64>) -> (Array1<f64>, Array2<f64>),
 {
+    match newton_fused_core(&ej, x_0, verbose) {
+        Ok(x) => Ok(x),
+        Err(parts) => Err(newton_failure(parts)),
+    }
+}
+
+/// Newton-with-fused-analytical-Jacobian followed by a Levenberg-Marquardt
+/// fallback that resumes from Newton's best iterate and reuses the analytic
+/// Jacobian (extracted from the fused evaluation), rather than restarting from
+/// the original warm start with a finite-difference Jacobian.
+pub fn find_root_multi_analytic_fused_then_lm<'a, E>(
+    ej: E,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    E: Fn(&Array1<f64>) -> (Array1<f64>, Array2<f64>),
+{
+    match newton_fused_core(&ej, x_0, verbose) {
+        Ok(x) => Ok(x),
+        Err(parts) => {
+            let f_lm = |c: &Array1<f64>| ej(c).0;
+            let jf_lm = |c: &Array1<f64>| ej(c).1;
+            levenberg_marquardt_with_jacobian(&f_lm, &jf_lm, parts.best_x, verbose)
+        }
+    }
+}
+
+/// Shared Newton iterate body for the fused entry points; see
+/// [`newton_analytic_core`] for the contract.
+fn newton_fused_core<E>(
+    ej: &E,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> Result<Array1<f64>, MultiFailureParts>
+where
+    E: Fn(&Array1<f64>) -> (Array1<f64>, Array2<f64>),
+{
     let mut x: Array1<f64> = x_0.clone();
     let (f_x, jac_x_0) = ej(&x);
     let mut f_x: Array1<f64> = f_x;
     let mut jac_x: Array2<f64> = jac_x_0;
-    let mut err: f64 = f_x.abs().mean().unwrap_or(f64::MAX);
-    let initial_err: f64 = err;
+    let mut err: f64 = max_abs(&f_x);
     let mut best_x: Array1<f64> = x.clone();
     let mut best_err: f64 = err;
 
@@ -935,6 +1078,7 @@ where
     let mut fxs: Vec<Array1<f64>> = vec![f_x.clone()];
     let mut jacobians: Vec<Array2<f64>> = Vec::new();
     errors.push(err);
+    let mut stall_iter: Option<usize> = None;
 
     for i in 0..MULTI_MAXITER {
         if err <= MULTI_TOL {
@@ -944,54 +1088,71 @@ where
         jacobians.push(jac_x.clone());
 
         if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
-            return Err(newton_nan_error(MultiFailureParts {
+            return Err(MultiFailureParts {
                 iteration: i,
                 final_x: x.clone(),
                 last_f_x: f_x.clone(),
                 initial_x: x_0.clone(),
                 jacobian: jac_x.clone(),
                 error: err,
+                best_x: best_x.clone(),
+                best_err,
                 errors: std::mem::take(&mut errors),
                 xs: std::mem::take(&mut xs),
                 fxs: std::mem::take(&mut fxs),
                 jacobians: std::mem::take(&mut jacobians),
-            }));
+            });
         }
 
         let step: Array1<f64> = match solve_with_fallback_f64(&jac_x, &f_x) {
             Ok(v) => v,
             Err(e) => {
-                return Err(newton_linear_error(
-                    MultiFailureParts {
-                        iteration: i,
-                        final_x: x.clone(),
-                        last_f_x: f_x.clone(),
-                        initial_x: x_0.clone(),
-                        jacobian: jac_x.clone(),
-                        error: err,
-                        errors: std::mem::take(&mut errors),
-                        xs: std::mem::take(&mut xs),
-                        fxs: std::mem::take(&mut fxs),
-                        jacobians: std::mem::take(&mut jacobians),
-                    },
-                    e,
-                ))
+                return Err(MultiFailureParts {
+                    iteration: i,
+                    final_x: x.clone(),
+                    last_f_x: f_x.clone(),
+                    initial_x: x_0.clone(),
+                    jacobian: jac_x.clone(),
+                    error: err,
+                    best_x: best_x.clone(),
+                    best_err,
+                    errors: std::mem::take(&mut errors),
+                    xs: std::mem::take(&mut xs),
+                    fxs: std::mem::take(&mut fxs),
+                    jacobians: std::mem::take(&mut jacobians),
+                });
             }
         };
 
-        let x_new: Array1<f64> = &x - &step;
-        let converged = newton_relative_step_step(&x, &step);
-        x = x_new;
-        let (f_new, jac_new) = ej(&x);
-        f_x = f_new;
-        jac_x = jac_new;
-        err = f_x.abs().mean().unwrap();
+        // Backtracking line search that keeps the fused single-evaluation
+        // property: each trial computes the residual *and* the Jacobian, and the
+        // accepted step's Jacobian is reused for the next Newton step.
+        let mut accepted = false;
+        let mut alpha: f64 = 1.0;
+        for _ in 0..LINE_SEARCH_MAX {
+            let x_new: Array1<f64> = &x - (alpha * &step);
+            let (f_new, jac_new) = ej(&x_new);
+            if satisfies_sufficient_decrease(&f_new, &f_x, alpha) {
+                x = x_new;
+                f_x = f_new;
+                jac_x = jac_new;
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+
+        if !accepted {
+            stall_iter = Some(i);
+            break;
+        }
+
+        err = max_abs(&f_x);
         if err < best_err && !err.is_nan() {
             best_err = err;
             best_x = x.clone();
         }
         errors.push(err);
-
         xs.push(x.clone());
         fxs.push(f_x.clone());
 
@@ -1004,45 +1165,78 @@ where
                 })
             });
         }
-
-        if converged && err <= MULTI_TOL {
-            return Ok(x);
-        }
-        // Stalled iterate: accept the best iterate if the residual is a
-        // physically-converged plateau rather than a genuine failure.
-        if should_accept_stagnation(converged, MULTI_TOL, initial_err, best_err) {
-            return Ok(best_x);
-        }
     }
 
-    Err(newton_failure(MultiFailureParts {
-        iteration: MULTI_MAXITER,
+    // Line search exhausted or the iteration budget was used up: accept the best
+    // iterate seen if it meets the absolute-residual bar.
+    if best_err <= MULTI_TOL {
+        return Ok(best_x);
+    }
+    Err(MultiFailureParts {
+        iteration: stall_iter.unwrap_or(MULTI_MAXITER),
         final_x: x,
         last_f_x: f_x,
         initial_x: x_0,
         jacobian: jac_x,
         error: err,
+        best_x,
+        best_err,
         errors,
         xs,
         fxs,
         jacobians,
-    }))
+    })
 }
 
-pub fn levenberg_marquardt<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
+pub fn levenberg_marquardt<'a, F>(
+    f: &F,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    levenberg_marquardt_impl(f, None, x_0, verbose)
+}
+
+/// Levenberg-Marquardt with an *analytical* Jacobian. The Jacobian of the
+/// residual is supplied by `jf` (e.g. the analytical speciation Jacobian) so the
+/// fallback is not degraded by finite-difference noise on residuals spanning
+/// many orders of magnitude.
+pub fn levenberg_marquardt_with_jacobian<'a, F, G>(
+    f: &F,
+    jf: &G,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+    G: Fn(&Array1<f64>) -> Array2<f64>,
+{
+    levenberg_marquardt_impl(f, Some(jf), x_0, verbose)
+}
+
+fn levenberg_marquardt_impl<'a, F>(
+    f: &F,
+    jac: Option<&dyn Fn(&Array1<f64>) -> Array2<f64>>,
+    x_0: Array1<f64>,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
 where
     F: Fn(&Array1<f64>) -> Array1<f64>,
 {
     let mut x: Array1<f64> = x_0.clone();
     let mut f_x: Array1<f64> = f(&x);
-    // Levenberg-Marquardt's canonical objective is the summed squared residual.
-    // (Note: the diagnostic message reports `mean|f|`, not this, so the printed
-    // number understates this objective by orders of magnitude for a well-solved
-    // step — the objective, not the message, governs convergence.)
+    // Levenberg-Marquardt's damping/gain-ratio machinery is phrased in terms of
+    // the canonical summed-squared objective 0.5*||f||^2...
     let mut err: f64 = 0.5 * f_x.dot(&f_x);
-    let initial_err: f64 = err;
+    // ...but convergence and acceptance are judged on the component-wise
+    // absolute residual max|f|, the same metric the Newton primary uses, so the
+    // whole solver chain agrees on what "absolute error <= MULTI_TOL" means.
+    let mut err_max: f64 = max_abs(&f_x);
+    let initial_err_max: f64 = err_max;
     let mut best_x: Array1<f64> = x.clone();
-    let mut best_err: f64 = err;
+    let mut best_err: f64 = err_max;
     let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
     let mut errors: Vec<f64> = Vec::with_capacity(MULTI_MAXITER + 1);
     let mut xs: Vec<Array1<f64>> = vec![x.clone()];
@@ -1050,14 +1244,17 @@ where
     let mut jacobians: Vec<Array2<f64>> = Vec::new();
     let mut lambda = 1e-6;
     let mut lambdas: Vec<f64> = vec![lambda];
-    errors.push(err);
+    errors.push(err_max);
 
     for i in 0..MULTI_MAXITER {
-        if err <= MULTI_TOL {
+        if err_max <= MULTI_TOL {
             return Ok(x);
         }
 
-        jac_x = approx_fprime(f, &x, verbose);
+        jac_x = match jac {
+            Some(jf) => jf(&x),
+            None => approx_fprime(f, &x, verbose),
+        };
 
         if x.is_any_nan() || f_x.is_any_nan() || jac_x.is_any_nan() {
             let final_state = OptimizerState {
@@ -1066,7 +1263,7 @@ where
                 last_f_x: f_x.clone(),
                 initial_x: x_0.clone(),
                 jacobian: jac_x.clone(),
-                error: err,
+                error: err_max,
                 errors,
                 xs,
                 fxs,
@@ -1101,7 +1298,7 @@ where
                     last_f_x: f_x.clone(),
                     initial_x: x_0.clone(),
                     jacobian: jac_x.clone(),
-                    error: err,
+                    error: err_max,
                     errors,
                     xs,
                     fxs,
@@ -1124,10 +1321,11 @@ where
         let x_test: Array1<f64> = &x - &step;
         let f_x_test: Array1<f64> = f(&x_test);
         let err_test: f64 = 0.5 * f_x_test.dot(&f_x_test);
-        // Track the best accepted iterate so a stalled (damping-limited) run can
-        // still return the most reduced residual it ever reached.
-        if err_test < best_err && !err_test.is_nan() {
-            best_err = err_test;
+        let err_test_max: f64 = max_abs(&f_x_test);
+        // Track the best iterate so a stalled (damping-limited) run can still
+        // return the most reduced residual it ever reached.
+        if err_test_max < best_err && !err_test_max.is_nan() {
+            best_err = err_test_max;
             best_x = x_test.clone();
         }
 
@@ -1145,21 +1343,20 @@ where
             x = x_test;
             f_x = f_x_test;
             err = err_test;
+            err_max = err_test_max;
 
             // Update lambda based on how good the prediction was
             lambda *= ((1.0 / 3.0) as f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
             lambda = lambda.max(1e-16); // Lower bound for lambda
 
             // Only record state on successful steps
-            errors.push(err);
+            errors.push(err_max);
             xs.push(x.clone());
             fxs.push(f_x.clone());
             lambdas.push(lambda);
             jacobians.push(jac_x.clone());
 
-            if step_converged
-                && f_x.abs().mean().unwrap_or(f64::MAX) <= MULTI_TOL
-            {
+            if step_converged && err_max <= MULTI_TOL {
                 return Ok(x);
             }
         } else {
@@ -1171,9 +1368,8 @@ where
         }
 
         // The iterate has stopped moving (relative step converged, e.g. damping at
-        // its cap): accept the best iterate if the objective is a
-        // physically-converged plateau rather than a genuine non-convergence.
-        if should_accept_stagnation(step_converged, MULTI_TOL, initial_err, best_err) {
+        // its cap): accept the best iterate if it still meets the absolute bar.
+        if should_accept_stagnation(step_converged, MULTI_TOL, initial_err_max, best_err) {
             return Ok(best_x);
         }
 
@@ -1181,11 +1377,16 @@ where
             Python::attach(|py| {
                 py.detach(|| {
                     eprintln!("x after i={}: {}", i, &x);
-                    eprintln!("err: {}", err);
+                    eprintln!("err: {}", err_max);
                     eprintln!("\n\n");
                 })
             });
         }
+    }
+
+    // Iteration budget exhausted: prefer the best iterate if it meets the bar.
+    if best_err <= MULTI_TOL {
+        return Ok(best_x);
     }
 
     let final_state = OptimizerState {
@@ -1194,7 +1395,7 @@ where
         last_f_x: f_x.clone(),
         initial_x: x_0.clone(),
         jacobian: jac_x.clone(),
-        error: err,
+        error: err_max,
         errors,
         xs,
         fxs,

@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from ..common_types_compiled import HydroForcing
-from ..math import bisect, find_root, ode_is_stable, sign
+from ..core import HydroForcing
+from ..math import bisect, find_root, midpoint_method, ode_is_stable, sign
 
 
 def test_sign():
@@ -109,63 +109,49 @@ def test_find_root():
 
 
 def test_ode_is_stable():
-    # Test function with negative lambda (stable)
-    def stable_func(x, d):
-        return -x  # lambda = -1
-
-    # Test function with positive lambda (unstable)
-    def unstable_func(x, d):
-        return x  # lambda = 1
-
-    # Test function with zero lambda (boundary case)
-    def zero_lambda_func(x, d):
-        return 0 * x  # lambda = 0
-
+    """Verify the forward-Euler absolute-stability criterion:
+    stable iff lambda (local slope) is negative AND dt < 2 / |lambda|.
+    Boundary values sitting exactly on dt = 2/|lambda| are deliberately avoided
+    because the lambda is estimated by a finite difference and lands a hair off
+    the exact boundary, which would make those cases flaky.
+    """
     d = HydroForcing(0, 0, 0, 0)
 
-    # Test stable case
-    assert ode_is_stable(stable_func, 1.0, d, 1.0) == True
-    assert ode_is_stable(stable_func, 1.0, d, 2.0) == True
-    assert ode_is_stable(stable_func, 1.0, d, 0.5) == True
+    # lambda = -1: threshold 2/|lambda| = 2. Stable when dt < 2.
+    stable_func = lambda x, d: -x  # noqa: E731
+    assert ode_is_stable(stable_func, 1.0, d, 0.5) is True  # 0.5 < 2
+    assert ode_is_stable(stable_func, 1.0, d, 1.5) is True  # 1.5 < 2
+    assert ode_is_stable(stable_func, 1.0, d, 3.0) is False  # 3.0 > 2
+    assert ode_is_stable(stable_func, 1.0, d, 5.0) is False  # 5.0 > 2
 
-    # Test unstable case
-    assert ode_is_stable(unstable_func, 1.0, d, 1.0) == False
-    assert ode_is_stable(unstable_func, 1.0, d, 2.0) == False
+    # lambda = +1 (positive): never stable regardless of dt.
+    unstable_func = lambda x, d: x  # noqa: E731
+    assert ode_is_stable(unstable_func, 1.0, d, 0.5) is False
+    assert ode_is_stable(unstable_func, 1.0, d, 5.0) is False
 
-    # Test boundary case (lambda = 0)
-    assert ode_is_stable(zero_lambda_func, 1.0, d, 1.0) == False
-    assert ode_is_stable(zero_lambda_func, 1.0, d, 2.0) == False
+    # lambda = 0 (not negative): boundary case, never stable.
+    zero_lambda_func = lambda x, d: 0 * x  # noqa: E731
+    assert ode_is_stable(zero_lambda_func, 1.0, d, 1.0) is False
+    assert ode_is_stable(zero_lambda_func, 1.0, d, 5.0) is False
 
-    # Test with a more complex function
-    def quadratic_func(x, d):
-        return x**2
+    # lambda = +2 (positive at x=1): positive, never stable.
+    quadratic_func = lambda x, d: x**2  # noqa: E731
+    assert ode_is_stable(quadratic_func, 1.0, d, 0.5) is False
+    assert ode_is_stable(quadratic_func, 1.0, d, 5.0) is False
 
-    # For x = 1, f(x) = 1, f'(x) = 2*1 = 2
-    assert (
-        ode_is_stable(quadratic_func, 1.0, d, 0.5) == False
-    )  # dt = 0.5, 2 / |2| = 1, 0.5 < 1
-    assert (
-        ode_is_stable(quadratic_func, 1.0, d, 2.0) == True
-    )  # dt = 2, 2 / |2| = 1, 2 > 1
+    # lambda = -2: threshold 2/|lambda| = 1. Stable when dt < 1.
+    linear_negative = lambda x, d: -2 * x  # noqa: E731
+    assert ode_is_stable(linear_negative, 1.0, d, 0.25) is True  # 0.25 < 1
+    assert ode_is_stable(linear_negative, 1.0, d, 0.5) is True  # 0.5 < 1
+    assert ode_is_stable(linear_negative, 1.0, d, 3.0) is False  # 3.0 > 1
+    assert ode_is_stable(linear_negative, 1.0, d, 5.0) is False  # 5.0 > 1
 
-    # Test with a linear function with negative slope
-    def linear_negative(x, d):
-        return -2 * x  # lambda = -2
+    # lambda = -5: threshold 2/|lambda| = 0.4. Stable only when dt < 0.4.
+    steep = lambda x, d: -5 * x  # noqa: E731
+    assert ode_is_stable(steep, 1.0, d, 0.1) is True  # 0.1 < 0.4
+    assert ode_is_stable(steep, 1.0, d, 1.0) is False  # 1.0 > 0.4
 
-    assert (
-        ode_is_stable(linear_negative, 1.0, d, 0.25) == True
-    )  # dt = 0.25, 2 / |-2| = 1, 0.25 < 1
-    assert (
-        ode_is_stable(linear_negative, 1.0, d, 2.0) == True
-    )  # dt = 2, 2 / |-2| = 1, 2 > 1
-
-    # Test with a linear function with positive slope
-    def linear_positive(x, d):
-        return 2 * x  # lambda = 2
-
-    assert (
-        ode_is_stable(linear_positive, 1.0, d, 0.25) == False
-    )  # dt = 0.25, 2 / |2| = 1, 0.25 < 1
-    assert (
-        ode_is_stable(linear_positive, 1.0, d, 2.0) == True
-    )  # dt = 2, 2 / |2| = 1, 2 > 1
+    # lambda = +2 (positive): never stable.
+    linear_positive = lambda x, d: 2 * x  # noqa: E731
+    assert ode_is_stable(linear_positive, 1.0, d, 0.25) is False
+    assert ode_is_stable(linear_positive, 1.0, d, 5.0) is False

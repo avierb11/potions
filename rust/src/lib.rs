@@ -34,7 +34,7 @@ use crate::{
         },
         reaction_network::ReactionNetwork,
         river_zone::RiverZone,
-        rt_zone::RtZone,
+        rt_zone::{run_zone_steps, RtZone},
     },
 };
 pub mod common_types;
@@ -105,5 +105,8 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LinearSystemError", m.py().get_type::<LinearSystemError>())?;
     m.add("OtherError", m.py().get_type::<OtherError>())?;
     m.add_class::<OptimizationError>()?;
+
+    // Pure-Rust reactive-transport step driver (GIL-free per-zone sweep)
+    m.add_function(wrap_pyfunction!(run_zone_steps, m)?)?;
     Ok(())
 }

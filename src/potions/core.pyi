@@ -519,3 +519,17 @@ class LinearSystemError(Exception):
 
 class OtherError(Exception):
     pass
+
+
+def run_zone_steps(
+    zones: list[RtZone],
+    states: np.ndarray,
+    forcings: list[RtForcing],
+    lat_mat: np.ndarray,
+    vert_mat: np.ndarray,
+    surface_zone_ids: list[int],
+    dt: float,
+    verbose: bool = False,
+) -> tuple[
+    list[RtStep], Optional[tuple[int, Exception, np.ndarray]]
+]: ...

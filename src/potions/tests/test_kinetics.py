@@ -1,6 +1,6 @@
 import numpy as np
 from pandas import DataFrame
-from ..reaction_network import MonodParameters
+from ..reactive_transport.kinetic_structures import MonodParameters
 
 
 def test_monod_rate_simple_case() -> None:

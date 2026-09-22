@@ -10,7 +10,7 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::{find_root_multi_analytic_fused, levenberg_marquardt},
+    math::find_root_multi_analytic_fused_then_lm,
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
@@ -338,10 +338,6 @@ impl RiverZone {
             x
         };
 
-        let residual = |conc: &Array1<molar>| {
-            (&c_0_arr - conc) + dt_days * self.mass_balance_ode_rust(conc, d)
-        };
-
         // For RiverZone the water flux driving transport is q_internal(), and the
         // mineral concentrations are indexed from the *end* of the species vector
         // (the last `num_min` entries), i.e. `num_species - num_minerals`.
@@ -377,12 +373,10 @@ impl RiverZone {
         };
 
         // Newton's method with the fused (single-evaluation) residual + analytic
-        // Jacobian, falling back to Levenberg-Marquardt if that fails to converge.
+        // Jacobian, falling back to Levenberg-Marquardt (using the fused
+        // analytic Jacobian) resumed from Newton's best iterate.
         let c_after_rt: Array1<molar> =
-            match find_root_multi_analytic_fused(&fused, c_0_arr.clone(), verbose) {
-                Ok(v) => v,
-                Err(_) => levenberg_marquardt(&residual, c_0_arr.clone(), verbose)?,
-            };
+            find_root_multi_analytic_fused_then_lm(&fused, c_0_arr.clone(), verbose)?;
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),

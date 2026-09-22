@@ -203,3 +203,5 @@ compiled/
 doc.bak/
 .potions_logs/
 misc/
+*.bak/
+docs/

@@ -10,7 +10,7 @@ use pyo3_polars::{PyDataFrame, PySeries};
 use crate::{
     common_types::RtForcing,
     math::{
-        approx_fprime, find_root_multi_analytic, levenberg_marquardt, null_space_scipy, pinv_scipy,
+        approx_fprime, find_root_multi_analytic_then_lm, null_space_scipy, pinv_scipy,
     },
     molar, molar_per_time,
 };
@@ -381,11 +381,9 @@ impl EquilibriumParameters {
         let j_to_solve = |x: &Array1<f64>| self.jacobian_residual_rust(x);
 
         // Solve with Newton's method using the analytical Jacobian, falling back
-        // to Levenberg-Marquardt if that fails to converge.
-        match find_root_multi_analytic(&f_to_solve, &j_to_solve, initial_x.clone(), verbose) {
-            Ok(v) => Ok(v),
-            Err(_) => levenberg_marquardt(&f_to_solve, initial_x.clone(), verbose),
-        }
+        // to Levenberg-Marquardt (itself using the analytic Jacobian) if that fails to
+        // converge. LM resumes from the best iterate Newton reached.
+        find_root_multi_analytic_then_lm(&f_to_solve, &j_to_solve, initial_x.clone(), verbose)
     }
 
     // Public speciation entry point: returns the equilibrium *concentrations*.

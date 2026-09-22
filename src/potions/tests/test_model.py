@@ -1,25 +1,18 @@
-import time
 import datetime
+import time
+
 import numpy as np
 import pandas as pd  # type: ignore
-from pandas import DataFrame, Series
+import pytest
 from numpy.typing import NDArray
+from pandas import DataFrame, Series
 from numpy import float64 as f64
-from ..hydro import (
-    GroundZone,
-    HydroForcing,
-    HydrologicZone,
-    SnowZone,
-    SoilZone,
-)
-from ..model import (
-    Layer,
-    Model,
-    HydroModelStep,
-    ForcingData,
-    run_hydro_model,
-    HbvModel,
-)
+
+from ..core import GroundZone, HydroForcing, HydrologicZone, SnowZone, SurfaceZone
+from ..common_models import HbvModel
+from ..common_types import ForcingData, HydroModelStep
+from ..model import Model
+from ..model_components import Layer
 from .utils import approx_eq
 
 
@@ -27,7 +20,7 @@ def test_Model_connection_matrices_simple_3_box() -> None:
     class TestModel(Model):
         structure: list[list[HydrologicZone]] = [
             [SnowZone(name="z0")],
-            [SoilZone(name="z1")],
+            [SurfaceZone(name="z1")],
             [GroundZone(name="z2")],
         ]
 
@@ -166,6 +159,7 @@ def test_Model_connection_matrices_3_by_2() -> None:
     assert approx_eq(act_forc_mat, model.precip_mat)
 
 
+@pytest.mark.slow
 def test_3_box_simple_model_steady_state() -> None:
     model = HbvModel()
 
@@ -193,6 +187,7 @@ def test_3_box_simple_model_steady_state() -> None:
     rate: float = num_steps / dur
 
 
+@pytest.mark.slow
 def test_3_box_simple_model_steady_state_v2() -> None:
     model = HbvModel()
 
@@ -200,7 +195,7 @@ def test_3_box_simple_model_steady_state_v2() -> None:
 
     # Prepare dates
     start_date = datetime.date(2000, 1, 1)
-    date_list: list[datetime.datetime] = [
+    date_list: list[datetime.date] = [
         start_date + datetime.timedelta(days=i) for i in range(num_steps)
     ]
     dates_series: Series = pd.Series(date_list)
@@ -219,16 +214,27 @@ def test_3_box_simple_model_steady_state_v2() -> None:
     init_state: NDArray[f64] = model.default_hydro_init_state()
 
     start_time = time.time()
-    output_df: DataFrame = run_hydro_model(model, init_state, forc_arg, dates_series)
+    results = model.run_hydro_model(
+        forc=forc_arg, init_state=init_state, meas_streamflow=None
+    )
     end_time = time.time()
     dur = end_time - start_time
     rate = num_steps / dur if dur > 0 else float("inf")
 
-    # Assertions
+    output_df: DataFrame = results.simulation
+
+    # Output width: one state + 7 fluxes per zone, plus the simulated streamflow
+    # column and one proportion column per river/streamflow zone.
+    expected_width = (
+        8 * len(model.flat_model) + 1 + len(model.get_river_zone_ids())
+    )
     assert output_df.shape == (
         num_steps,
-        len(model.flat_model) * 5,
-    ), f"Output DataFrame shape mismatch. Expected: ({num_steps}, {len(model.flat_model) * 5}), Got: {output_df.shape}"
+        expected_width,
+    ), (
+        f"Output DataFrame shape mismatch. Expected: "
+        f"({num_steps}, {expected_width}), Got: {output_df.shape}"
+    )
 
     # Check for NaNs in the last row of state variables
     state_cols = [col for col in output_df.columns if col.startswith("s_")]
