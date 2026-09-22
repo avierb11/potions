@@ -6,6 +6,8 @@
   "terminal.integrated.autoReplies": {},
   "terminal.integrated.sendKeybindingsToShell": true,
   "terminal.integrated.shellIntegration.enabled": false,
-  "terminal.integrated.enableKeyboardReporting": false
+  "terminal.integrated.enableKeyboardReporting": false,
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
 
 }

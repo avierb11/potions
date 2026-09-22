@@ -5,6 +5,9 @@ This file contains commonly-used model configurations
 from .model import Model
 from .core import SnowZone, SurfaceZone, GroundZone, GroundZoneB
 
+SubsurfaceZone = GroundZone
+SubsurfaceZoneB = GroundZoneB
+
 
 class HbvModel(Model):
     """A standard, single-column HBV-like model structure."""
@@ -12,8 +15,8 @@ class HbvModel(Model):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZone(name="shallow")],
-        [GroundZoneB(name="deep")],
+        [SubsurfaceZone(name="shallow")],
+        [SubsurfaceZoneB(name="deep")],
     ]
 
     def __init__(self, *args, **kwargs) -> None:
@@ -40,6 +43,22 @@ class HbvModel(Model):
 
         return "\n".join(lines)
 
+    @property
+    def snow(self) -> SnowZone:
+        return self.hydro_zones["snow"]  # type: ignore
+
+    @property
+    def surface(self) -> SurfaceZone:
+        return self.hydro_zones["surface"]  # type: ignore
+
+    @property
+    def shallow(self) -> SubsurfaceZone:
+        return self.hydro_zones["shallow"]  # type: ignore
+
+    @property
+    def deep(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["deep"]  # type: ignore
+
 
 class HbvLateralModel(Model):
     """An HBV-like model with two lateral columns (e.g., hillslope/riparian)."""
@@ -47,9 +66,41 @@ class HbvLateralModel(Model):
     structure = [
         [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
         [SurfaceZone(name="surface_hs"), SurfaceZone(name="surface_rp")],
-        [GroundZone(name="shallow_hs"), GroundZone(name="shallow_rp")],
-        [GroundZoneB(name="deep_hs"), GroundZoneB(name="deep_rp")],
+        [SubsurfaceZone(name="shallow_hs"), SubsurfaceZone(name="shallow_rp")],
+        [SubsurfaceZoneB(name="deep_hs"), SubsurfaceZoneB(name="deep_rp")],
     ]
+
+    @property
+    def snow_hs(self) -> SnowZone:
+        return self.hydro_zones["snow_hs"]  # type: ignore
+
+    @property
+    def surface_hs(self) -> SurfaceZone:
+        return self.hydro_zones["surface_hs"]  # type: ignore
+
+    @property
+    def shallow_hs(self) -> SubsurfaceZone:
+        return self.hydro_zones["shallow_hs"]  # type: ignore
+
+    @property
+    def deep_hs(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["deep_hs"]  # type: ignore
+
+    @property
+    def snow_rp(self) -> SnowZone:
+        return self.hydro_zones["snow_rp"]  # type: ignore
+
+    @property
+    def surface_rp(self) -> SurfaceZone:
+        return self.hydro_zones["surface_rp"]  # type: ignore
+
+    @property
+    def shallow_rp(self) -> SubsurfaceZone:
+        return self.hydro_zones["shallow_rp"]  # type: ignore
+
+    @property
+    def deep_rp(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["deep_rp"]  # type: ignore
 
 
 class HbvNonlinearModel(Model):
@@ -58,8 +109,8 @@ class HbvNonlinearModel(Model):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZone(name="shallow")],
-        [GroundZoneB(name="deep")],
+        [SubsurfaceZone(name="shallow")],
+        [SubsurfaceZoneB(name="deep")],
     ]
 
 
@@ -69,8 +120,20 @@ class ThreeLayerModel(Model):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
+
+    @property
+    def snow(self) -> SnowZone:
+        return self.hydro_zones["snow"]  # type: ignore
+
+    @property
+    def surface(self) -> SurfaceZone:
+        return self.hydro_zones["surface"]  # type: ignore
+
+    @property
+    def ground(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["ground"]  # type: ignore
 
 
 class LateralThreeLayerModel(Model):
@@ -79,5 +142,29 @@ class LateralThreeLayerModel(Model):
     structure = [
         [SnowZone(name="snow_hs"), SnowZone(name="snow_rp")],
         [SurfaceZone(name="surface_hs"), SurfaceZone(name="surface_rp")],
-        [GroundZoneB(name="ground_hs"), GroundZoneB(name="ground_rp")],
+        [SubsurfaceZoneB(name="ground_hs"), SubsurfaceZoneB(name="ground_rp")],
     ]
+
+    @property
+    def snow_hs(self) -> SnowZone:
+        return self.hydro_zones["snow_hs"]  # type: ignore
+
+    @property
+    def surface_hs(self) -> SurfaceZone:
+        return self.hydro_zones["surface_hs"]  # type: ignore
+
+    @property
+    def ground_hs(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["ground_hs"]  # type: ignore
+
+    @property
+    def snow_rp(self) -> SnowZone:
+        return self.hydro_zones["snow_rp"]  # type: ignore
+
+    @property
+    def surface_rp(self) -> SurfaceZone:
+        return self.hydro_zones["surface_rp"]  # type: ignore
+
+    @property
+    def ground_rp(self) -> SubsurfaceZoneB:
+        return self.hydro_zones["ground_rp"]  # type: ignore

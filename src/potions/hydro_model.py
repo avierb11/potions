@@ -27,11 +27,11 @@ OUTPUT_COLUMNS_PER_ZONE: Final[int] = (
     # Number of columns for each zone in the output. Includes 1 state + 6 fluxes (4 normal + 2 external)
     8
 )
+SIM_Q_NAME: Final[str] = "streamflow_sim"
 # ============================= #
 
 
 class HydrologicalModel:
-
     structure: list[list[HydrologicZone]]
 
     def __init__(
@@ -510,11 +510,9 @@ class HydrologicalModel:
                 )
             for j, zone in enumerate(layer):
                 if not isinstance(zone, HydrologicZone):
-                    raise TypeError(
-                        f"Zone {j} in layer {i} has an incorrect type: {
+                    raise TypeError(f"Zone {j} in layer {i} has an incorrect type: {
                             type(zone)
-                        }, ensure that all zones are of type HydrologicZone"
-                    )
+                        }, ensure that all zones are of type HydrologicZone")
 
         # Check if model is empty
         if self.structure == []:
@@ -537,11 +535,9 @@ class HydrologicalModel:
 
         # Check if all model scales add up to 1
         if abs(sum(self.scales) - 1) > 1e-3:
-            raise ValueError(
-                f"Model scales do not add up to 1: {
+            raise ValueError(f"Model scales do not add up to 1: {
                     self.scales
-                }. Ensure that the scales equal 1 to maintain water balance"
-            )
+                }. Ensure that the scales equal 1 to maintain water balance")
 
     def hydro_to_array(self) -> NDArray:
         """Serializes all model parameters into a single 1D NumPy array.
@@ -615,8 +611,7 @@ class HydrologicalModel:
                     f"Model expects {
                         num_forcing_sources_expected
                     } ForcingData objects, "
-                    f"but {len(forcing_data)
-                           } were provided in the 'forc' list."
+                    f"but {len(forcing_data)} were provided in the 'forc' list."
                 )
             for i, fd in enumerate(forcing_data):
                 if not (
@@ -624,16 +619,13 @@ class HydrologicalModel:
                     and len(fd.temp) == num_steps
                     and len(fd.pet) == num_steps
                 ):
-                    raise ValueError(
-                        f"ForcingData at index {
+                    raise ValueError(f"ForcingData at index {
                             i
                         } has series lengths inconsistent with num_steps ({
                             num_steps
-                        }). "
-                        f"P length: {len(fd.precip)}, T length: {
+                        }). " f"P length: {len(fd.precip)}, T length: {
                             len(fd.temp)
-                        }, PET length: {len(fd.pet)}"
-                    )
+                        }, PET length: {len(fd.pet)}")
             all_precip_sources_matrix = np.vstack(
                 [fd.precip.to_numpy() for fd in forcing_data]
             ).T  # type: ignore
@@ -645,11 +637,9 @@ class HydrologicalModel:
             ).T  # type: ignore
         else:  # forc is empty
             if num_forcing_sources_expected > 0:
-                raise ValueError(
-                    f"Model expects {
+                raise ValueError(f"Model expects {
                         num_forcing_sources_expected
-                    } forcing inputs, but 'forcing_data' list is empty."
-                )
+                    } forcing inputs, but 'forcing_data' list is empty.")
             # If no forcing sources are expected, create empty (0-column) matrices
             all_precip_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
             all_temp_sources_matrix = np.zeros((num_steps, 0), dtype=f64)
@@ -683,9 +673,7 @@ class HydrologicalModel:
             NDArray: An array of default initial storage values for all zones.
         """
         return np.array(
-            [
-                zone.default_init_state() for layer in cls.structure for zone in layer
-            ]  # type: ignore
+            [zone.default_init_state() for layer in cls.structure for zone in layer]  # type: ignore
         )
 
     def step_hydro_model(
@@ -775,10 +763,7 @@ class HydrologicalModel:
                 mass_err = (s_i - s_new) + dt * mass_balance
 
                 if abs(mass_err) > 1e-3:
-                    print(
-                        f"Mass balance error on for zone {
-                          i} with name {zone.name}"
-                    )  # type: ignore
+                    print(f"Mass balance error on for zone {i} with name {zone.name}")  # type: ignore
                     print(f"Storage: {s_i}")
                     print(f"Zone: {zone}")
                     print(f"Forcing data: {d_i_zone}")
@@ -951,8 +936,8 @@ class HydrologicalModel:
         ]
 
         sim_streamflow = model_res[streamflow_cols].sum(axis=1)
-        sim_streamflow.name = "sim_streamflow_mmd"
-        model_res["sim_streamflow_mmd"] = sim_streamflow
+        sim_streamflow.name = SIM_Q_NAME
+        model_res[SIM_Q_NAME] = sim_streamflow
         if meas_streamflow is not None:
             model_res["meas_streamflow_mmd"] = meas_streamflow
 
@@ -977,7 +962,7 @@ class HydrologicalModel:
             zone_name: str = zone_names[col_id]
             col_name: str = f"q_lat_{zone_name}"
             prop_name: str = f"prop_q_{zone_name}"
-            model_res[prop_name] = model_res[col_name] / model_res["sim_streamflow_mmd"]
+            model_res[prop_name] = model_res[col_name] / model_res[SIM_Q_NAME]
             props[prop_name] = model_res[prop_name].mean()
 
         # Create the object and save
@@ -1031,7 +1016,9 @@ class HydrologicalModel:
                     zone_params[: zone.num_parameters()],  # type: ignore
                     zone_params[zone.num_parameters() :],  # type: ignore
                 )
-                new_zones[zone.name] = zone.from_array(ps, natural_scales=natural_scales)  # type: ignore
+                new_zones[zone.name] = zone.from_array(
+                    ps, natural_scales=natural_scales
+                )  # type: ignore
 
         # new_lapse_rates: list[LapseRateParameters] = [
         #     LapseRateParameters(
@@ -1195,10 +1182,7 @@ class HydrologicalModel:
                 zone_range = zone.default_parameter_range()  # type: ignore
 
                 for param_name in zone.parameter_names():
-                    param_ranges[
-                        f"{zone.name}.{
-                        param_name}"
-                    ] = zone_range[param_name]
+                    param_ranges[f"{zone.name}.{param_name}"] = zone_range[param_name]
 
         # Add the size parameters
         for i, _ in enumerate(cls.structure[0][:-1]):

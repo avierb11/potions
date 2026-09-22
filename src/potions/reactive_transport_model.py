@@ -1,12 +1,14 @@
 from __future__ import annotations
+
 import traceback
-from typing import Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
 
 import numpy as np
 from numpy.typing import NDArray
 from pandas import DataFrame, DatetimeIndex, Series, TimedeltaIndex
 
 from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
+from potions.reactive_transport.kinetic_structures import PARAMETERS_PER_MINERAL
 from potions.reactive_transport.rt_zone import (
     calculate_moisture_fraction,
     calculate_water_table_depth,
@@ -21,21 +23,18 @@ from .common_types import (
     RtModelResults,
     RtZoneConfiguration,
 )
-
 from .core import (
     HydrologicZone,
     OptimizationError,
     ReactionNetwork,
+    RiverZone,
     RtForcing,
     RtParameters,
-    RiverZone,
     RtStep,
     RtZone,
     run_zone_steps,
 )
-
-from .hydro_model import HydrologicalModel
-from potions.reactive_transport.kinetic_structures import PARAMETERS_PER_MINERAL
+from .hydro_model import SIM_Q_NAME, HydrologicalModel
 
 
 class ReactiveTransportModel(HydrologicalModel):
@@ -43,13 +42,13 @@ class ReactiveTransportModel(HydrologicalModel):
     def __init__(
         self,
         # Hydrology
-        zones: Optional[dict[str, HydrologicZone]] = None,
-        scales: Optional[list[float]] = None,
+        zones: dict[str, HydrologicZone] | None = None,
+        scales: list[float] | None = None,
         # Reactive transport
-        network: Optional[ReactionNetwork] = None,
-        rt_zones: Optional[dict[str, RtZone]] = None,
+        network: ReactionNetwork | None = None,
+        rt_zones: dict[str, RtZone] | None = None,
         # River reactions
-        river_zone: Optional[RiverZone] = None,
+        river_zone: RiverZone | None = None,
         # Other things
         verbose: bool = False,
     ) -> None:
@@ -109,10 +108,8 @@ class ReactiveTransportModel(HydrologicalModel):
         else:
             self._river_zone = None  # type: ignore
 
-        return
-
     @property
-    def reaction_network(self) -> Optional[ReactionNetwork]:
+    def reaction_network(self) -> ReactionNetwork | None:
         if self._has_rt:
             return self._network
         else:
@@ -349,7 +346,7 @@ class ReactiveTransportModel(HydrologicalModel):
             zone_param_array = []
 
         opt = err if isinstance(err, OptimizationError) else None
-        math_info: Optional[dict] = None
+        math_info: dict | None = None
         if opt is not None:
             try:
                 math_info = {
@@ -398,7 +395,7 @@ class ReactiveTransportModel(HydrologicalModel):
         ds: Iterable[RtForcing],
         dt_days: float,
         verbose: bool = False,
-        failed_dir: Optional[str] = None,
+        failed_dir: str | None = None,
         step_index: int = 0,
     ) -> list[RtStep]:
         num_zones: int = len(model)
@@ -477,13 +474,11 @@ class ReactiveTransportModel(HydrologicalModel):
                 print(f"Incoming concentration to zone {i}: {step.conc_in}")
                 print(f"Lateral mass transfer outwards: {step.lat_mass}")
                 print(f"Vertical mass transfer outwards: {step.vert_mass}")
-                print(
-                    f"Finished zone '{zone.name}', final concentration: {
+                print(f"Finished zone '{zone.name}', final concentration: {
                         np.array2string(
                             step.state, formatter={"all": lambda x: f"{x:.2e}"}
                         )
-                    }"
-                )
+                    }")
                 print("\n\n")
             print("=" * 25 + "\n")
 
@@ -499,14 +494,14 @@ class ReactiveTransportModel(HydrologicalModel):
             str, ChemicalState
         ],  # Initial chemical state for each species
         # Model performance-related things
-        meas_river_conc: Optional[DataFrame] = None,
+        meas_river_conc: DataFrame | None = None,
         objective_functions: list[
             tuple[str, Callable[[Series, Series], float]]
         ] = DEFAULT_OBJECTIVE_FUNCTIONS,
         # Optional diagnostic data
         verbose: bool = False,
         return_partial: bool = False,
-        failed_dir: Optional[str] = None,
+        failed_dir: str | None = None,
     ) -> RtModelResults:
         """Run the reactive transport simulation forwards
         `mineral_conc` is a dictionary containing the mineral volume fractions (0,porosity) of the minerals
@@ -722,7 +717,7 @@ class ReactiveTransportModel(HydrologicalModel):
         q_components: dict[str, Series] = {
             n: hydro_sim_df[f"q_lat_{n}"] for n in river_zone_names
         }
-        q_sim: Series = hydro_sim_df["sim_streamflow_mmd"]
+        q_sim: Series = hydro_sim_df[SIM_Q_NAME]
         flow_fractions: dict[str, Series] = {
             name: val / q_sim for name, val in q_components.items()
         }

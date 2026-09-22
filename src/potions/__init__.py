@@ -69,6 +69,8 @@ __all__ = [
     "RiverParameters",
     "RiverZone",
     "WaterVolumeError",
+    "SubsurfaceZone",
+    "SubsurfaceZoneB",
 ]
 from .common_types import (
     ChemicalState,
@@ -120,6 +122,8 @@ from .common_models import (
     HbvNonlinearModel,
     ThreeLayerModel,
     LateralThreeLayerModel,
+    SubsurfaceZone,
+    SubsurfaceZoneB,
 )
 
 from .model_components import (
