@@ -464,6 +464,90 @@ class HydrologicalModel:
             current_zone_idx += len(layer)
         return river_zones
 
+    @staticmethod
+    def _zone_label(zone: HydrologicZone) -> str:
+        """Format a zone as ``name[<param>=<val>, ...]`` for the diagram."""
+        names = zone.parameter_names()  # type: ignore[attr-defined]
+        values = zone.param_list()  # type: ignore[attr-defined]
+        inner = ", ".join(f"{k}={v}" for k, v in zip(names, values))
+        if not inner:
+            return zone.name  # type: ignore[attr-defined]
+        return f"{zone.name}[{inner}]"  # type: ignore[attr-defined]
+
+    def structure_diagram(self) -> str:
+        """Return an ASCII diagram of the model structure and connectivity.
+
+        Draws each hydrologic zone (with its parameters) as a node, lateral
+        flow arrows within a layer, vertical flow arrows between adjacent
+        layers, and a ``river`` channel on the right that each layer's
+        downstream-most zone discharges into.
+
+        Returns:
+            str: The multi-line ASCII representation.
+        """
+        layers = self.layers
+        num_layers = len(layers)
+        num_cols = max(len(layer.zones) for layer in layers)
+
+        labels = [[self._zone_label(z) for z in layer.zones] for layer in layers]
+
+        LATERAL = " -> "
+        RIVER_ARROW = "->"
+        RIVER_LABEL = "river"
+
+        col_w = [0] * num_cols
+        for layer_labels in labels:
+            for c, text in enumerate(layer_labels):
+                col_w[c] = max(col_w[c], len(text))
+
+        x = [0] * num_cols
+        for c in range(1, num_cols):
+            x[c] = x[c - 1] + col_w[c - 1] + len(LATERAL)
+
+        river_bar_x = x[num_cols - 1] + col_w[num_cols - 1] + len(RIVER_ARROW)
+        river_label_x = river_bar_x + 2
+        total_w = river_label_x + len(RIVER_LABEL)
+        total_rows = 2 * num_layers - 1
+
+        grid: list[list[str]] = [[" "] * total_w for _ in range(total_rows)]
+
+        def put(row: int, col: int, text: str) -> None:
+            for offset, ch in enumerate(text):
+                grid[row][col + offset] = ch
+
+        def center(c: int) -> int:
+            return x[c] + col_w[c] // 2
+
+        # River channel: vertical bar spanning the full height plus a label.
+        for r in range(total_rows):
+            grid[r][river_bar_x] = "|"
+        put(0, river_label_x, RIVER_LABEL)
+
+        # Zone rows, lateral arrows, and river outflow arrows.
+        for i, layer_lbls in enumerate(labels):
+            row = 2 * i
+            for c, text in enumerate(layer_lbls):
+                put(row, x[c], text.ljust(col_w[c]))
+            for c in range(len(layer_lbls) - 1):
+                put(row, x[c] + col_w[c], LATERAL)
+            last = len(layer_lbls) - 1
+            if last >= 0:
+                put(row, x[last] + col_w[last], RIVER_ARROW)
+
+        # Vertical flow connectors between adjacent layers.
+        for i in range(num_layers - 1):
+            top_n = len(labels[i])
+            bot_n = len(labels[i + 1])
+            if bot_n == 1:
+                cols = range(top_n)  # fan-in to the single zone below
+            else:
+                cols = range(min(top_n, bot_n))
+            conn_row = 2 * i + 1
+            for c in cols:
+                grid[conn_row][center(c)] = "|"
+
+        return "\n".join("".join(row).rstrip() for row in grid)
+
     @classmethod
     def get_num_zone_parameters(cls) -> int:
         """Gets the total number of tunable parameters across all zones.
