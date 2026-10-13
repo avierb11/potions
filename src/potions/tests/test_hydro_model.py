@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from networkx import DiGraph
 
-from ..core import GroundZone, SnowZone, SurfaceZone
+from ..core import GroundZoneB, SnowZone, SurfaceZone
 from ..hydro_model import HydrologicalModel
 
 
@@ -12,7 +12,7 @@ class ColumnModel(HydrologicalModel):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZone(name="ground")],
+        [GroundZoneB(name="ground")],
     ]
 
 
@@ -21,7 +21,7 @@ class TwoColumnModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="a"), SurfaceZone(name="b")],
-        [GroundZone(name="g1"), GroundZone(name="g2")],
+        [GroundZoneB(name="g1"), GroundZoneB(name="g2")],
     ]
 
 
@@ -47,8 +47,8 @@ def test_surface_zone_ids(column: ColumnModel) -> None:
 
 
 def test_num_hydro_parameters(column: ColumnModel) -> None:
-    # 2 snow + 5 surface + 3 ground = 10 default parameters.
-    assert column.get_num_hydro_parameters() == 10
+    # 2 snow + 5 surface + 2 ground (bottom zone) = 9 default parameters.
+    assert column.get_num_hydro_parameters() == 9
 
 
 def test_default_init_state(column: ColumnModel) -> None:
@@ -158,6 +158,41 @@ def test_river_zone_ids(two_col: TwoColumnModel) -> None:
     assert sorted(river_ids) == [1, 3]
 
 
+def test_structure_diagram_layout(two_col: TwoColumnModel) -> None:
+    d = two_col.structure_diagram()
+    lines = d.split("\n")
+    # One border per band plus a closing border.
+    assert lines[0][0] == "+"
+    assert lines[-1][0] == "+"
+    assert all(len(r) == len(lines[0]) for r in lines)
+    # Box borders use '-' for zones and '~' for the river channel.
+    assert "-" in lines[0] and "~" in lines[0]
+    # Each zone name and its parameters are shown.
+    assert "|" in lines[1]
+    for name in ("a", "b", "g1", "g2"):
+        assert name in d, name
+    assert "fc =" in d
+    assert "k =" in d
+    # The river column is labeled.
+    assert "River" in d
+    # Every content row is a full-width row of boxed cells.
+    for r in (lines[1], lines[-2]):
+        assert r.startswith("|") and r.endswith("|")
+
+
+def test_structure_diagram_single_column(column: ColumnModel) -> None:
+    d = column.structure_diagram()
+    lines = d.split("\n")
+    # One border line per band plus a closing border.
+    border_rows = [r for r in lines if r.startswith("+")]
+    assert len(border_rows) == len(column) + 1
+    # All rows share the same (constant) width.
+    assert all(len(r) == len(lines[0]) for r in lines)
+    for name in column.zone_names:
+        assert name in d, name
+    assert "River" in d
+
+
 def test_zones_override() -> None:
     # A custom-parametrized zone replaces the default when key matches.
     custom = SurfaceZone(name="surface", fc=80.0)
@@ -166,6 +201,7 @@ def test_zones_override() -> None:
     class OverrideModel(HydrologicalModel):
         structure = [
             [SurfaceZone(name="surface")],
+            [GroundZoneB(name="deep")],  # bottom layer must be bottom zones
         ]
 
     om = OverrideModel(zones={"surface": custom})

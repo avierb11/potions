@@ -9,12 +9,16 @@ from pandas import DataFrame, DatetimeIndex, Series, TimedeltaIndex
 
 from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from potions.reactive_transport.kinetic_structures import PARAMETERS_PER_MINERAL
+from potions.reactive_transport.parameter_docs import (
+    river_zone_rows,
+    render_describe,
+    rt_zone_rows,
+)
 from potions.reactive_transport.rt_zone import (
     calculate_moisture_fraction,
-    calculate_water_table_depth,
     get_hydro_steps,
 )
-from potions.utils import DO_LOGGING, RtNumericalError
+from potions.utils import DO_LOGGING, ModelInputError, RtNumericalError
 
 from .common_types import (
     ChemicalState,
@@ -138,6 +142,27 @@ class ReactiveTransportModel(HydrologicalModel):
         else:
             raise ValueError("No river zone in this model")
 
+    def _rt_parameter_rows(self) -> list[dict]:
+        """Build parameter rows for the RT zones and the river zone, if any."""
+        rows: list[dict] = []
+        if getattr(self, "_has_rt", False):
+            for zone_name, zone in self._rt_zones.items():
+                rows += rt_zone_rows(zone)
+        river = getattr(self, "_river_zone", None)
+        if river is not None:
+            rows += river_zone_rows(river)
+        return rows
+
+    def describe_parameters(self) -> DataFrame:
+        """Like the hydro model, but with RT-zone and river-zone rows appended."""
+        rows = self._hydro_parameter_rows() + self._rt_parameter_rows()  # type: ignore[attr-defined]
+        return DataFrame(rows, columns=["zone", "name", "value", "unit", "description"])
+
+    def describe(self) -> str:
+        """Like the hydro model, but also describing RT and river-zone parameters."""
+        rows = self._hydro_parameter_rows() + self._rt_parameter_rows()  # type: ignore[attr-defined]
+        return render_describe(rows, title="Model parameters")
+
     @classmethod
     def get_num_rt_parameters(
         cls: type[ReactiveTransportModel], config: dict[str, RtZoneConfiguration]
@@ -145,7 +170,7 @@ class ReactiveTransportModel(HydrologicalModel):
         """
         Get the number of parameters for a zone given the configuration of the reactive transport setup
         """
-        num_dim_params: int = 3 * cls.get_num_zones()
+        num_dim_params: int = 2 * cls.get_num_zones()
         num_min_params: int = 0
         for _zone_name, zone in config.items():
             num_min_params += PARAMETERS_PER_MINERAL * zone.do_reactions
@@ -180,7 +205,7 @@ class ReactiveTransportModel(HydrologicalModel):
         # do_reactions: list[bool] = [z.do_reactions for z in configs.values()]
         num_minerals: int = network.num_minerals
         params_per_zone: list[int] = [
-            3 + z.do_reactions * num_minerals * PARAMETERS_PER_MINERAL
+            2 + z.do_reactions * num_minerals * PARAMETERS_PER_MINERAL
             for zone_name, z in configs.items()
             if zone_name != "river"
         ]
@@ -197,9 +222,7 @@ class ReactiveTransportModel(HydrologicalModel):
 
         zone_params: dict[str, RtParameters] = {}
         for row_i, zone_name_i in zip(params_list, zone_names, strict=True):
-            zone_params[zone_name_i] = RtParameters.from_array(
-                row_i, natural_scales=natural_scales
-            )
+            zone_params[zone_name_i] = RtParameters.from_array(row_i)
 
         return zone_params
 
@@ -258,7 +281,6 @@ class ReactiveTransportModel(HydrologicalModel):
         precip_conc: The precipitation concentrations at each step. Note that this has shape: (number of surface zones, number of steps)
         """
         sw_vals = calculate_moisture_fraction(model_rt_params, hydro_sim_df)
-        zw_vals = calculate_water_table_depth(model_rt_params, hydro_sim_df)
         hydro_steps = get_hydro_steps(hydro_sim_df)
         hydro_forcing: NDArray = self.construct_hydro_forcing_matrix(forc).T
 
@@ -274,23 +296,36 @@ class ReactiveTransportModel(HydrologicalModel):
                     hydro_step=hydro_steps[i, j],
                     hydro_forc=hydro_forcing[i, j],
                     s_w=sw_vals[i, j],
-                    z_w=zw_vals[i, j],
                 )
                 rt_forcings[i, j] = d_ij
 
         # Now, insert the precipitation chemistry for each zone
         if precip_conc.shape[0] != len(self.surface_zone_ids):  # type: ignore
-            raise ValueError(
+            raise ModelInputError(
                 f"The first dimension of precipitation chemistry must be the same as the the number of surface zones: {
                     self.num_surface_zones
                 }, not {precip_conc.shape[0]}"  # type: ignore
             )
 
         if precip_conc.shape[1] != len(hydro_sim_df):
-            raise ValueError(
-                f"The second dimension of precipitation chemistry must be the same as the the number of surface zones: {
+            raise ModelInputError(
+                f"The second dimension of precipitation chemistry must be the same as the the number of steps in the hydro simulation: {
                     len(hydro_sim_df)
                 }, not {precip_conc.shape[1]}"
+            )
+
+        # Non-finite (NaN/Inf) concentrations would corrupt the reaction
+        # solver, so reject them before the simulation starts.
+        precip_conc_values = np.asarray(precip_conc, dtype=np.float64)
+        if not np.all(np.isfinite(precip_conc_values)):
+            bad_positions = [
+                tuple(pos) for pos in np.argwhere(~np.isfinite(precip_conc_values))[:5]
+            ]
+            raise ModelInputError(
+                "precip_conc contains non-finite (NaN/Inf) concentration "
+                f"values at positions (surface, step, species) "
+                f"{bad_positions} (and possibly more). Replace the missing / "
+                "corrupted concentration values before running the model."
             )
 
         for i, zone_data in enumerate(precip_conc):
@@ -602,7 +637,21 @@ class ReactiveTransportModel(HydrologicalModel):
             for spec_name in self.network.species_order:
                 zone_init_conc_list.append(zone_state[spec_name])
 
-            zone_initial_states.append(np.array(zone_init_conc_list, dtype=np.float64))
+            zone_init_state = np.array(zone_init_conc_list, dtype=np.float64)
+            if not np.all(np.isfinite(zone_init_state)):
+                bad_species = [
+                    spec
+                    for spec, val in zip(self.network.species_order, zone_init_state)
+                    if not np.isfinite(val)
+                ][:5]
+                raise ModelInputError(
+                    f"Initial chemical state for zone '{zone_name}' contains "
+                    f"non-finite (NaN/Inf) concentrations for species {
+                        bad_species
+                    } (and possibly more). Provide finite initial values for "
+                    "every species."
+                )
+            zone_initial_states.append(zone_init_state)
 
         state: np.ndarray = np.array(zone_initial_states)
         if verbose:

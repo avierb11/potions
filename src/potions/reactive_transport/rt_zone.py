@@ -73,46 +73,23 @@ def calculate_moisture_fraction(
     zone: RtZone
     for i, (zone_name, zone) in enumerate(zone_params.items()):  # type: ignore
         col_name: str = f"s_{zone_name}"
-        max_water_volume = zone.parameters.dimensions.max_water_volume
+        max_water = zone.parameters.dimensions.max_water
         storage: Series = sim_res[col_name]
 
-        if storage.max() >= max_water_volume:
+        if storage.max() >= max_water:
             raise WaterVolumeError(
                 f"Water volume error in zone '{zone_names[i]}': Maximum volume is {
-                    round(max_water_volume, 1)
+                    round(max_water, 1)
                 } mm but maximum simulated storage is {
                     round(storage.max(), 1)
-                } mm. Increase porosity or volume"
+                 } mm. Increase max water capacity or reduce passive storage"
             )
 
         sw_vals[i] = (storage + zone.parameters.dimensions.passive_water_storage) / (
-            max_water_volume + zone.parameters.dimensions.passive_water_storage
+            max_water + zone.parameters.dimensions.passive_water_storage
         )
 
     return sw_vals
-
-
-def calculate_water_table_depth(
-    zone_params: dict[str, RtZone], sim_res: DataFrame
-) -> NDArray:
-    # zw_vals: dict[HbvZone, Series] = {}
-    zw_vals: NDArray = np.zeros(
-        (len(zone_params), len(sim_res)), dtype=np.float64)
-    zone_name: str
-    zone: RtZone
-    for i, (zone_name, zone) in enumerate(zone_params.items()):  # type: ignore
-        col_name: str = f"s_{zone_name}"
-        storage: Series = sim_res[col_name]
-        zw_vals[i] = (
-            zone.parameters.dimensions.depth
-            - (storage + zone.parameters.dimensions.passive_water_storage)
-            / zone.parameters.dimensions.porosity
-        )
-
-        if zw_vals[i].min() < 0:
-            raise WaterVolumeError("Illegal water volume")
-
-    return zw_vals
 
 
 def get_hydro_steps(sim_res: DataFrame) -> NDArray:

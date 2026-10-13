@@ -73,12 +73,12 @@ impl RiverZone {
         let monod_rate: Array1<molar_per_time> = self.monod.rate_rust(&chms);
         let tst_rate: Array1<molar_per_time> = self.tst.rate_rust(&chms);
         let aux_rate: Array1<f64>;
-        let ssa: &Array1<f64>;
+        let reactivity: &Array1<f64>;
         // let aux_rate: Array1<f64> = self.aux.unwrap().factor_rust(d);
 
         match &self.aux {
             Some(v) => {
-                ssa = &v.ssa;
+                reactivity = &v.reactivity;
                 aux_rate = v.factor_rust(d);
             }
             None => {
@@ -90,18 +90,15 @@ impl RiverZone {
             }
         }
 
-        let num_min: usize = self.monod.inhib_np.shape()[0];
         let num_spec: usize = chms.len();
-        let min_start_ind: usize = num_spec - num_min;
-        let min_conc: Array1<molar> = chms.slice(s![min_start_ind..]).to_owned();
+        // Minerals immediately follow the aqueous species, so the mineral block
+        // starts at `num_aq` (the same block `RtZone` uses). `X-` and the
+        // exchange species sit *after* the minerals and must not be treated as
+        // mineral concentrations.
+        let min_start_ind: usize = self.network.num_aqueous_species();
 
-        let mineral_conc_rates: Array1<molar_per_time> = 86_400.0
-            * &self.misc.rate_const
-            * ssa
-            * &self.misc.mineral_molar_mass
-            * min_conc
-            * aux_rate
-            * (monod_rate + tst_rate);
+        let mineral_conc_rates: Array1<molar_per_time> =
+            86_400.0 * reactivity * aux_rate * (monod_rate + tst_rate);
 
         // Convert the molar rate of production to the total amount per unit area by multiplying by the depth
         // Because 1 mm * m^2 = 1 L, so (moles/L/T) * (depth) = (moles/T) to get the total production rate
@@ -338,12 +335,13 @@ impl RiverZone {
             x
         };
 
-        // For RiverZone the water flux driving transport is q_internal(), and the
-        // mineral concentrations are indexed from the *end* of the species vector
-        // (the last `num_min` entries), i.e. `num_species - num_minerals`.
-        let num_min = self.monod.inhib_np.shape()[0];
-        let num_spec = self.network.num_species();
-        let min_start = num_spec - num_min;
+        // For RiverZone the water flux driving transport is q_internal(). The
+        // mineral block sits right after the aqueous species, i.e.
+        // `num_aqueous_species() .. num_aqueous_species() + num_minerals`,
+        // exactly as in `RtZone`. `X-` and the exchange species come after the
+        // minerals, so the older `num_species - num_minerals` convention was
+        // wrong whenever exchange species were present.
+        let min_start = self.network.num_aqueous_species();
         let bed_depth = self.dimensions().bed_depth;
         let q_in = d.hydro_step.q_internal();
         let network = &self.network;
@@ -353,8 +351,24 @@ impl RiverZone {
         let misc = &self.misc;
         let do_reactions = self.do_reactions;
         let moles_to_conc = |s: &Array1<f64>| self.moles_to_conc_rust(s, d);
-        let fused = |conc: &Array1<molar>| {
-            kinetic_residual_and_jacobian_impl(
+
+        // Non-aqueous species are frozen for the step (their ODE rows are zero),
+        // so solve only the aqueous block and re-use the frozen tail as the
+        // mineral/exchange background for the kinetic rates.
+        let num_aq = min_start;
+        let num_spec = self.network.num_species();
+        let bg = c_0_arr.slice(s![num_aq..]).to_owned();
+
+        // Fused narrow residual + analytic Jacobian: rebuild the full-width
+        // concentration (aqueous guess + frozen non-aqueous tail), evaluate the
+        // shared full-width kernel once per Newton iteration, and keep only the
+        // aqueous block of the residual / Jacobian.
+        let fused = |c_aq: &Array1<molar>| {
+            let mut vf: Vec<f64> = Vec::with_capacity(num_spec);
+            vf.extend_from_slice(c_aq.as_slice().unwrap());
+            vf.extend_from_slice(bg.as_slice().unwrap());
+            let conc_full = Array1::from_vec(vf);
+            let (res, jac) = kinetic_residual_and_jacobian_impl(
                 network,
                 monod,
                 tst,
@@ -364,19 +378,32 @@ impl RiverZone {
                 q_in,
                 &moles_to_conc,
                 &c_0_arr,
-                conc,
+                &conc_full,
                 d,
                 dt_days,
                 min_start,
                 do_reactions,
-            )
+            );
+            let res_aq = res.slice(s![0..num_aq]).to_owned();
+            let jac_aq = jac.slice(s![0..num_aq, 0..num_aq]).to_owned();
+            (res_aq, jac_aq)
         };
 
         // Newton's method with the fused (single-evaluation) residual + analytic
-        // Jacobian, falling back to Levenberg-Marquardt (using the fused
-        // analytic Jacobian) resumed from Newton's best iterate.
-        let c_after_rt: Array1<molar> =
-            find_root_multi_analytic_fused_then_lm(&fused, c_0_arr.clone(), verbose)?;
+        // Jacobian over the aqueous block only, falling back to
+        // Levenberg-Marquardt (using the fused analytic Jacobian) resumed from
+        // Newton's best iterate.
+        let sol_aq = find_root_multi_analytic_fused_then_lm(
+            &fused,
+            c_0_arr.slice(s![0..num_aq]).to_owned(),
+            verbose,
+        )?;
+
+        let mut vf: Vec<f64> = Vec::with_capacity(num_spec);
+        vf.extend_from_slice(sol_aq.as_slice().unwrap());
+        vf.extend_from_slice(bg.as_slice().unwrap());
+        let c_after_rt: Array1<molar> = Array1::from_vec(vf);
+        debug_assert_eq!(c_after_rt.len(), num_spec);
 
         let c_after_eq = match self.do_speciation {
             false => c_after_rt.clone(),

@@ -35,8 +35,15 @@ impl ReactionNetwork {
     pub fn mobile_mask_rust(&self) -> Array1<bool> {
         let mut mask: Array1<bool> = Array1::from_elem(self.num_species(), true);
 
-        for i in self.num_aqueous_species()..mask.len() {
+        let num_aq = self.num_aqueous_species();
+        let num_min = self.num_minerals();
+
+        for i in num_aq..num_aq + num_min {
             mask[i] = false;
+        }
+
+        if self.has_exchange() {
+            mask[num_aq + num_min] = false;
         }
 
         mask
@@ -602,7 +609,7 @@ impl ReactionNetwork {
 
     #[getter]
     pub fn num_mineral_parameters(&self) -> usize {
-        5 * self.num_minerals()
+        4 * self.num_minerals()
     }
 
     #[getter]

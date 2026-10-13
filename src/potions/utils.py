@@ -76,6 +76,35 @@ class HydrologyError(PotionsError):
     pass
 
 
+class ModelStructureError(HydrologyError, ValueError):
+    """A model's structure violates a structural rule.
+
+    Raised at model construction when zone placement or zone parameter
+    values make the model physically incoherent, e.g.:
+
+    - a bottom zone not in the last layer (a zone exists below a no-throughflow zone),
+    - a zone other than a bottom zone in the last layer (water would be lost
+      below the model),
+    - non-finite or negative zone parameters,
+    - negative or non-finite size scales.
+    """
+
+
+class ModelInputError(HydrologyError, ValueError):
+    """The inputs to a model run are invalid or corrupted.
+
+    Raised at run time before any model steps when the provided data cannot
+    be physically simulated, e.g.:
+
+    - non-finite values (``NaN``/``Inf``) in the forcing series,
+    - negative precipitation, PET, or measured streamflow,
+    - forcing series of mismatched lengths,
+    - an initial state with the wrong length, non-finite values, or
+      negative zone states,
+    - a timestep ``dt`` that is non-finite or not positive.
+    """
+
+
 class HydrologyNumericalError(HydrologyError):
 
     def __init__(

@@ -3,7 +3,7 @@ import operator
 
 from functools import reduce
 
-from .core import HydrologicZone
+from .core import GroundZoneB, HydrologicZone
 
 from typing import Any, Iterator, Optional, overload
 
@@ -157,3 +157,63 @@ class AnnotatedZone:
     size: float
     pos: ZonePosition
     incoming_fluxes: list[int]
+
+
+# ===================== Bottom-zone registry ===================== #
+
+BOTTOM_ZONE_CLASSES: set[type] = set()
+"""Registry of zone classes that may only appear in the *last* (bottom) layer
+of a model structure.
+
+A "bottom zone" is a zone that transmits no vertical flux to a zone below it
+(e.g. ``GroundZoneB``, which has a hardcoded zero vertical flux). Model
+structure validation enforces two rules against this registry:
+
+1. A bottom zone must *not* appear in any layer other than the last one.
+2. The last layer must consist *only* of bottom zones, so that no water is
+   lost through the base of the model domain.
+"""
+
+
+def register_bottom_zone(cls: type) -> type:
+    """Mark a zone class as a "bottom zone" (only valid in the model's bottom layer).
+
+    Use as a class decorator on a custom zone class that, like
+    ``GroundZoneB``, discharges no vertical flux to a zone below it::
+
+        @register_bottom_zone
+        class MyNoThroughflowZone(GroundZoneB):
+            ...
+
+    The decorated class is registered in ``BOTTOM_ZONE_CLASSES`` and returned
+    unchanged, so the decorator is transparent to the class definition.
+    Alternatively, add the class directly to ``BOTTOM_ZONE_CLASSES``.
+
+    Args:
+        cls: The zone class (typically a subclass of ``HydrologicZone``).
+
+    Returns:
+        The (unchanged) class, for use with ``@register_bottom_zone``.
+    """
+    BOTTOM_ZONE_CLASSES.add(cls)
+    return cls
+
+
+def is_bottom_zone(zone: Any) -> bool:
+    """Check whether ``zone`` is an instance (or a subclass) of a registered
+    bottom-zone class.
+
+    Args:
+        zone: A zone instance, or (for convenience) a zone class.
+
+    Returns:
+        True if ``zone`` belongs to a class registered via
+        ``register_bottom_zone`` (or a subclass of one), else False.
+    """
+    ztype = zone if isinstance(zone, type) else type(zone)
+    return any(issubclass(ztype, c) for c in BOTTOM_ZONE_CLASSES)
+
+
+# Register the built-in bottom zone: ``GroundZoneB`` has a hardcoded zero
+# vertical flux (no throughflow), making it the canonical base zone.
+BOTTOM_ZONE_CLASSES.add(GroundZoneB)

@@ -1,11 +1,25 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, TypeVar, TypedDict
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    TYPE_CHECKING,
+    TypeVar,
+    TypedDict,
+)
 
 import numpy as np
 from numpy import float64 as f64
 from pandas import DataFrame, Series
 
 from .core import RtStep
+
+if TYPE_CHECKING:
+    from scipy.optimize import OptimizeResult
+
+    from .model import Model
+    from .reactive_transport.reaction_network import ReactionNetwork
 
 
 # ==== Types ==== #
@@ -184,3 +198,141 @@ class BatchParams(TypedDict):
     output_dir: Optional[str]
     threshold_function: Optional[Callable[[HydroModelResults], bool]]
     save_results: bool
+
+
+# ==== Reactive-transport calibration ==== #
+@dataclass(frozen=True)
+class ObjectiveComponent:
+    """One term in a composite calibration objective.
+
+    Attributes:
+        metric: The metric name (e.g., ``"nse"``, ``"log_nse"``, ``"kge"``).
+            The name is looked up in :mod:`potions.objective_functions`.
+        target: The series the metric is evaluated on. One of
+            ``"q"`` (streamflow), ``"doc"`` (target solute concentration),
+            or ``"doc_load"`` (target solute load, conc * q).
+        use_flow_weight: If True, apply a flow-weighted variant of the
+            metric, weighting each time step by the measured
+            streamflow.
+        power: The exponent applied to ``1 - metric_value`` when
+            computing the composite objective.
+    """
+
+    metric: str
+    target: str
+    use_flow_weight: bool = False
+    power: float = 1.0
+
+
+@dataclass(frozen=True)
+class ObjectiveSpec:
+    """Composable specification of the composite calibration objective.
+
+    The composite objective is the sum of ``(1 - value) ** power`` over
+    every :class:`ObjectiveComponent`, so a perfect fit yields zero.
+    """
+
+    components: tuple[ObjectiveComponent, ...]
+
+
+@dataclass(frozen=True)
+class RtCalibrationData:
+    """All of the data required to run and calibrate a reactive-transport
+    model.
+
+    Attributes:
+        model_type: The :class:`~potions.model.Model` subclass to calibrate.
+        network: The reaction network describing species, minerals, and
+            exchange processes.
+        zone_configs: A mapping of zone name to its
+            :class:`RtZoneConfiguration`.
+        forc: The precipitation, temperature, and PET forcing data.
+        precip_conc: A
+            ``(num_surface_zones, n_timesteps, num_species)`` array of
+            solute concentrations in the precipitation.
+        q_meas: The observed streamflow time series.
+        conc_df: A DataFrame with the observed river concentrations; every
+            column of :attr:`target_species` is used for the solute-term of
+            the objective.
+        target_species: The name of the species in the reaction network
+            that is matched against :attr:`conc_df`.
+        mean_target_conc: The value to initialise every zone's aqueous
+            target-species concentration with. If ``None``, the mean of
+            ``conc_df[target_species]`` is used.
+        init_aq_conc: The initial aqueous concentration (mol/L) given to
+            every other primary and secondary species in each zone.
+        mineral_conc: The concentration (mol/L) assigned to every mineral
+            in every reactive zone. The mineral state is frozen over the
+            simulation, so this value only has to be a positive, physically
+            sensible constant.
+    """
+
+    model_type: type["Model"]
+    network: "ReactionNetwork"
+    zone_configs: dict[str, RtZoneConfiguration]
+    forc: ForcingData
+    precip_conc: np.ndarray
+    q_meas: Series
+    conc_df: DataFrame
+    target_species: str = "DOC"
+    mean_target_conc: Optional[float] = None
+    init_aq_conc: float = 1e-3
+    mineral_conc: float = 1.0
+
+
+@dataclass
+class CalibrationOptions:
+    """Options for the differential-evolution driver used by
+    :func:`~potions.calibration.calibrate`.
+
+    Attribute names map 1-to-1 to :func:`scipy.optimize.differential_evolution`
+    arguments.
+    """
+
+    maxiter: int = 10
+    tol: float = 0.01
+    popsize: int = 15
+    seed: int = 0
+    polish: bool = False
+    workers: int = -1
+    strategy: Literal["best1bin", "best1exp", "best2bin", "best2exp", "rand1bin", "rand1exp", "rand2bin"] = "best1bin"
+    mutation: tuple[float, float] = (0.5, 1.0)
+    updating: Literal["immediate", "deferred"] = "deferred"
+    atol: float = 0.0
+    # callback: Optional[Callable[..., bool]] = None
+
+
+@dataclass
+class CalibrationResults:
+    """The outcome of a single calibration run.
+
+    Attributes:
+        param_names: The ordered list of calibrated parameter names.
+        best_params: The best parameter values, aligned with
+            :attr:`param_names`.
+        best_results: The full :class:`ModelResults` of the best run.
+        objective: The composite objective value (lower is better).
+        optimize_result: The raw :class:`scipy.optimize.OptimizeResult`.
+    """
+
+    param_names: list[str]
+    best_params: np.ndarray
+    best_results: ModelResults
+    objective: float
+    optimize_result: "OptimizeResult"
+
+
+@dataclass
+class EnsembleResults:
+    """The outcome of an ensemble of top-ranked parameter sets.
+
+    Attributes:
+        member_params: A list of the parameter arrays, one per member.
+        member_results: A list of the full :class:`ModelResults`, one per
+            member.
+        objectives: The composite objective value of each member.
+    """
+
+    member_params: list[np.ndarray]
+    member_results: list[ModelResults]
+    objectives: list[float]

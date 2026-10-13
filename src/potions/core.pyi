@@ -62,7 +62,6 @@ class RtForcing:
     hydro_step: HydroStep
     hydro_forc: HydroForcing
     s_w: float
-    z_w: float
 
     def copy(self) -> RtForcing: ...
 
@@ -171,7 +170,7 @@ class MineralAuxParams:
     sw_threshold: float
     sw_exp: float
     q_10: float
-    ssa: float
+    reactivity: float
 
     def to_array(self) -> np.ndarray: ...
     @staticmethod
@@ -179,23 +178,26 @@ class MineralAuxParams:
 
 @dataclass
 class ZoneDimensions:
-    porosity: float
-    depth: float
+    max_water: float
     passive_water_storage: float
 
     def to_array(self) -> np.ndarray: ...
     @staticmethod
     def from_array(arr: np.ndarray) -> ZoneDimensions: ...
-    @property
-    def max_water_volume(self) -> float: ...
 
-@dataclass
 class MineralParameters:
-    # sw_threshold: np.ndarray
-    # sw_exp: np.ndarray
-    # q_10: np.ndarray
-    # ssa: np.ndarray
+    sw_threshold: np.ndarray
+    sw_exp: np.ndarray
+    q_10: np.ndarray
+    reactivity: np.ndarray
 
+    def __init__(
+        self,
+        sw_threshold: np.ndarray,
+        sw_exp: np.ndarray,
+        q_10: np.ndarray,
+        reactivity: np.ndarray,
+    ) -> None: ...
     def to_array(self) -> np.ndarray: ...
     @staticmethod
     def from_array(
@@ -208,7 +210,7 @@ class MineralParameters:
     def from_mineral_parameters(
         minerals: list[MineralAuxParams],
     ) -> MineralParameters: ...
-    def get_ssa(self) -> np.ndarray: ...
+    def get_reactivity(self) -> np.ndarray: ...
     def get_q_10(self) -> np.ndarray: ...
     def get_sw_threshold(self) -> np.ndarray: ...
     def get_sw_exp(self) -> np.ndarray: ...

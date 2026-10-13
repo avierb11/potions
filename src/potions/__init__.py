@@ -55,7 +55,6 @@ __all__ = [
     "RtParameters",
     "ZoneDimensions",
     "find_root_multi",
-    "calculate_water_table_depth",
     "calculate_moisture_fraction",
     "RtZoneConfiguration",
     "ModelResults",
@@ -71,10 +70,36 @@ __all__ = [
     "WaterVolumeError",
     "SubsurfaceZone",
     "SubsurfaceZoneB",
+    # Calibration
+    "calibrate",
+    "polish",
+    "run_ensemble",
+    "build_rt_bounds",
+    "make_objective",
+    "arr_to_results",
+    "parallel_numerical_gradient",
+    "DEFAULT_RT_OBJECTIVE_SPEC",
+    "evaluate_components",
+    "flow_weighted_nse",
+    "flow_weighted_log_nse",
+    "flow_weighted_kge",
+    "METRIC_REGISTRY",
+    "ObjectiveComponent",
+    "ObjectiveSpec",
+    "RtCalibrationData",
+    "CalibrationOptions",
+    "CalibrationResults",
+    "EnsembleResults",
 ]
 from .common_types import (
+    CalibrationOptions,
+    CalibrationResults,
     ChemicalState,
+    EnsembleResults,
     LapseRateParameters,
+    ObjectiveComponent,
+    ObjectiveSpec,
+    RtCalibrationData,
     HydroModelResults,
     RtModelResults,
     ModelResults,
@@ -138,7 +163,27 @@ from .model import (
 )
 
 
-from .objective_functions import kge, nse, objective_high_flow, objective_low_flow
+from .objective_functions import (
+    kge,
+    nse,
+    objective_high_flow,
+    objective_low_flow,
+    DEFAULT_RT_OBJECTIVE_SPEC,
+    evaluate_components,
+    flow_weighted_nse,
+    flow_weighted_log_nse,
+    flow_weighted_kge,
+    METRIC_REGISTRY,
+)
+from .calibration import (
+    calibrate,
+    polish,
+    run_ensemble,
+    build_rt_bounds,
+    make_objective,
+    arr_to_results,
+    parallel_numerical_gradient,
+)
 from .reactive_transport import (
     # ChemicalDatabase,
     # ExchangeReaction,
@@ -159,7 +204,6 @@ from .reactive_transport import (
     # ZoneDimensions,
     # RtZone,
     # RtStep,
-    calculate_water_table_depth,
     calculate_moisture_fraction,
     WaterVolumeError,
 )

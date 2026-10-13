@@ -8,7 +8,14 @@ from numpy.typing import NDArray
 from pandas import DataFrame, Series
 from numpy import float64 as f64
 
-from ..core import GroundZone, HydroForcing, HydrologicZone, SnowZone, SurfaceZone
+from ..core import (
+    GroundZone,
+    GroundZoneB,
+    HydroForcing,
+    HydrologicZone,
+    SnowZone,
+    SurfaceZone,
+)
 from ..common_models import HbvModel
 from ..common_types import ForcingData, HydroModelStep
 from ..model import Model
@@ -21,7 +28,7 @@ def test_Model_connection_matrices_simple_3_box() -> None:
         structure: list[list[HydrologicZone]] = [
             [SnowZone(name="z0")],
             [SurfaceZone(name="z1")],
-            [GroundZone(name="z2")],
+            [GroundZoneB(name="z2")],
         ]
 
     scales = [1.0]
@@ -53,7 +60,7 @@ def test_Model_connection_matrix_mixed_sizes() -> None:
         structure: list[list[HydrologicZone]] = [
             [GroundZone(name="z0"), GroundZone(name="z1")],
             [GroundZone(name="z2"), GroundZone(name="z3")],
-            [GroundZone(name="z4")],
+            [GroundZoneB(name="z4")],
         ]
 
     model = TestModel(scales=scales[0])
@@ -108,7 +115,7 @@ def test_Model_connection_matrices_3_by_2() -> None:
         structure: list[list[HydrologicZone]] = [
             [GroundZone(name="z0"), GroundZone(name="z1")],
             [GroundZone(name="z2"), GroundZone(name="z3")],
-            [GroundZone(name="z4"), GroundZone(name="z5")],
+            [GroundZoneB(name="z4"), GroundZoneB(name="z5")],
         ]
 
     scales = [0.6, 0.4]

@@ -17,9 +17,20 @@ import emcee  # type: ignore
 
 from .common_types import ForcingData, HydroModelResults, HydroModelStep
 from .core import HydroForcing, HydrologicZone, HydroStep, ScalarRootFindingError
-from .model_components import Layer
+from .model_components import Layer, is_bottom_zone
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
-from .utils import HydrologyNumericalError, log_probability, objective_function
+from .reactive_transport.parameter_docs import (
+    _fmt,
+    render_describe,
+    zone_parameter_rows,
+)
+from .utils import (
+    HydrologyNumericalError,
+    ModelInputError,
+    ModelStructureError,
+    log_probability,
+    objective_function,
+)
 
 # ==== Constants and types ==== #
 f64 = np.float64
@@ -55,6 +66,11 @@ class HydrologicalModel:
             verbose (bool): If True, prints additional information during
                 initialization. Defaults to False.
         """
+        if not self.structure:
+            raise ModelStructureError(
+                "Model structure is empty, make sure you define a model "
+                "structure class property describing your model"
+            )
         # Check for empty values
         if scales is None or scales == []:
             # Get the default
@@ -94,6 +110,12 @@ class HydrologicalModel:
         self.__vert_matrix: NDArray = vert
         self.__forcing_mat: NDArray = self.get_forc_mat(scales)
         self.__forcing_rel_mat: NDArray = self.get_forc_mat(scales, relative=True)
+
+        # Validate the structure (bottom-zone placement rules, parameter
+        # finiteness, scale validity) at construction time, so that a
+        # misconfigured model fails immediately with a clear message rather
+        # than silently producing wrong results when it is eventually run.
+        self._validate_model_structure()
 
     def __len__(self) -> int:
         """Returns the number of layers in the model."""
@@ -388,10 +410,12 @@ class HydrologicalModel:
                     G.add_edge(from_node, to_node, type="vertical")
             else:
                 # Handle invalid layer configurations according to your rules
-                print(
-                    f"Warning: Layer {l_idx} has {num_zones_current} zones, "
-                    f"but Layer {l_idx + 1} has {num_zones_next} zones. "
-                    "No vertical connections added for this layer pair as it violates rules."
+                raise ModelStructureError(
+                    f"Invalid model structure: layer {l_idx} has "
+                    f"{num_zones_current} zones, but layer {l_idx + 1} has "
+                    f"{num_zones_next} zones. Each layer must contain either "
+                    "1 zone or the same number of zones as the layer above "
+                    "it, so that vertical flux is unambiguous."
                 )
         return G
 
@@ -464,89 +488,115 @@ class HydrologicalModel:
             current_zone_idx += len(layer)
         return river_zones
 
-    @staticmethod
-    def _zone_label(zone: HydrologicZone) -> str:
-        """Format a zone as ``name[<param>=<val>, ...]`` for the diagram."""
-        names = zone.parameter_names()  # type: ignore[attr-defined]
-        values = zone.param_list()  # type: ignore[attr-defined]
-        inner = ", ".join(f"{k}={v}" for k, v in zip(names, values))
-        if not inner:
-            return zone.name  # type: ignore[attr-defined]
-        return f"{zone.name}[{inner}]"  # type: ignore[attr-defined]
-
     def structure_diagram(self) -> str:
-        """Return an ASCII diagram of the model structure and connectivity.
+        """Return a boxed ASCII diagram of the model structure.
 
-        Draws each hydrologic zone (with its parameters) as a node, lateral
-        flow arrows within a layer, vertical flow arrows between adjacent
-        layers, and a ``river`` channel on the right that each layer's
-        downstream-most zone discharges into.
+        Renders each hydrologic zone (with its parameter values) as a box,
+        stacked vertically by layer, with a wavy river channel on the right.
 
         Returns:
             str: The multi-line ASCII representation.
         """
-        layers = self.layers
-        num_layers = len(layers)
-        num_cols = max(len(layer.zones) for layer in layers)
+        num_cols = max(len(layer) for layer in self.structure)
 
-        labels = [[self._zone_label(z) for z in layer.zones] for layer in layers]
+        zone_lines: list[list[list[str]]] = []
+        for l, layer in enumerate(self.structure):
+            layer_zones = self.layers[l].zones
+            layer_lines: list[list[str]] = []
+            for c, zone in enumerate(layer_zones):
+                names = zone.parameter_names()  # type: ignore[attr-defined]
+                values = zone.param_list()  # type: ignore[attr-defined]
+                lines: list[str] = [self.structure[l][c].name]  # type: ignore[attr-defined]
+                for k, v in zip(names, values):
+                    lines.append(f"{k} = {str(round(float(v), 4))}")
+                layer_lines.append(lines)
+            zone_lines.append(layer_lines)
 
-        LATERAL = " -> "
-        RIVER_ARROW = "->"
-        RIVER_LABEL = "river"
+        col_widths = [0] * num_cols
+        for layer_lines in zone_lines:
+            for c, lines in enumerate(layer_lines):
+                for line in lines:
+                    col_widths[c] = max(col_widths[c], len(line))
 
-        col_w = [0] * num_cols
-        for layer_labels in labels:
-            for c, text in enumerate(layer_labels):
-                col_w[c] = max(col_w[c], len(text))
+        RIVER_LABEL = "River"
+        river_width = len(RIVER_LABEL)
 
-        x = [0] * num_cols
-        for c in range(1, num_cols):
-            x[c] = x[c - 1] + col_w[c - 1] + len(LATERAL)
+        rows: list[str] = []
 
-        river_bar_x = x[num_cols - 1] + col_w[num_cols - 1] + len(RIVER_ARROW)
-        river_label_x = river_bar_x + 2
-        total_w = river_label_x + len(RIVER_LABEL)
-        total_rows = 2 * num_layers - 1
+        def make_border() -> str:
+            b = "+"
+            for c in range(num_cols):
+                b += "-" * (col_widths[c] + 2) + "+"
+            b += "~" * (river_width + 2) + "+"
+            return b
 
-        grid: list[list[str]] = [[" "] * total_w for _ in range(total_rows)]
+        for i, layer_lines in enumerate(zone_lines):
+            if not layer_lines:
+                continue
+            rows.append(make_border())
+            band_height = max(len(lines) for lines in layer_lines)
+            for row_idx in range(band_height):
+                content = "|"
+                for c in range(num_cols):
+                    if c < len(layer_lines) and row_idx < len(layer_lines[c]):
+                        text = layer_lines[c][row_idx]
+                    else:
+                        text = ""
+                    content += f" {text.ljust(col_widths[c])} |"
+                if i == 0 and row_idx == 0:
+                    river_text = RIVER_LABEL
+                else:
+                    river_text = ""
+                content += f" {river_text.ljust(river_width)} |"
+                rows.append(content)
 
-        def put(row: int, col: int, text: str) -> None:
-            for offset, ch in enumerate(text):
-                grid[row][col + offset] = ch
+        rows.append(make_border())
+        return "\n".join(rows)
 
-        def center(c: int) -> int:
-            return x[c] + col_w[c] // 2
+    def _hydro_parameter_rows(self) -> list[dict]:
+        """Build parameter description rows for every hydro zone, in layer order."""
+        rows: list[dict] = []
+        for zone in self.flat_model:
+            names = zone.parameter_names()  # type: ignore[attr-defined]
+            values = zone.param_list()  # type: ignore[attr-defined]
+            rows += zone_parameter_rows(zone, "hydro", names=names, values=values)
+        for i in range(len(self.structure[0]) - 1):
+            rows.append(
+                {
+                    "zone": "model",
+                    "name": f"proportion.{i + 1}",
+                    "value": _fmt(self.__scales[i]),
+                    "unit": "",
+                    "description": "Fractional area contribution of the surface zone.",
+                }
+            )
+        return rows
 
-        # River channel: vertical bar spanning the full height plus a label.
-        for r in range(total_rows):
-            grid[r][river_bar_x] = "|"
-        put(0, river_label_x, RIVER_LABEL)
+    def describe_parameters(self) -> DataFrame:
+        """Return a table describing every tunable parameter in the model.
 
-        # Zone rows, lateral arrows, and river outflow arrows.
-        for i, layer_lbls in enumerate(labels):
-            row = 2 * i
-            for c, text in enumerate(layer_lbls):
-                put(row, x[c], text.ljust(col_w[c]))
-            for c in range(len(layer_lbls) - 1):
-                put(row, x[c] + col_w[c], LATERAL)
-            last = len(layer_lbls) - 1
-            if last >= 0:
-                put(row, x[last] + col_w[last], RIVER_ARROW)
+        The base (pure-hydrology) model reports one row per hydro-zone
+        parameter plus the catchment area proportions. Subclasses that add
+        reactive-transport or river zones override this and append their own
+        rows.
 
-        # Vertical flow connectors between adjacent layers.
-        for i in range(num_layers - 1):
-            top_n = len(labels[i])
-            bot_n = len(labels[i + 1])
-            if bot_n == 1:
-                cols = range(top_n)  # fan-in to the single zone below
-            else:
-                cols = range(min(top_n, bot_n))
-            conn_row = 2 * i + 1
-            for c in cols:
-                grid[conn_row][center(c)] = "|"
+        Returns:
+            DataFrame: Columns are ``[zone, name, value, unit, description]``.
+        """
+        rows = self._hydro_parameter_rows()
+        return DataFrame(rows, columns=["zone", "name", "value", "unit", "description"])
 
-        return "\n".join("".join(row).rstrip() for row in grid)
+    def describe(self) -> str:
+        """Return a human-readable, grouped description of the model parameters.
+
+        For the base model this covers the hydro zones and the catchment area
+        proportions. Reactive-transport subclasses override this to also cover
+        their RT zones and (if present) the river zone.
+
+        Returns:
+            str: A multi-line, sectioned description of the parameters.
+        """
+        return render_describe(self._hydro_parameter_rows(), title="Model parameters")
 
     @classmethod
     def get_num_zone_parameters(cls) -> int:
@@ -575,14 +625,24 @@ class HydrologicalModel:
         return len(cls.structure[0]) - 1
 
     def _validate_model_structure(self) -> None:
-        """Validates the model's structure and configuration.
+        r"""Validates the model's structure and configuration.
 
         Checks for:
         - Correct types in the `structure` attribute.
         - Non-empty structure.
-        - Valid layer connectivity (each layer must have 1 zone or the same
+        - Bottom-zone placement rules:
+          * a registered bottom zone may not appear above the last layer
+            (nothing may be placed below a bottom zone);
+          * the last layer must consist of bottom zones only, so that no
+            water is lost through the base of the model domain.
+        - Valid layer geometry (each layer must have 1 zone or the same
           number of zones as the layer above it).
-        - `scales` that sum to 1.
+        - Zone parameters that are finite.
+        - `scales` that are finite, non-negative, and sum to 1.
+
+        Raises:
+            TypeError: if a `structure` entry is not a zone.
+            ModelStructureError: if any structural rule is violated.
         """
         # Check if all types are correct in the structure
         for i, layer in enumerate(self.structure):
@@ -600,9 +660,41 @@ class HydrologicalModel:
 
         # Check if model is empty
         if self.structure == []:
-            raise ValueError(
+            raise ModelStructureError(
                 "Model structure is empty, make sure you define a model structure class property describing your model"
             )
+
+        # ==== Bottom-zone rules ==== #
+        # These checks run against the *instantiated* zones (self.layers), so
+        # that a zone overridden via `zones={...}` is judged by the type that
+        # actually runs, not just the type declared in `structure`.
+        layer_zones: list[list[HydrologicZone]] = [layer.zones for layer in self.layers]
+        num_layers: int = len(layer_zones)
+        last_layer: int = num_layers - 1
+
+        for l_idx, layer in enumerate(layer_zones):
+            for z_idx, zone in enumerate(layer):
+                if is_bottom_zone(zone) and l_idx != last_layer:
+                    raise ModelStructureError(
+                        f"Bottom zone '{zone.name}' ({type(zone).__name__}) "
+                        f"in layer {l_idx} (position {z_idx}) is not "
+                        f"allowed: layer {l_idx + 1} sits below it. A "
+                        "bottom zone transmits no vertical flux to a zone "
+                        "beneath it, so nothing must be placed below it. "
+                        "Move the bottom zone to the last layer, or replace "
+                        "it with a non-bottom zone."
+                    )
+                if l_idx == last_layer and not is_bottom_zone(zone):
+                    raise ModelStructureError(
+                        f"Zone '{zone.name}' ({type(zone).__name__}) in the "
+                        f"last layer (layer {l_idx}, position {z_idx}) is not "
+                        "a bottom zone: as the lowest zone of the model, it "
+                        "would discharge vertical flux out of the domain and "
+                        "silently lose water. Use a bottom zone (e.g. "
+                        "GroundZoneB / SubsurfaceZoneB), or mark your custom "
+                        "zone as one with register_bottom_zone()."
+                    )
+        # ============================= #
 
         # Check if model geometry is correct
         layer_lengths: list[int] = [len(layer) for layer in self.structure]
@@ -610,18 +702,41 @@ class HydrologicalModel:
 
         for layer_size in layer_lengths:
             if layer_size not in (1, prev_zones):
-                raise ValueError(
+                raise ModelStructureError(
                     f"Invalid model structure: The next layer can only have either 1 zone or the same number as the zone above, but your model has the structure {
                         layer_lengths
                     }"
                 )
             prev_zones = layer_size
 
-        # Check if all model scales add up to 1
+        # Check that all scales are valid and add up to 1
+        if any(not np.isfinite(s) or s < 0 for s in self.scales):
+            raise ModelStructureError(
+                f"Model scales must be finite and non-negative, got: {
+                    self.scales
+                }"
+            )
         if abs(sum(self.scales) - 1) > 1e-3:
-            raise ValueError(f"Model scales do not add up to 1: {
+            raise ModelStructureError(f"Model scales do not add up to 1: {
                     self.scales
                 }. Ensure that the scales equal 1 to maintain water balance")
+
+        # Check that every zone parameter is finite (corrupted parameters
+        # would otherwise propagate as NaN/Inf through the simulation).
+        # This runs against the instantiated zones (self.layers) so that a
+        # zone overridden via `zones={...}` is checked with its actual values.
+        for l_idx, layer in enumerate(layer_zones):
+            for z_idx, zone in enumerate(layer):
+                for pname, pval in zip(
+                    zone.parameter_names(), zone.param_list(), strict=True
+                ):
+                    if not np.isfinite(pval):
+                        raise ModelStructureError(
+                            f"Zone '{zone.name}' ({type(zone).__name__}) in "
+                            f"layer {l_idx} (position {z_idx}) has a "
+                            f"non-finite parameter: {pname} = {pval!r}. "
+                            "All zone parameters must be finite numbers."
+                        )
 
     def hydro_to_array(self) -> NDArray:
         """Serializes all model parameters into a single 1D NumPy array.
@@ -760,6 +875,163 @@ class HydrologicalModel:
             [zone.default_init_state() for layer in cls.structure for zone in layer]  # type: ignore
         )
 
+    @staticmethod
+    def _series_to_floats(series: Series, label: str) -> NDArray[np.float64]:
+        """Convert a forcing time series to a float64 array, raising a
+        descriptive error if it contains non-numeric entries."""
+        try:
+            return np.asarray(series.to_numpy(), dtype=np.float64)
+        except (TypeError, ValueError) as e:
+            raise ModelInputError(
+                f"The '{label}' series must contain only numeric values "
+                f"(found non-numeric entries): {e}"
+            ) from e
+
+    def _validate_hydro_inputs(
+        self,
+        forc: ForcingData | Iterable[ForcingData],
+        meas_streamflow: Optional[Series] = None,
+        init_state: Optional[NDArray[f64]] = None,
+    ) -> None:
+        """Validate the run-time inputs before any model steps are taken.
+
+        All checks are hard errors (`ModelInputError`) so that corrupted or
+        unphysical input data is rejected before the simulation starts,
+        rather than producing NaN-filled results part-way through a run.
+
+        Checks:
+        - 1 or one-per-surface-zone `ForcingData` objects, each with
+          equal-length precip/temp/pet series;
+        - no non-finite (NaN/Inf) values in precip, temp, or pet;
+        - precipitation and PET are non-negative at every step;
+        - measured streamflow (if given) is finite, non-negative, and the
+          same length as the forcing series;
+        - `init_state` (if given) has one value per zone, all finite and
+          non-negative.
+
+        Raises:
+            ModelInputError: if any check fails, with a message that
+                identifies the offending series/value.
+        """
+        forcing_series: list[ForcingData]
+        if isinstance(forc, ForcingData):
+            forcing_series = [forc]
+        else:
+            forcing_series = list(forc)
+
+        num_surface_zones: int = len(self.surface_zone_ids)
+        if len(forcing_series) not in (1, num_surface_zones):
+            raise ModelInputError(
+                f"Expected 1 or {num_surface_zones} ForcingData objects "
+                f"(one per surface zone), got {len(forcing_series)}."
+            )
+
+        if not forcing_series:
+            raise ModelInputError(
+                "No forcing data was provided; a ForcingData object with "
+                "precip, temp, and pet series is required."
+            )
+
+        num_steps: int = len(forcing_series[0].precip)
+        if num_steps == 0:
+            raise ModelInputError(
+                "The forcing series are empty: there is no data to simulate."
+            )
+
+        for i, fd in enumerate(forcing_series):
+            for field in ("precip", "temp", "pet"):
+                series = Series.__getattribute__(fd, field)
+                if len(series) != num_steps:
+                    raise ModelInputError(
+                        f"ForcingData #{i}: the '{field}' series has length "
+                        f"{len(series)}, but the precipitation series has "
+                        f"length {num_steps}. precip, temp, and pet must all "
+                        "have the same length."
+                    )
+                values = self._series_to_floats(series, f"'{field}' (ForcingData #{i})")
+                if not np.all(np.isfinite(values)):
+                    bad_idx = np.where(~np.isfinite(values))[0][:5]
+                    raise ModelInputError(
+                        f"ForcingData #{i}: the '{field}' series contains "
+                        f"non-finite (NaN/Inf) values at index"
+                        f"{'s' if len(bad_idx) > 1 else ''} {
+                            list(map(int, bad_idx))
+                        } (first values: {list(values[bad_idx])}). "
+                        "Replace the missing/corrupted values before "
+                        "running the model."
+                    )
+
+            precip_vals = self._series_to_floats(
+                fd.precip, "precip (ForcingData "
+                f"#{i})"
+            )
+            if np.any(precip_vals < 0):
+                raise ModelInputError(
+                    f"ForcingData #{i}: precipitation contains negative "
+                    f"values (min = {float(np.min(precip_vals)):.6g}). "
+                    "Precipitation must be >= 0 at every step."
+                )
+
+            pet_vals = self._series_to_floats(fd.pet, "pet (ForcingData "
+                                                     f"#{i})")
+            if np.any(pet_vals < 0):
+                raise ModelInputError(
+                    f"ForcingData #{i}: PET contains negative values "
+                    f"(min = {float(np.min(pet_vals)):.6g}). PET must be "
+                    ">= 0 at every step."
+                )
+
+        if meas_streamflow is not None:
+            if len(meas_streamflow) != num_steps:
+                raise ModelInputError(
+                    f"meas_streamflow has length {len(meas_streamflow)}, but "
+                    f"the forcing series have length {num_steps}. They must "
+                    "have the same length."
+                )
+            stream_vals = self._series_to_floats(meas_streamflow, "meas_streamflow")
+            if not np.all(np.isfinite(stream_vals)):
+                bad_idx = np.where(~np.isfinite(stream_vals))[0][:5]
+                raise ModelInputError(
+                    f"meas_streamflow contains non-finite (NaN/Inf) values at "
+                    f"index{'s' if len(bad_idx) > 1 else ''} {list(map(int, bad_idx))}."
+                )
+            if np.any(stream_vals < 0):
+                raise ModelInputError(
+                    "meas_streamflow contains negative values "
+                    f"(min = {float(np.min(stream_vals)):.6g}). Measured "
+                    "streamflow must be >= 0."
+                )
+
+        if init_state is not None:
+            state = np.asarray(init_state, dtype=np.float64)
+            if state.ndim != 1:
+                raise ModelInputError(
+                    f"init_state must be a 1-dimensional array (got ndim = "
+                    f"{state.ndim})."
+                )
+            if len(state) != self.num_zones:
+                raise ModelInputError(
+                    f"init_state has length {len(state)}, but the model has "
+                    f"{self.num_zones} zones. One initial storage value per "
+                    f"zone is required, in the order: {self.zone_names}."
+                )
+            if not np.all(np.isfinite(state)):
+                nans = [
+                    int(i)
+                    for i in np.where(~np.isfinite(state))[0][:5]
+                ]
+                bad_zones = [self.zone_names[i] for i in nans]
+                raise ModelInputError(
+                    f"init_state contains non-finite (NaN/Inf) values at "
+                    f"zone index(es) {nans} (zones {bad_zones})."
+                )
+            if np.any(state < 0):
+                raise ModelInputError(
+                    "init_state contains negative zone storage values "
+                    f"(min = {float(np.min(state)):.6g}). Zone storages must "
+                    "be >= 0."
+                )
+
     def step_hydro_model(
         self,
         state: NDArray[f64],
@@ -847,12 +1119,27 @@ class HydrologicalModel:
                 mass_err = (s_i - s_new) + dt * mass_balance
 
                 if abs(mass_err) > 1e-3:
-                    print(f"Mass balance error on for zone {i} with name {zone.name}")  # type: ignore
-                    print(f"Storage: {s_i}")
-                    print(f"Zone: {zone}")
-                    print(f"Forcing data: {d_i_zone}")
-                    print(f"Step: {step_res}")
-                    raise ValueError("Mass balance failed")
+                    raise HydrologyNumericalError(
+                        type(self),
+                        zone,
+                        self.hydro_to_array(),
+                        s_i,
+                        d_i_zone.copy(),
+                        "Water balance failed in zone "
+                        f"'{zone.name}' ({type(zone).__name__}):\n"
+                        f"  initial storage (s_i): {s_i:+.6f}\n"
+                        f"  final storage (s_new): {s_new:+.6f}\n"
+                        f"  q_in:        {d_i_zone.q_in:+.6f}\n"
+                        f"  forc_flux:   {step_res.forc_flux:+.6f}\n"
+                        f"  vap_flux:    {step_res.vap_flux:+.6f}\n"
+                        f"  lat_flux:    {step_res.lat_flux:+.6f}\n"
+                        f"  vert_flux:   {step_res.vert_flux:+.6f}\n"
+                        f"  residual (mass_err): {mass_err:+.6f} "
+                        f"(tolerance: 1e-3)\n"
+                        f"  dt: {dt!r}\n"
+                        f"  forcing: {d_i_zone}\n"
+                        f"  step:  {step_res}",
+                    )
             # ================================= #
 
             new_states[i] = step_res.state
@@ -908,6 +1195,13 @@ class HydrologicalModel:
         """
         # Check the model structure to make sure that all of the zones are correct
         self._validate_model_structure()
+
+        # Check the inputs (forcing data, measured streamflow, initial state)
+        # so that missing/corrupted/unphysical data is rejected before any
+        # simulation steps, with a message that pinpoints the problem.
+        self._validate_hydro_inputs(
+            forc=forc, meas_streamflow=meas_streamflow, init_state=init_state
+        )
 
         # Check if need initial state
         if init_state is None:

@@ -344,10 +344,11 @@ class Model(ReactiveTransportModel):
             Model: A new, fully parameterized model instance.
         """
         # Determine the number of reactive transport (RT) parameters.
-        # Each zone has 3 base RT params + one per mineral in the network.
+        # Each zone has 2 base RT params (max_water, passive_water_storage)
+        # plus one set of mineral params per mineral in the network.
         num_zones: int = cls.get_num_zones()
         num_hydro_params: int = cls.get_num_hydro_parameters()
-        num_dim_params: int = 3 * num_zones
+        num_dim_params: int = 2 * num_zones
         num_min_params: int = 0
         num_river_params: int = 0
         for zone_name, zone in config.items():

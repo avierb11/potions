@@ -8,7 +8,6 @@ from ..reactive_transport.rt_zone import (
     MiscData,
     WaterVolumeError,
     calculate_moisture_fraction,
-    calculate_water_table_depth,
     get_hydro_steps,
 )
 
@@ -23,8 +22,8 @@ def _make_zone(dimensions: ZoneDimensions) -> MagicMock:
 
 @pytest.fixture
 def dimensions() -> ZoneDimensions:
-    # porosity*depth - passive = 0.2*100 - 5 = 15 mm max water volume.
-    return ZoneDimensions(porosity=0.2, depth=100.0, passive_water_storage=5.0)
+    # 15 mm max water volume, 5 mm passive water storage.
+    return ZoneDimensions(max_water=15.0, passive_water_storage=5.0)
 
 
 @pytest.fixture
@@ -36,15 +35,15 @@ def _storage_series(values) -> pd.DataFrame:
     return pd.DataFrame({"s_shallow": values})
 
 
-def test_max_water_volume(dimensions: ZoneDimensions) -> None:
-    assert dimensions.max_water_volume == pytest.approx(15.0)
+def test_max_water(dimensions: ZoneDimensions) -> None:
+    assert dimensions.max_water == pytest.approx(15.0)
 
 
 def test_calculate_moisture_fraction_formula(zones, dimensions) -> None:
     sim = _storage_series([0.0, 10.0, 14.9])
     sw = calculate_moisture_fraction(zones, sim)
     assert sw.shape == (1, 3)
-    # (s + passive) / (max_water_volume + passive)
+    # (s + passive) / (max_water + passive)
     expected = (np.array([0.0, 10.0, 14.9]) + 5.0) / (15.0 + 5.0)
     assert np.allclose(sw[0], expected)
 
@@ -61,28 +60,6 @@ def test_moisture_fraction_exceeds_max_raises(zones) -> None:
     sim = _storage_series([15.1])
     with pytest.raises(WaterVolumeError):
         calculate_moisture_fraction(zones, sim)
-
-
-def test_calculate_water_table_depth_formula(zones, dimensions) -> None:
-    sim = _storage_series([0.0, 10.0, 14.9])
-    zw = calculate_water_table_depth(zones, sim)
-    # zw = depth - (s + passive) / porosity
-    # 100 - (s + 5) / 0.2  ->  [75.0, 25.0, 0.5]
-    expected = np.array([75.0, 25.0, 0.5])
-    assert np.allclose(zw[0], expected)
-
-
-def test_water_table_depth_full_storage_gives_surface(zones, dimensions) -> None:
-    # At max water volume (15 mm), the water table is at the surface (zw -> ~0).
-    sim = _storage_series([15.0])
-    zw = calculate_water_table_depth(zones, sim)
-    assert zw[0, 0] == pytest.approx(0.0, abs=1e-9)
-
-
-def test_water_table_depth_full_storage_negative_raises(zones) -> None:
-    sim = _storage_series([15.1])
-    with pytest.raises(WaterVolumeError):
-        calculate_water_table_depth(zones, sim)
 
 
 def _full_simulation(storage_values) -> pd.DataFrame:

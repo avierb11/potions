@@ -548,18 +548,16 @@ class EquilibriumParameters:
 class MineralAuxParams:
     sw_threshold: float
     sw_exp: float
-    n_alpha: float
     q_10: float
-    ssa: float  # Specific surface area in units of g/mol
+    reactivity: float  # Kinetic reactivity prefactor (K * MM * ssa * min_conc)
 
     def to_array(self) -> NDArray:
         return np.array(
             [
                 self.sw_threshold,
                 self.sw_exp,
-                self.n_alpha,
                 self.q_10,
-                self.ssa,
+                self.reactivity,
             ]
         )
 
@@ -568,30 +566,23 @@ class MineralAuxParams:
         return MineralAuxParams(
             sw_threshold=arr[0],
             sw_exp=arr[1],
-            n_alpha=arr[2],
-            q_10=arr[3],
-            ssa=arr[4],
+            q_10=arr[2],
+            reactivity=arr[3],
         )
 
 
 @dataclass(frozen=True)
 class ZoneDimensions:
-    porosity: float
-    depth: float
+    max_water: float
     passive_water_storage: float
 
     def to_array(self) -> NDArray:
-        return np.array([self.porosity, self.depth, self.passive_water_storage])
+        return np.array([self.max_water, self.passive_water_storage])
 
     @staticmethod
     def from_array(arr: NDArray) -> ZoneDimensions:
         """Conver this object from an array into a ZoneDimensions object"""
-        return ZoneDimensions(arr[0], arr[1], arr[2])
-
-    @property
-    def max_water_volume(self) -> float:
-        """The maximum water storage that can exist in this zone"""
-        return self.porosity * self.depth - self.passive_water_storage
+        return ZoneDimensions(arr[0], arr[1])
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ZoneDimensions):
@@ -606,66 +597,64 @@ class ZoneDimensions:
 class MineralParameters:
     sw_threshold: NDArray  # The soil water threshold
     sw_exp: NDArray  # The soil water exponent
-    n_alpha: NDArray  # The water table depth factor
     q_10: NDArray  # The temperature factor range
-    ssa: NDArray  # The specific surface area in units of g/mol
+    reactivity: NDArray  # Kinetic reactivity prefactor (K * MM * ssa * min_conc)
 
     sw_threshold_cy: np.ndarray
     sw_exp_cy: np.ndarray
-    n_alpha_cy: np.ndarray
     q_10_cy: np.ndarray
-    ssa_cy: np.ndarray
+    reactivity_cy: np.ndarray
 
     def __init__(
         self,
         sw_threshold: np.ndarray,
         sw_exp: np.ndarray,
-        n_alpha: np.ndarray,
         q_10: np.ndarray,
-        ssa: np.ndarray,
+        reactivity: np.ndarray,
     ):
         self.sw_threshold = sw_threshold
         self.sw_exp = sw_exp
-        self.n_alpha = n_alpha
         self.q_10 = q_10
-        self.ssa = ssa
+        self.reactivity = reactivity
 
-        # Cython types
         self.sw_threshold_cy = sw_threshold  # type: ignore
         self.sw_exp_cy = sw_exp  # type: ignore
-        self.n_alpha_cy = n_alpha  # type: ignore
         self.q_10_cy = q_10  # type: ignore
-        self.ssa_cy = ssa  # type: ignore
+        self.reactivity_cy = reactivity  # type: ignore
 
     def to_array(self) -> NDArray:
         combined_arr = np.vstack(
             [
                 self.sw_threshold,
                 self.sw_exp,
-                self.n_alpha,
                 self.q_10,
-                self.ssa,
+                self.reactivity,
             ]
         )
 
         return combined_arr.T.flatten()
 
     @staticmethod
-    def from_array(arr: NDArray) -> MineralParameters:
+    def from_array(
+        arr: NDArray, natural_scales: bool = True
+    ) -> MineralParameters:
         if arr.size % PARAMETERS_PER_MINERAL != 0:
             raise ValueError(
-                f"Array passed to `MineralParameters.from_array` must have size that is as multiple of 6, not {arr.size}"
+                f"Array passed to `MineralParameters.from_array` must have size that is a multiple of {PARAMETERS_PER_MINERAL}, not {arr.size}"
             )
         num_minerals = arr.size // PARAMETERS_PER_MINERAL
 
         param_arr = arr.reshape((num_minerals, PARAMETERS_PER_MINERAL)).T
 
+        reactivity = (
+            np.power(10.0, param_arr[3]) if natural_scales else param_arr[3]
+        )
+
         return MineralParameters(
             sw_threshold=param_arr[0],
             sw_exp=param_arr[1],
-            n_alpha=param_arr[2],
-            q_10=param_arr[3],
-            ssa=param_arr[4],
+            q_10=param_arr[2],
+            reactivity=reactivity,
         )
 
     def soil_water_factor(self, forc: RtForcing) -> np.ndarray:
@@ -702,42 +691,17 @@ class MineralParameters:
             arr_mv[i] = pow(self.q_10_cy[i], (forc.hydro_forc.temp - 20.0) / 10.0)  # type: ignore
         return arr_out
 
-    def water_table_factor(self, forc: RtForcing) -> np.ndarray:
-        """
-        Calculate the dependence on the water table
-        """
-        n_minerals: int = self.n_alpha_cy.shape[0]  # type: ignore
-        arr_out: np.ndarray = np.ones(n_minerals, dtype=np.float64)  # type: ignore
-        arr_mv: np.ndarray = arr_out  # type: ignore
-        i: int
-        n_alpha_i: float
-
-        # This loop is the C-optimized version of your original loop
-        for i in range(n_minerals):
-            n_alpha_i = self.n_alpha_cy[i]  # type: ignore
-            if n_alpha_i != 0.0:
-                arr_mv[i] = np.exp(  # type: ignore
-                    -abs(n_alpha_i) * pow(forc.z_w, (n_alpha_i / abs(n_alpha_i)))  # type: ignore
-                )
-        return arr_out
-
     def factor(self, forc: RtForcing) -> np.ndarray:
         """
-        Calculate the auxiliary factor for each function.
-
-        This optimized version combines the logic from soil_water_factor,
-        temperature_factor, and water_table_factor into a single loop
-        to avoid creating intermediate arrays.
+        Calculate the auxiliary factor (soil-water * temperature) for each mineral.
         """
-        n_minerals: int = self.ssa_cy.shape[0]  # type: ignore
+        n_minerals: int = self.sw_threshold_cy.shape[0]  # type: ignore
         factor_out: np.ndarray = np.empty(n_minerals, dtype=np.float64)
         factor_mv: np.ndarray = factor_out  # type: ignore
 
         i: int
         sw_factor: float
         temp_factor: float
-        wt_factor: float
-        n_alpha_i: float
 
         for i in range(n_minerals):
             # --- 1. soil_water_factor logic ---
@@ -756,17 +720,7 @@ class MineralParameters:
                 self.q_10_cy[i], (forc.hydro_forc.temp - 20.0) / 10.0  # type: ignore
             )
 
-            # --- 3. water_table_factor logic ---
-            n_alpha_i = self.n_alpha_cy[i]  # type: ignore
-            if n_alpha_i == 0.0:
-                wt_factor = 1.0
-            else:
-                wt_factor = np.exp(
-                    -abs(n_alpha_i) * pow(forc.z_w, n_alpha_i / abs(n_alpha_i))
-                )
-
-            # --- 4. Combine all factors ---
-            factor_mv[i] = sw_factor * temp_factor * wt_factor  # type: ignore
+            factor_mv[i] = sw_factor * temp_factor  # type: ignore
 
         return factor_out
 
@@ -777,22 +731,19 @@ class MineralParameters:
         """Take a list of mineral parameters and convert them into an aggregation"""
         sw_thrs: list[float] = []
         sw_exps: list[float] = []
-        n_alphas: list[float] = []
         q_10s: list[float] = []
-        ssas: list[float] = []
+        reactivities: list[float] = []
 
         for m in minerals:
             sw_thrs.append(m.sw_threshold)
             sw_exps.append(m.sw_exp)
-            n_alphas.append(m.n_alpha)
             q_10s.append(m.q_10)
-            ssas.append(m.ssa)
+            reactivities.append(m.reactivity)
         return MineralParameters(
             sw_threshold=np.array(sw_thrs, dtype=np.float64),
             sw_exp=np.array(sw_exps, dtype=np.float64),
-            n_alpha=np.array(n_alphas, dtype=np.float64),
             q_10=np.array(q_10s, dtype=np.float64),
-            ssa=np.array(ssas, dtype=np.float64),
+            reactivity=np.array(reactivities, dtype=np.float64),
         )
 
     def __eq__(self, other: object) -> bool:
@@ -802,9 +753,8 @@ class MineralParameters:
             vals = [
                 np.allclose(self.sw_threshold, other.sw_threshold),
                 np.allclose(self.sw_exp, other.sw_exp),
-                np.allclose(self.n_alpha, other.n_alpha),
                 np.allclose(self.q_10, other.q_10),
-                np.allclose(self.ssa, other.ssa),
+                np.allclose(self.reactivity, other.reactivity),
             ]
             return all(vals)
 
@@ -830,7 +780,7 @@ class RtParameters:
         """Convert this object from a numpy array into a set of parameters"""
         size_params: NDArray
         mineral_params: NDArray
-        size_params, mineral_params = arr[0:3], arr[3:]
+        size_params, mineral_params = arr[0:2], arr[2:]
 
         return RtParameters(
             dimensions=ZoneDimensions.from_array(size_params),

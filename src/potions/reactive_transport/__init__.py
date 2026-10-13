@@ -11,7 +11,6 @@ __all__ = [
     "ReactionNetwork",
     # Reactive transport
     "calculate_moisture_fraction",
-    "calculate_water_table_depth",
     "get_hydro_steps",
     "MiscData",
     "RtStep",
@@ -43,7 +42,6 @@ from .kinetic_structures import (
 from .reaction_network import ReactionNetwork
 from .rt_zone import (
     calculate_moisture_fraction,
-    calculate_water_table_depth,
     get_hydro_steps,
     MiscData,
     RtStep,

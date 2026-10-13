@@ -563,19 +563,19 @@ pub struct MineralAuxParams {
     #[pyo3(get)]
     q_10: f64,
     #[pyo3(get)]
-    ssa: f64,
+    reactivity: f64,
 }
 
 #[pymethods]
 impl MineralAuxParams {
     #[new]
-    pub fn new(sw_threshold: f64, sw_exp: f64, q_10: f64, ssa: f64) -> Self {
+    pub fn new(sw_threshold: f64, sw_exp: f64, q_10: f64, reactivity: f64) -> Self {
         Self {
             sw_threshold,
             sw_exp,
             // n_alpha,
             q_10,
-            ssa,
+            reactivity,
         }
     }
 
@@ -585,7 +585,7 @@ impl MineralAuxParams {
             self.sw_exp,
             // self.n_alpha,
             self.q_10,
-            self.ssa,
+            self.reactivity,
         ];
         Array1::from_vec(param_vec).to_pyarray(py)
     }
@@ -605,7 +605,7 @@ impl MineralAuxParams {
                 sw_exp: nd_arr[1],
                 // n_alpha: nd_arr[2],
                 q_10: nd_arr[2],
-                ssa: nd_arr[3],
+                reactivity: nd_arr[3],
             })
         }
     }
@@ -615,9 +615,7 @@ impl MineralAuxParams {
 #[derive(Clone, Debug)]
 pub struct ZoneDimensions {
     #[pyo3(get)]
-    pub porosity: f64,
-    #[pyo3(get)]
-    pub depth: f64,
+    pub max_water: f64,
     #[pyo3(get)]
     pub passive_water_storage: f64,
 }
@@ -625,19 +623,15 @@ pub struct ZoneDimensions {
 #[pymethods]
 impl ZoneDimensions {
     #[new]
-    pub fn new(porosity: f64, depth: f64, passive_water_storage: f64) -> Self {
+    pub fn new(max_water: f64, passive_water_storage: f64) -> Self {
         Self {
-            porosity,
-            depth,
+            max_water,
             passive_water_storage,
         }
     }
 
     pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_array(
-            py,
-            &array![self.porosity, self.depth, self.passive_water_storage],
-        )
+        PyArray1::from_array(py, &array![self.max_water, self.passive_water_storage])
     }
 
     #[staticmethod]
@@ -645,10 +639,9 @@ impl ZoneDimensions {
         let x: Array1<f64> = arr.to_owned_array();
 
         match x.len() {
-            3 => Ok(ZoneDimensions {
-                porosity: x[0],
-                depth: x[1],
-                passive_water_storage: x[2],
+            2 => Ok(ZoneDimensions {
+                max_water: x[0],
+                passive_water_storage: x[1],
             }),
             _ => Err(PyValueError::new_err(
                 "Incorrect number of arguments passed to `ZoneDimensions::from_array`",
@@ -656,15 +649,10 @@ impl ZoneDimensions {
         }
     }
 
-    #[getter]
-    pub fn max_water_volume(&self) -> f64 {
-        self.porosity * self.depth - self.passive_water_storage
-    }
-
     pub fn __repr__(&self) -> String {
         format!(
-            "ZoneDimensions(porosity={},depth={},passive_water_storage={})",
-            self.porosity, self.depth, self.passive_water_storage
+            "ZoneDimensions(max_water={},passive_water_storage={})",
+            self.max_water, self.passive_water_storage
         )
     }
 
@@ -680,7 +668,7 @@ pub struct MineralParameters {
     pub sw_exp: Array1<f64>,
     // pub n_alpha: Array1<f64>,
     pub q_10: Array1<f64>,
-    pub ssa: Array1<f64>,
+    pub reactivity: Array1<f64>,
 }
 
 impl MineralParameters {
@@ -742,14 +730,14 @@ impl MineralParameters {
         sw_exp: PyReadonlyArray1<f64>,
         // n_alpha: PyReadonlyArray1<f64>,
         q_10: PyReadonlyArray1<f64>,
-        ssa: PyReadonlyArray1<f64>,
+        reactivity: PyReadonlyArray1<f64>,
     ) -> Self {
         Self {
             sw_threshold: sw_threshold.to_owned_array(),
             sw_exp: sw_exp.to_owned_array(),
             // n_alpha: n_alpha.to_owned_array(),
             q_10: q_10.to_owned_array(),
-            ssa: ssa.to_owned_array(),
+            reactivity: reactivity.to_owned_array(),
         }
     }
 
@@ -762,7 +750,7 @@ impl MineralParameters {
             arr[i * ppm + 1] = self.sw_exp[i];
             // arr[i * ppm + 2] = self.n_alpha[i];
             arr[i * ppm + 2] = self.q_10[i];
-            arr[i * ppm + 3] = self.ssa[i];
+            arr[i * ppm + 3] = self.reactivity[i];
         }
 
         arr.to_pyarray(py)
@@ -783,14 +771,14 @@ impl MineralParameters {
         let mut sw_exp: Array1<f64> = Array1::zeros(num_minerals);
         // let mut n_alpha: Array1<f64> = Array1::zeros(num_minerals);
         let mut q_10: Array1<f64> = Array1::zeros(num_minerals);
-        let mut ssa: Array1<f64> = Array1::zeros(num_minerals);
+        let mut reactivity: Array1<f64> = Array1::zeros(num_minerals);
 
         for i in 0..num_minerals {
             sw_threshold[i] = x[i * PARAMETERS_PER_MINERAL + 0];
             sw_exp[i] = x[i * PARAMETERS_PER_MINERAL + 1];
             // n_alpha[i] = x[i * PARAMETERS_PER_MINERAL + 2];
             q_10[i] = x[i * PARAMETERS_PER_MINERAL + 2];
-            ssa[i] = if natural_scales {
+            reactivity[i] = if natural_scales {
                 (10_f64).powf(x[i * PARAMETERS_PER_MINERAL + 3])
             } else {
                 x[i * PARAMETERS_PER_MINERAL + 3]
@@ -802,7 +790,7 @@ impl MineralParameters {
             sw_exp,
             // n_alpha,
             q_10,
-            ssa,
+            reactivity,
         })
     }
 
@@ -840,14 +828,14 @@ impl MineralParameters {
         let mut sw_exps: Vec<f64> = Vec::new();
         // let mut n_alphas: Vec<f64> = Vec::new();
         let mut q_10s: Vec<f64> = Vec::new();
-        let mut ssas: Vec<f64> = Vec::new();
+        let mut reactivitys: Vec<f64> = Vec::new();
 
         for m in minerals {
             sw_thrs.push(m.sw_threshold);
             sw_exps.push(m.sw_exp);
             // n_alphas.push(m.n_alpha);
             q_10s.push(m.q_10);
-            ssas.push(m.ssa);
+            reactivitys.push(m.reactivity);
         }
 
         Ok(Self {
@@ -855,12 +843,12 @@ impl MineralParameters {
             sw_exp: Array1::from_vec(sw_exps),
             // n_alpha: Array1::from_vec(n_alphas),
             q_10: Array1::from_vec(q_10s),
-            ssa: Array1::from_vec(ssas),
+            reactivity: Array1::from_vec(reactivitys),
         })
     }
 
-    pub fn get_ssa<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        return self.ssa.to_pyarray(py);
+    pub fn get_reactivity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.reactivity.to_pyarray(py);
     }
 
     pub fn get_sw_threshold<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
@@ -923,14 +911,14 @@ impl RtParameters {
         natural_scales: bool,
     ) -> PyResult<Self> {
         let x: Array1<f64> = arr.to_owned_array();
-        let size_params: Array1<f64> = x.slice(s![0..3]).to_owned();
+        let size_params: Array1<f64> = x.slice(s![0..2]).to_owned();
         let size_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &size_params);
         let dimensions = match ZoneDimensions::from_array(size_params_py.readonly()) {
             Ok(v) => v,
             Err(_) => return Err(PyValueError::new_err("Failed to construct soil parameters")),
         };
 
-        if x.len() == 3 {
+        if x.len() == 2 {
             // There are no reactions in this zone
             return Ok(Self {
                 dimensions,
@@ -938,7 +926,7 @@ impl RtParameters {
             });
         }
 
-        let min_params: Array1<f64> = x.slice(s![3..]).to_owned();
+        let min_params: Array1<f64> = x.slice(s![2..]).to_owned();
 
         let min_params_py: Bound<'_, PyArray1<f64>> = PyArray1::from_array(py, &min_params);
         let mineral_params =

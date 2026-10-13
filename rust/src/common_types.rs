@@ -272,8 +272,6 @@ pub struct RtForcing {
     pub hydro_forc: HydroForcing,
     #[pyo3(get, set)]
     pub s_w: f64,
-    #[pyo3(get, set)]
-    pub z_w: f64,
 }
 
 #[pymethods]
@@ -284,7 +282,6 @@ impl RtForcing {
         hydro_step: HydroStep,
         hydro_forc: HydroForcing,
         s_w: f64,
-        z_w: f64,
     ) -> PyResult<Self> {
         let conc_arr: Array1<f64> = conc_in.to_owned_array();
         Ok(Self {
@@ -292,45 +289,38 @@ impl RtForcing {
             hydro_step,
             hydro_forc,
             s_w,
-            z_w,
         })
     }
 
     pub fn __getstate__<'py>(
         &self,
         py: Python<'py>,
-    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64, f64) {
+    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64) {
         (
             self._conc_in.to_pyarray(py),
             self.hydro_step.clone(),
             self.hydro_forc.clone(),
             self.s_w,
-            self.z_w,
         )
     }
 
-    pub fn __setstate__(
-        &mut self,
-        state: (PyReadonlyArray1<f64>, HydroStep, HydroForcing, f64, f64),
-    ) {
-        let (conc_in, hydro_step, hydro_forc, s_w, z_w) = state;
+    pub fn __setstate__(&mut self, state: (PyReadonlyArray1<f64>, HydroStep, HydroForcing, f64)) {
+        let (conc_in, hydro_step, hydro_forc, s_w) = state;
         self._conc_in = conc_in.to_owned_array();
         self.hydro_step = hydro_step;
         self.hydro_forc = hydro_forc;
         self.s_w = s_w;
-        self.z_w = z_w;
     }
 
     pub fn __getnewargs__<'py>(
         &self,
         py: Python<'py>,
-    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64, f64) {
+    ) -> (Bound<'py, PyArray1<f64>>, HydroStep, HydroForcing, f64) {
         (
             self._conc_in.to_pyarray(py),
             self.hydro_step.clone(),
             self.hydro_forc.clone(),
             self.s_w,
-            self.z_w,
         )
     }
 
@@ -356,12 +346,11 @@ impl RtForcing {
 
     fn __repr__(&self) -> String {
         format!(
-            "RtForcing(\n\tconc_in=array({}),\nhydro_step={},\nhydro_forc={},\ns_w={:.2},\nz_w={}\n)",
+            "RtForcing(\n\tconc_in=array({}),\nhydro_step={},\nhydro_forc={},\ns_w={:.2}\n)",
             self._conc_in.to_string(),
             self.hydro_step.to_string(),
             self.hydro_forc.to_string(),
-            self.s_w,
-            self.z_w
+            self.s_w
         )
     }
 
@@ -376,7 +365,6 @@ impl RtForcing {
             self.hydro_step.__eq__(other.hydro_step.clone()),
             self.hydro_forc.__eq__(other.hydro_forc.clone()),
             (self.s_w - other.s_w).abs() < 1e-12,
-            (self.z_w - other.z_w).abs() < 1e-12,
         ];
 
         comps.iter().all(|x| *x)
