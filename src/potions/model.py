@@ -1,5 +1,4 @@
 from __future__ import annotations
-import datetime
 import os
 import warnings
 from multiprocessing import Pool
@@ -45,6 +44,13 @@ from .utils import (
     PotionsError,
 )
 from .utils import setup_logging
+from .result_saving import (
+    DEFAULT_RESULTS_DIR,
+    is_save_enabled,
+    make_run_dir,
+    save_model_run,
+    write_batch_info,
+)
 
 setup_logging(__file__)
 
@@ -95,6 +101,7 @@ def _run_model(
             init_state=init_state,
             meas_streamflow=meas_streamflow,
             verbose=False,
+            save_results=False,  # saving is controlled at the batch level
         )
 
         if batch_params["save_results"]:
@@ -106,8 +113,12 @@ def _run_model(
                 raise ValueError("Output directory must be specified")
 
             if save_model:
-                run_res["simulation"].to_csv(  # type: ignore
-                    os.path.join(batch_params["output_dir"], f"{i}.csv")
+                run_res.simulation.to_csv(
+                    os.path.join(batch_params["output_dir"], f"run_{i}.csv")
+                )
+                model.describe_parameters().to_csv(
+                    os.path.join(batch_params["output_dir"], f"run_{i}_parameters.csv"),
+                    index=False,
                 )
 
         return i, run_res
@@ -177,9 +188,9 @@ class Model(ReactiveTransportModel):
         init_state: Optional[NDArray[f64]] = None,
         meas_streamflow: Optional[Series] = None,
         num_threads: int = -1,
-        write_time_series_results: bool = False,
+        write_time_series_results: Optional[bool] = None,
         threshold_function: Optional[Callable[[HydroModelResults], bool]] = None,
-        output_dir: str = "batch_results",
+        output_dir: str = DEFAULT_RESULTS_DIR,
     ) -> BatchResults:
         """Runs a batch of model simulations in parallel.
 
@@ -193,39 +204,32 @@ class Model(ReactiveTransportModel):
                 Defaults to None.
             num_threads (int): The number of parallel processes to use. If -1,
                 uses all available CPU cores. Defaults to -1.
-            write_time_series_results (bool): If True, saves the full time
-                series output of selected runs to CSV files. Defaults to False.
+            write_time_series_results (Optional[bool]): If True, saves the full
+                time series output of selected runs to CSV files (under
+                ``<output_dir>/run_<timestamp>/``). If None, falls back to the
+                `POTIONS_SAVE_RESULTS` environment variable, and if that is
+                unset, saving is on by default. Defaults to None.
             threshold_function (Optional[Callable]): A function that returns True
                 if a run's results should be saved. Defaults to None (save all).
-            output_dir (str): Directory to save results. Defaults to "batch_results".
-            return_results (bool): If True, returns the full results objects.
-                Defaults to True.
-
+            output_dir (str): Base directory under which the `run_<timestamp>`
+                batch folder is created. Defaults to `"results"`.
         Returns:
-            tuple[DataFrame, list[tuple[Model, HydroModelResults]]]: A tuple containing:
-                - A DataFrame of scalar metrics for all runs.
-                - A list of tuples, each with a `Model` instance and its results.
+            BatchResults: A dictionary containing:
+                - `objective_functions`: A DataFrame of scalar metrics for all runs.
+                - `simulations`: A dictionary mapping run index to the simulation DataFrame.
         """
-        results: list[tuple[int, HydroModelResults]] = []
-        batch_params: Optional[BatchParams] = None
+        do_save: bool = is_save_enabled(write_time_series_results)
+        batch_out_dir: str = str(output_dir)
 
-        if write_time_series_results:
-            if os.path.exists(output_dir):
-                cur_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                new_output_dir: str = f"{output_dir}.{cur_time}"
-                print(
-                    f"Specified directory at {output_dir} exists, saving to {new_output_dir}"
-                )
-                output_dir = new_output_dir
-
-            if threshold_function is None and write_time_series_results:
+        if do_save:
+            batch_out_dir = str(make_run_dir(output_dir))
+            if threshold_function is None:
                 print("No threshold function specified, saving all model results")
-            os.makedirs(output_dir, exist_ok=True)
 
         bps: BatchParams = {
-            "output_dir": output_dir,
+            "output_dir": batch_out_dir if do_save else None,
             "threshold_function": threshold_function,
-            "save_results": write_time_series_results,
+            "save_results": do_save,
         }
 
         batch_params = bps
@@ -264,16 +268,26 @@ class Model(ReactiveTransportModel):
         with Pool(num_threads) as pool:
             results = pool.starmap(_run_model, args)  # type: ignore
 
-        indices = [x[0] for x in results]
-        obj_series: list[Series] = [
-            x[1]["objective_functions"].to_dict() for x in results  # type: ignore
+        ok_runs: list[tuple[int, HydroModelResults]] = [
+            (idx, res) for idx, res in results if res is not None
         ]
-        sim_results: dict[int, DataFrame] = {x[0]: x[1].simulation for x in results}
+        indices = [x[0] for x in ok_runs]
+        obj_dict_list: list[dict[str, float]] = [
+            x[1].objective_functions.to_dict() for x in ok_runs
+        ]
+        sim_results: dict[int, DataFrame] = {x[0]: x[1].simulation for x in ok_runs}
 
         # Now construct the dataframe of the resulting values
-        res_df: DataFrame = DataFrame(obj_series, index=indices).sort_index()
+        res_df: DataFrame = DataFrame(obj_dict_list, index=indices).sort_index()
 
-        results.sort(key=lambda x: x[0])
+        if do_save:
+            write_batch_info(
+                batch_out_dir,
+                num_runs=len(indices),
+                num_threads=num_threads,
+                has_threshold=threshold_function is not None,
+            )
+            print(f"Saving batch results to {batch_out_dir}")
 
         return {"objective_functions": res_df, "simulations": sim_results}
 
@@ -292,7 +306,39 @@ class Model(ReactiveTransportModel):
             list[tuple[str, Callable[[Series, Series], float]]]
         ] = None,
         verbose: bool = False,
+        save_results: Optional[bool] = None,
+        results_dir: Optional[str] = None,
     ) -> ModelResults:
+        """Runs the hydrologic and reactive transport models in sequence.
+
+        By default, once both models have run, the combined results and the
+        model parameters are saved to a fresh ``results/run_<timestamp>``
+        directory (see ``potions.result_saving`` for details on how to
+        disable or redirect saving).
+
+        Args:
+            forc (ForcingData | list[ForcingData]): The forcing data.
+            precip_conc (NDArray): Precipitation concentrations for the RT model.
+            init_conc (dict[str, ChemicalState]): Initial chemical state for the
+                RT model.
+            init_hydro_state (Optional[NDArray[f64]]): Initial state of the
+                hydrologic model. Defaults to None.
+            meas_streamflow (Optional[Series]): Observed streamflow, used to
+                calculate objective functions. Defaults to None.
+            meas_river_conc (Optional[DataFrame]): Observed river concentrations,
+                used to calculate RT objective functions. Defaults to None.
+            objective_functions (Optional[list[tuple[str, ...]]]): Custom objective
+                functions. Defaults to None (use the defaults).
+            verbose (bool): Whether to print progress messages. Defaults to False.
+            save_results (Optional[bool]): Whether to save the run's results and
+                parameters to disk. If None, falls back to the
+                ``POTIONS_SAVE_RESULTS`` environment variable, and if that is
+                unset, saving is on by default. Defaults to None.
+            results_dir (Optional[str]): Base directory under which the
+                ``run_<timestamp>`` folder is created. If None, falls back to the
+                ``POTIONS_RESULTS_DIR`` environment variable, then to ``"results"``.
+                Defaults to None.
+        """
         if verbose:
             print("Starting hydrologic simulation")
 
@@ -301,6 +347,8 @@ class Model(ReactiveTransportModel):
             init_state=init_hydro_state,
             meas_streamflow=meas_streamflow,
             objective_functions=objective_functions,
+            # Saving happens once, for both models, at the end of this method.
+            save_results=False,
         )
 
         if verbose:
@@ -315,9 +363,22 @@ class Model(ReactiveTransportModel):
             verbose=verbose,
             return_partial=False,
             failed_dir=None,
+            # Saving happens once, for both models, at the end of this method.
+            save_results=False,
         )
 
-        return ModelResults(hydro=hydro_res, reactive_transport=rt_res)
+        if verbose:
+            print("Finished reactive transport simulation")
+
+        res = ModelResults(hydro=hydro_res, reactive_transport=rt_res)
+
+        if is_save_enabled(save_results):
+            saved_to = save_model_run(self, hydro_res, rt_res, results_dir)
+            res.hydro.saved_dir = str(saved_to)
+            res.reactive_transport.saved_dir = str(saved_to)
+            print(f"Saving run results to {saved_to}")
+
+        return res
 
     @classmethod
     def from_array(

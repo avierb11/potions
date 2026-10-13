@@ -39,6 +39,7 @@ from .core import (
     run_zone_steps,
 )
 from .hydro_model import SIM_Q_NAME, HydrologicalModel
+from .result_saving import is_save_enabled, save_rt_run
 
 
 class ReactiveTransportModel(HydrologicalModel):
@@ -537,10 +538,20 @@ class ReactiveTransportModel(HydrologicalModel):
         verbose: bool = False,
         return_partial: bool = False,
         failed_dir: str | None = None,
+        save_results: bool | None = None,
+        results_dir: str | None = None,
     ) -> RtModelResults:
         """Run the reactive transport simulation forwards
         `mineral_conc` is a dictionary containing the mineral volume fractions (0,porosity) of the minerals
         of each of the zones
+
+        Saving:
+        Like `run_hydro_model`, the run's results and the model's parameters are
+        saved to disk by default. Pass `save_results=False` to disable, or set
+        `results_dir` (or the `POTIONS_SAVE_RESULTS` / `POTIONS_RESULTS_DIR`
+        environment variables) to control the behavior. The returned
+        `RtModelResults.saved_dir` holds the written folder, or None if saving
+        was disabled.
         """
         # ==== Set up the forcing ==== #
         zones_list: list[RtZone] = list(self.rt_zones.values())
@@ -811,6 +822,13 @@ class ReactiveTransportModel(HydrologicalModel):
             steps=steps,
             other={"old_states": old_states, "new_states": new_states},
         )
+
+        # Save the run's results and parameters (on by default; see result_saving).
+        if is_save_enabled(save_results):
+            saved_to = save_rt_run(self, rt_sim_res, results_dir)
+            rt_sim_res.saved_dir = str(saved_to)
+            print(f"Saving run results to {saved_to}")
+
         # =========================== #
 
         return rt_sim_res  # type: ignore

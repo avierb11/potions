@@ -184,6 +184,8 @@ def arr_to_results(arr: NDArray, data: RtCalibrationData) -> ModelResults:
         init_conc=init_states,
         meas_streamflow=data.q_meas,
         meas_river_conc=data.conc_df,
+        # Don't persist individual calibration evaluations.
+        save_results=False,
     )
 
 

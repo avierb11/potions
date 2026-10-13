@@ -170,6 +170,8 @@ def objective_function(
             forc=forc,
             meas_streamflow=meas_streamflow,
             verbose=False,
+            # Don't persist individual optimization evaluations.
+            save_results=False,
         )
 
         obj_val: float

@@ -58,11 +58,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Tests**: `tests/test_validation.py` (31), `tests/test_rt_calibration.py`
   (17), `tests/test_parameter_docs.py` (15), plus structure-diagram layout
   tests in `tests/test_hydro_model.py`.
+- **Result saving, on by default**: `run_hydro_model`, `run_rt_model`, and
+  `run_both_models` now save each run's results and model parameters to a
+  fresh `results/run_<timestamp>/` directory (`run_both_models` writes both
+  models into one folder under `hydro/` and `rt/`). Each run folder contains
+  the simulation time series (`simulation.csv`), the full model parameters
+  (`parameters.csv`, from `describe_parameters()`), the evaluated objective
+  functions when measured data was provided (`objective_functions.csv`), and a
+  `run_info.json` with metadata (version, run length, objective values, ...);
+  RT runs additionally store the complete step/state objects in
+  `results.pkl` (with a text note if the state cannot be pickled).
+  `run_batch` writes each member's time series and parameters into a
+  timestamped batch folder, plus a batch-level `run_info.json`.
+  - Saving is configurable: pass `save_results=False` (or keep
+    `write_time_series_results=False` for batches) to disable, and
+    `results_dir=` / `output_dir=` to redirect. Environment variables
+    `POTIONS_SAVE_RESULTS` and `POTIONS_RESULTS_DIR` provide the same control
+    without code changes.
+  - Results objects (`HydroModelResults`, `RtModelResults`) gain a
+    `saved_dir: Optional[str]` field pointing at the written folder.
+  - New `potions.result_saving` module with the building blocks
+    (`is_save_enabled`, `resolve_results_dir`, `make_run_dir`,
+    `save_hydro_run`, `save_rt_run`, `save_model_run`, `write_batch_info`)
+    for saving results from custom entry points.
 
 ### Changed
 
 > **Breaking changes** — the following alter public behavior or APIs.
 
+- Model runs **write to disk by default** (see *Added*). Opt out per call with
+  `save_results=False` / `write_time_series_results=False`, or globally with
+  `POTIONS_SAVE_RESULTS=0`.
+- `run_batch`'s `write_time_series_results` was `bool = False` (off) and is
+  now `Optional[bool] = None`, meaning "fall back to
+  `POTIONS_SAVE_RESULTS` (saving on by default)". Passing `True`/`False`
+  explicitly behaves as before.
+- `run_batch`'s `output_dir` default changed from `"batch_results"` to
+  `"results"`, and saved output now lands in a timestamped
+  `<output_dir>/run_<timestamp>/` subfolder (member files are named
+  `run_<i>.csv` / `run_<i>_parameters.csv`).
 - The bottom layer of a model **must** consist of bottom zones (e.g.
   `GroundZoneB`). Models whose bottom is now any other zone type (e.g. a
   plain `GroundZone`) raise `ModelStructureError` at construction.

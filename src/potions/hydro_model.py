@@ -24,6 +24,7 @@ from .reactive_transport.parameter_docs import (
     render_describe,
     zone_parameter_rows,
 )
+from .result_saving import is_save_enabled, save_hydro_run
 from .utils import (
     HydrologyNumericalError,
     ModelInputError,
@@ -1174,6 +1175,8 @@ class HydrologicalModel:
             list[tuple[str, Callable[[Series, Series], float]]]
         ] = None,
         verbose: bool = False,
+        save_results: Optional[bool] = None,
+        results_dir: Optional[str] = None,
     ) -> HydroModelResults:
         """Runs a forward simulation of the hydrologic model.
 
@@ -1189,9 +1192,19 @@ class HydrologicalModel:
             elevations (Optional[list[float]]): A list of mean elevations for
                 each surface zone (required for lapse rates). Defaults to None.
             verbose (bool): Not currently used.
+            save_results (Optional[bool]): Whether to save this run's results
+                (and the model's parameters) to disk. If None, falls back to
+                the `POTIONS_SAVE_RESULTS` environment variable, and if that is
+                unset, saving is on by default. Defaults to None.
+            results_dir (Optional[str]): The base directory under which the
+                `run_<timestamp>` folder is created. If None, falls back to the
+                `POTIONS_RESULTS_DIR` environment variable, then to the default
+                `"results"`. Only used when saving is enabled. Defaults to None.
 
         Returns:
-            HydroModelResults: A `HydroModelResults` dictionary.
+            HydroModelResults: A `HydroModelResults` dictionary. The
+                `saved_dir` attribute of the returned object holds the path
+                the run was saved to (or None if saving was disabled).
         """
         # Check the model structure to make sure that all of the zones are correct
         self._validate_model_structure()
@@ -1347,6 +1360,13 @@ class HydrologicalModel:
         res = HydroModelResults(
             simulation=model_res, objective_functions=obj_val_ser, forcing=forc
         )
+
+        # Save the run's results and parameters (on by default; see result_saving).
+        if is_save_enabled(save_results):
+            saved_to = save_hydro_run(self, res, results_dir)
+            res.saved_dir = str(saved_to)
+            print(f"Saving run results to {saved_to}")
+
         return res
 
     @classmethod
@@ -1642,12 +1662,12 @@ class HydrologicalModel:
         )
 
         # Now, run the model and return the optimum results
-        model = cls.hydro_from_array(opt_res.x)
-        best_results = model.run_hydro_model(
+        best_results = cls.hydro_from_array(opt_res.x).run_hydro_model(
             forc=forc,  # type: ignore
             init_state=cls.default_hydro_init_state(),
             meas_streamflow=meas_streamflow,
             verbose=False,
+            save_results=False,  # don't persist an intermediate optimizer result
         )
 
         opt_params: dict[str, float] = {
@@ -1705,10 +1725,12 @@ class HydrologicalModel:
             right_model = self.hydro_from_array(state_right)
 
             left_res = left_model.run_hydro_model(
-                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow,
+                save_results=False,  # don't persist finite-difference evaluations
             )
             right_res = right_model.run_hydro_model(
-                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow
+                forc=forc, elevations=mean_elev, meas_streamflow=meas_streamflow,
+                save_results=False,
             )
 
             grad_vals.append(

@@ -147,11 +147,14 @@ class HydroModelResults:
         simulation (DataFrame): A DataFrame with time series of states and
             fluxes for all zones, plus simulated and measured streamflow.
         objective_functions (Series): A Series with the values of each of the objective functions as keys
+        saved_dir (Optional[str]): The directory this run was saved to
+            (`"results/run_<timestamp>"` by default); None if saving was disabled.
     """
 
     forcing: ForcingData | list[ForcingData]
     simulation: DataFrame
     objective_functions: Series
+    saved_dir: Optional[str] = None
 
 
 @dataclass
@@ -161,6 +164,7 @@ class RtModelResults:
     rt_forcings: np.ndarray
     steps: list[list[RtStep]]
     other: dict[str, Any]
+    saved_dir: Optional[str] = None
 
 
 @dataclass
