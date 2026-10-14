@@ -12,6 +12,7 @@ use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
     math::find_root_multi_analytic_fused_then_lm,
     molar, molar_per_time, moles, moles_per_time,
+    units::{AmountOfSubstance, MolarConcentration, Volume, liter, mole, mole_per_liter},
     reactive_transport::{
         kinetic_structures::{
             EquilibriumParameters, MineralParameters, MonodParameters, RtParameters, TstParameters,
@@ -146,6 +147,9 @@ impl RtZone {
         let num_spec: usize = chms.len();
         let min_start_ind: usize = num_aq;
 
+        // Mineral reaction rate: the `86400 * reactivity` factor converts the
+        // per-second rate constant to a per-day one (with the dimensionless aux
+        // factor) — a rate-parameter conversion, kept raw f64.
         let mineral_conc_rates: Array1<molar_per_time> =
             86_400.0 * reactivity * aux_rate * (monod_rate + tst_rate);
 
@@ -177,6 +181,9 @@ impl RtZone {
         // let v_t: f64 = v_0 + (q_in - q_out);
         let c_in: &Array1<molar> = &d._conc_in;
 
+        // q_in/v_0 is an exchange rate (L/d ÷ L = 1/d) and this is an array-level
+        // product: uom 0.38 has no volume-flow kind (compounded 1/time), so kept
+        // raw f64. Result: [mol/(L·d)].
         let mut transport_rate: Array1<moles_per_time> = (q_in / v_0) * (c_in - chms);
 
         for i in self.network.num_aqueous_species()..self.network.num_species() {
@@ -192,11 +199,17 @@ impl RtZone {
 
         let max_water = self.dimensions().max_water;
 
+        // mol/L × L → mol: typed as MolarConcentration × Volume →
+        // AmountOfSubstance (M0 spike test 5), extracted in moles; water volumes
+        // are liters per the unit-area convention (1 mm · m² = 1 L).
         for (i, c_i) in chms.iter().enumerate() {
+            let c = MolarConcentration::new::<mole_per_liter>(*c_i);
             if i < num_aqueous {
-                tot_moles[i] = c_i * d.hydro_step.state;
+                let vol = Volume::new::<liter>(d.hydro_step.state);
+                tot_moles[i] = (c * vol).get::<mole>();
             } else {
-                tot_moles[i] = c_i * max_water;
+                let vol = Volume::new::<liter>(max_water);
+                tot_moles[i] = (c * vol).get::<mole>();
             }
         }
 
@@ -210,16 +223,22 @@ impl RtZone {
 
         let max_water = self.dimensions().max_water;
 
+        // mol ÷ L → mol/L: compounded dimension in uom 0.38 (Amount/Volume) —
+        // `.value` is the base-SI value (mol/m³), so ÷1000 → mol/L (M0 spike
+        // kind-mismatch note).
         for (i, m_i) in tot_moles.iter().enumerate() {
+            let n = AmountOfSubstance::new::<mole>(*m_i);
             if i < num_aqueous {
                 if water_volume < 1e-6 {
                     // If there is no water, set concentration to zero
                     moles_arr[i] = ZERO_CONC;
                 } else {
-                    moles_arr[i] = m_i / d.hydro_step.state;
+                    let vol = Volume::new::<liter>(d.hydro_step.state);
+                    moles_arr[i] = (n / vol).value / 1000.0;
                 }
             } else {
-                moles_arr[i] = m_i / max_water;
+                let vol = Volume::new::<liter>(max_water);
+                moles_arr[i] = (n / vol).value / 1000.0;
             }
         }
 
@@ -1043,6 +1062,8 @@ fn assemble_ode_jacobian(
 
     // ---- Transport contribution (diagonal over aqueous species) ----
     if v0_ok {
+        // Exchange rate q_in/v0 (L/d ÷ L = 1/d): compounded dimension in uom 0.38
+        // (no volume-flow kind), kept raw f64.
         let f = q_in / v0;
         for r in 0..num_aq {
             j[(r, r)] = -f;
@@ -1120,6 +1141,8 @@ fn kinetic_ode_from_terms(
 
     // ---- Transport (aqueous species only) ----
     if v0.abs() >= 1e-6 {
+        // Exchange rate q_in/v0 (L/d ÷ L = 1/d): compounded dimension in uom 0.38
+        // (no volume-flow kind), kept raw f64.
         let f = q_in / v0;
         let c_in: &Array1<molar> = &d._conc_in;
         for r in 0..num_aq {
