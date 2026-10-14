@@ -41,6 +41,7 @@ pub mod common_types;
 pub mod hydro;
 pub mod math;
 pub mod reactive_transport;
+pub mod units;
 
 create_exception!(math, ScalarRootFindingError, PyException);
 create_exception!(math, RootFindingError, PyException);
