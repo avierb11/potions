@@ -53,10 +53,9 @@
 //!   combination is a rate parameter, not a physical quantity.
 //! * Absolute °C (Kelvin-only TT; intervals cover deltas).
 
-// The re-exports below are the single import point for the core modules and
-// are consumed as the typing proceeds (hydro.rs, kinetic_structures.rs,
-// rt_zone.rs, river_zone.rs).
-#![allow(unused_imports)]
+// The re-exports below are the single import point for the core modules
+// (hydro.rs, kinetic_structures.rs, rt_zone.rs, river_zone.rs); each is
+// consumed by at least one of them.
 
 // Water flux in millimeters per day (velocity). Defined in this module
 // because `unit!` may only appear once per scope (it also generates private
@@ -70,15 +69,11 @@ uom::unit! {
 
 pub(crate) use uom::si::amount_of_substance::mole;
 pub(crate) use uom::si::f64::{
-    AmountOfSubstance, Length, MolarConcentration, Ratio, TemperatureInterval,
-    ThermodynamicTemperature, Time, Velocity, Volume,
+    AmountOfSubstance, Length, MolarConcentration, TemperatureInterval, Time, Velocity, Volume,
 };
 pub(crate) use uom::si::length::millimeter;
 pub(crate) use uom::si::molar_concentration::mole_per_liter;
-pub(crate) use uom::si::temperature_interval::{
-    degree_celsius, kelvin as kelvin_interval,
-};
-pub(crate) use uom::si::thermodynamic_temperature::kelvin;
+pub(crate) use uom::si::temperature_interval::kelvin as kelvin_interval;
 pub(crate) use uom::si::time::day;
 pub(crate) use uom::si::volume::liter;
 
