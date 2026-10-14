@@ -13,6 +13,7 @@ use crate::{
         approx_fprime, find_root_multi_analytic_then_lm, null_space_scipy, pinv_scipy,
     },
     molar, molar_per_time,
+    units::{MolarConcentration, mole_per_liter},
 };
 const PARAMETERS_PER_MINERAL: usize = 4;
 
@@ -42,12 +43,17 @@ impl MonodParameters {
         let mut monod: Array1<molar_per_time> = Array1::zeros(n_minerals);
         let mut inhib: Array1<molar_per_time> = Array1::zeros(n_minerals);
 
+        // Monod / inhibition terms are same-dimension concentration ratios
+        // (mol/L over mol/L) -> `Ratio`; `.value` is the raw dimensionless
+        // number (M0 spike test 8). Boundary values stay raw f64.
         for i in 0..n_minerals {
             let mut prod = 1.0;
             for j in 0..n_species {
                 let monod_ij = self.monod_np[(i, j)];
                 if monod_ij.is_finite() {
-                    prod *= chms[j] / (monod_ij + chms[j]);
+                    let k = MolarConcentration::new::<mole_per_liter>(monod_ij);
+                    let c = MolarConcentration::new::<mole_per_liter>(chms[j]);
+                    prod *= (c / (k + c)).value;
                 }
             }
             monod[i] = prod;
@@ -58,7 +64,9 @@ impl MonodParameters {
             for j in 0..n_species {
                 let inhib_ij = self.inhib_np[(i, j)];
                 if inhib_ij.is_finite() {
-                    prod *= inhib_ij / (inhib_ij + chms[j]);
+                    let ki = MolarConcentration::new::<mole_per_liter>(inhib_ij);
+                    let c = MolarConcentration::new::<mole_per_liter>(chms[j]);
+                    prod *= (ki / (ki + c)).value;
                 }
             }
             inhib[i] = prod;
@@ -138,6 +146,8 @@ impl TstParameters {
         &self,
         chms: &Array1<molar>,
     ) -> (Array1<molar_per_time>, Array1<f64>) {
+        // log10 / 10^x over the log-linear activity exponents — outside uom's
+        // scope (no log/exp in 0.38), so kept raw f64.
         let log_conc: Array1<f64> = chms.map(|x| x.log10());
         let e: Array1<f64> = Self::matvec(&self.stoich_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
@@ -147,6 +157,8 @@ impl TstParameters {
     // Same as `calculate_solubility_product` but for the "dependence" (forward-rate)
     // term
     pub fn calculate_dependence_term(&self, chms: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
+        // log10 / 10^x over the log-linear activity exponents (forward-rate
+        // dependence) — outside uom's scope (no log/exp), so kept raw f64.
         let log_conc: Array1<f64> = chms.map(|x| x.log10());
         let e: Array1<f64> = Self::matvec(&self.dep_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
@@ -158,6 +170,8 @@ impl TstParameters {
     //     rate_i = 10^(f_i) * (1 - 10^(e_i) / K_i)
     // where K_i is the mineral equilibrium constant.
     pub fn rates_from_exponents(&self, e_dep: &Array1<f64>, e_q: &Array1<f64>) -> Array1<f64> {
+        // TST rate d * (1 - Q/K): log-linear exponents (powf) and the dimensionless
+        // reaction quotient — kept raw f64 (uom has no log/powf).
         let d = e_dep.map(|x| (10_f64).powf(*x));
         let q = e_q.map(|x| (10_f64).powf(*x));
         d * (1.0 - q / &self.min_eq_const_np)
@@ -673,6 +687,8 @@ pub struct MineralParameters {
 
 impl MineralParameters {
     pub fn soil_water_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
+        // Soil-water activity factor: dimensionless s_w ratios with a runtime
+        // exponent (powf, sw_exp) — a rate parameter, kept raw f64.
         let num_minerals = self.sw_threshold.shape()[0];
         let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
@@ -687,6 +703,9 @@ impl MineralParameters {
     }
 
     pub fn temperature_factor_rust(&self, forc: &RtForcing) -> Array1<f64> {
+        // Q10 temperature factor q10^((T - 20)/10): absolute °C base and a
+        // runtime exponent (powf) — kept raw f64 (uom 0.38: kelvin-only TT,
+        // integer-only powers).
         let num_minerals = self.sw_threshold.shape()[0];
         let mut arr: Array1<f64> = Array1::zeros(num_minerals);
 
