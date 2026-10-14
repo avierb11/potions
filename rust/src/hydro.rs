@@ -6,6 +6,10 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use crate::{
     common_types::{HydroForcing, HydroStep},
     math::{bisect_rust, find_root_rust, ScalarRootFindingError},
+    units::{
+        day, kelvin_interval, millimeter, millimeter_per_day, Length, TemperatureInterval, Time,
+        Velocity,
+    },
 };
 
 #[pyclass(subclass)]
@@ -27,7 +31,13 @@ impl HydrologicZone {
     }
 
     pub fn __implicit_eulers_func(&self, s: f64, s_0: f64, d: &HydroForcing, dt: f64) -> f64 {
-        (s_0 - s) + dt * self.mass_balance(s, d)
+        // Implicit-Euler residual: (s0 - s) [mm] + dt [days] * mass_balance [mm/d].
+        // Typed per M0 spike test 5 (Length + Time * Velocity).
+        let s0 = Length::new::<millimeter>(s_0);
+        let sn = Length::new::<millimeter>(s);
+        let tdt = Time::new::<day>(dt);
+        let mb = Velocity::new::<millimeter_per_day>(self.mass_balance(s, d));
+        (s0 - sn + tdt * mb).get::<millimeter>()
     }
 
     pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
@@ -60,10 +70,13 @@ impl HydrologicZone {
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in + self.forc_flux(s, d)
-            - self.vap_flux(s, d)
-            - self.lat_flux(s, d)
-            - self.vert_flux(s, d)
+        // Net water flux [mm/d] = q_in + forced - vapour - lateral - vertical.
+        let q_in = Velocity::new::<millimeter_per_day>(d.q_in);
+        let q_forc = Velocity::new::<millimeter_per_day>(self.forc_flux(s, d));
+        let q_vap = Velocity::new::<millimeter_per_day>(self.vap_flux(s, d));
+        let q_lat = Velocity::new::<millimeter_per_day>(self.lat_flux(s, d));
+        let q_vert = Velocity::new::<millimeter_per_day>(self.vert_flux(s, d));
+        (q_in + q_forc - q_vap - q_lat - q_vert).get::<millimeter_per_day>()
     }
 
     pub fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
@@ -189,11 +202,21 @@ impl SnowZone {
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in + self.forc_flux(s, d) - self.vert_flux(s, d)
+        // Net water flux [mm/d] = q_in + accumulation (forc) - melt out (vert).
+        let q_in = Velocity::new::<millimeter_per_day>(d.q_in);
+        let q_forc = Velocity::new::<millimeter_per_day>(self.forc_flux(s, d));
+        let q_vert = Velocity::new::<millimeter_per_day>(self.vert_flux(s, d));
+        (q_in + q_forc - q_vert).get::<millimeter_per_day>()
     }
 
     pub fn __implicit_eulers_func(&self, s: f64, s_0: f64, d: &HydroForcing, dt: f64) -> f64 {
-        (s_0 - s) + dt * self.mass_balance(s, d)
+        // Implicit-Euler residual: (s0 - s) [mm] + dt [days] * mass_balance [mm/d]
+        // (M0 spike: Length - Length + Time * Velocity).
+        let s0 = Length::new::<millimeter>(s_0);
+        let sn = Length::new::<millimeter>(s);
+        let tdt = Time::new::<day>(dt);
+        let mb = Velocity::new::<millimeter_per_day>(self.mass_balance(s, d));
+        (s0 - sn + tdt * mb).get::<millimeter>()
     }
 
     pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
@@ -230,8 +253,10 @@ impl SnowZone {
     }
 
     fn forc_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Snow accumulation [mm/d]: full precip when T <= freeze threshold tt.
+        let precip = Velocity::new::<millimeter_per_day>(d.precip);
         if d.temp <= self.tt {
-            d.precip
+            precip.get::<millimeter_per_day>()
         } else {
             0.0
         }
@@ -242,9 +267,16 @@ impl SnowZone {
     }
 
     fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Meltout [mm/d] = min(s, fmax * (T - tt)). `fmax` is a mm-per-K melt
+        // coefficient (M0 spike: Length/Interval * Interval -> length); the
+        // delta is a TemperatureInterval (1 °C delta == 1 K delta exactly),
+        // while absolute °C stays raw f64 (kelvin-only TT in uom 0.38).
         if d.temp > self.tt {
-            let melt: f64 = self.fmax * (d.temp - self.tt);
-            s.min(melt)
+            let d_t = TemperatureInterval::new::<kelvin_interval>(d.temp - self.tt);
+            let melt: Length = Length::new::<millimeter>(self.fmax)
+                / TemperatureInterval::new::<kelvin_interval>(1.0)
+                * d_t;
+            s.min(melt.get::<millimeter>())
         } else {
             0.0
         }
@@ -255,8 +287,11 @@ impl SnowZone {
     }
 
     fn vert_flux_ext(&self, s: f64, d: &HydroForcing) -> f64 {
+        // External loss [mm/d] = meltout (vert) + fresh snowfall (precip).
         if d.temp > self.tt {
-            self.vert_flux(s, d) + d.precip
+            let q_melt = Velocity::new::<millimeter_per_day>(self.vert_flux(s, d));
+            let q_precip = Velocity::new::<millimeter_per_day>(d.precip);
+            (q_melt + q_precip).get::<millimeter_per_day>()
         } else {
             return self.vert_flux(s, d);
         }
@@ -384,14 +419,23 @@ impl SurfaceZone {
     }
 
     pub fn __implicit_eulers_func(&self, s: f64, s_0: f64, d: &HydroForcing, dt: f64) -> f64 {
-        (s_0 - s) + dt * self.mass_balance(s, d)
+        // Implicit-Euler residual: (s0 - s) [mm] + dt [days] * mass_balance [mm/d].
+        // Typed per M0 spike test 5 (Length + Time * Velocity).
+        let s0 = Length::new::<millimeter>(s_0);
+        let sn = Length::new::<millimeter>(s);
+        let tdt = Time::new::<day>(dt);
+        let mb = Velocity::new::<millimeter_per_day>(self.mass_balance(s, d));
+        (s0 - sn + tdt * mb).get::<millimeter>()
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in + self.forc_flux(s, d)
-            - self.vert_flux(s, d)
-            - self.lat_flux(s, d)
-            - self.vap_flux(s, d)
+        // Net water flux [mm/d] = q_in + forced - vertical - lateral - vapour.
+        let q_in = Velocity::new::<millimeter_per_day>(d.q_in);
+        let q_forc = Velocity::new::<millimeter_per_day>(self.forc_flux(s, d));
+        let q_vert = Velocity::new::<millimeter_per_day>(self.vert_flux(s, d));
+        let q_lat = Velocity::new::<millimeter_per_day>(self.lat_flux(s, d));
+        let q_vap = Velocity::new::<millimeter_per_day>(self.vap_flux(s, d));
+        (q_in + q_forc - q_vert - q_lat - q_vap).get::<millimeter_per_day>()
     }
 
     pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
@@ -428,14 +472,22 @@ impl SurfaceZone {
     }
 
     fn vap_flux(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.pet * (s / (self.fc * self.lp)).min(1.0)
+        // ET loss [mm/d] = pet * min(s/(fc*lp), 1.0); saturation is a Ratio
+        // (same-dim division -> `.value` is the raw dimensionless number, M0 test 8).
+        let pet = Velocity::new::<millimeter_per_day>(d.pet);
+        let saturation = (Length::new::<millimeter>(s) / Length::new::<millimeter>(self.fc * self.lp)).value;
+        (pet * saturation.min(1.0)).get::<millimeter_per_day>()
     }
 
     fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Lateral outflow [mm/d]: `k0` is a per-day rate parameter (outside the
+        // uom-annotated quantities), so the term stays raw f64. s, thr: mm.
         (self.k0 * (s - self.thr)).max(0.0)
     }
 
     fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Recharge [mm/d] = q_in * (s/fc)^beta. Runtime exponent (powf — uom
+        // 0.38 has integer-only powers), so kept raw f64.
         d.q_in * (s / self.fc).powf(self.beta)
     }
 
@@ -559,11 +611,21 @@ impl GroundZone {
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in - self.vert_flux(s, d) - self.lat_flux(s, d)
+        // Net water flux [mm/d] = q_in - vertical - lateral.
+        let q_in = Velocity::new::<millimeter_per_day>(d.q_in);
+        let q_vert = Velocity::new::<millimeter_per_day>(self.vert_flux(s, d));
+        let q_lat = Velocity::new::<millimeter_per_day>(self.lat_flux(s, d));
+        (q_in - q_vert - q_lat).get::<millimeter_per_day>()
     }
 
     pub fn __implicit_eulers_func(&self, s: f64, s_0: f64, d: &HydroForcing, dt: f64) -> f64 {
-        (s_0 - s) + dt * self.mass_balance(s, d)
+        // Implicit-Euler residual: (s0 - s) [mm] + dt [days] * mass_balance [mm/d]
+        // (M0 spike: Length - Length + Time * Velocity).
+        let s0 = Length::new::<millimeter>(s_0);
+        let sn = Length::new::<millimeter>(s);
+        let tdt = Time::new::<day>(dt);
+        let mb = Velocity::new::<millimeter_per_day>(self.mass_balance(s, d));
+        (s0 - sn + tdt * mb).get::<millimeter>()
     }
 
     pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
@@ -604,6 +666,9 @@ impl GroundZone {
     }
 
     fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Lateral outflow [mm/d] = k * max(s, 0)^alpha. Runtime exponent (powf —
+        // uom 0.38 has integer-only powers) and per-day rate parameter `k`,
+        // so kept raw f64. s: wetness depth in mm.
         if s < 1e-12 {
             0.0
         } else {
@@ -612,6 +677,7 @@ impl GroundZone {
     }
 
     fn vert_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Vertical flux [mm/d]: state s (mm) capped by the `perc` parameter.
         s.min(self.perc)
     }
 
@@ -729,11 +795,20 @@ impl GroundZoneB {
     }
 
     pub fn __implicit_eulers_func(&self, s: f64, s_0: f64, d: &HydroForcing, dt: f64) -> f64 {
-        (s_0 - s) + dt * self.mass_balance(s, d)
+        // Implicit-Euler residual: (s0 - s) [mm] + dt [days] * mass_balance [mm/d]
+        // (M0 spike: Length - Length + Time * Velocity).
+        let s0 = Length::new::<millimeter>(s_0);
+        let sn = Length::new::<millimeter>(s);
+        let tdt = Time::new::<day>(dt);
+        let mb = Velocity::new::<millimeter_per_day>(self.mass_balance(s, d));
+        (s0 - sn + tdt * mb).get::<millimeter>()
     }
 
     pub fn mass_balance(&self, s: f64, d: &HydroForcing) -> f64 {
-        d.q_in - self.lat_flux(s, d)
+        // Net water flux [mm/d] = q_in - lateral.
+        let q_in = Velocity::new::<millimeter_per_day>(d.q_in);
+        let q_lat = Velocity::new::<millimeter_per_day>(self.lat_flux(s, d));
+        (q_in - q_lat).get::<millimeter_per_day>()
     }
 
     pub fn step(&self, s_0: f64, d: HydroForcing, dt: f64) -> PyResult<HydroStep> {
@@ -774,6 +849,9 @@ impl GroundZoneB {
     }
 
     fn lat_flux(&self, s: f64, d: &HydroForcing) -> f64 {
+        // Lateral outflow [mm/d] = k * max(s, 0)^alpha. Runtime exponent (powf —
+        // uom 0.38 has integer-only powers) and per-day rate parameter `k`,
+        // so kept raw f64. s: wetness depth in mm.
         if s < 1e-12 {
             0.0
         } else {
