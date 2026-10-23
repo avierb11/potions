@@ -107,6 +107,29 @@ impl ReactionNetwork {
         })
     }
 
+    /// Show the network size (total / aqueous / mineral species counts,
+    /// whether ion exchange is present) and the ordered species list,
+    /// including the implicit `X-` exchange site when present.
+    pub fn __repr__(&self) -> String {
+        let quoted_names: Vec<String> = self
+            .species_names()
+            .iter()
+            .map(|s| format!("'{}'", s))
+            .collect();
+        format!(
+            "ReactionNetwork(num_species={},num_aqueous_species={},num_minerals={},has_exchange={},species=[{}])",
+            self.num_species(),
+            self.num_aqueous_species(),
+            self.num_minerals(),
+            if self.has_exchange() {
+                "True"
+            } else {
+                "False"
+            },
+            quoted_names.join(", ")
+        )
+    }
+
     #[getter]
     pub fn species_order(&self) -> Vec<String> {
         let spec = self
@@ -309,27 +332,33 @@ impl ReactionNetwork {
 
         let mut min_eq_vals: Vec<f64> = Vec::new();
 
-        let spec_indices = self.species_indices();
         for m in self.mineral.iter() {
             if self.mineral_kinetics.tst_reactions.contains_key(&m.name) {
                 // This reaction is a TST reaction
                 min_eq_vals.push((10_f64).powf(m.eq_consts[1]));
-                let mut min_stoich: Vec<f64> = Vec::new();
-                let mut dep_stoich: Vec<f64> = Vec::new();
                 let dep = &self.mineral_kinetics.tst_reactions[&m.name].dependence;
                 let db_stoich = &m.stoichiometry;
+                let mut min_stoich: Vec<f64> = Vec::new();
+                let mut dep_stoich: Vec<f64> = Vec::new();
                 for spec in self.species_names() {
-                    if dep.contains_key(&spec) {
-                        dep_stoich.push(dep[&spec]);
-                        min_stoich.push(db_stoich[&spec]);
+                    // Solubility-product exponent: the database stoichiometric
+                    // coefficient of the species.  The mineral's own column is
+                    // zero, because a pure phase has unit activity and does not
+                    // enter Q.
+                    let stoich_exp = if spec == m.name {
+                        0.0
                     } else {
-                        dep_stoich.push(0.0);
-                        min_stoich.push(0.0);
-                    }
+                        db_stoich.get(&spec).copied().unwrap_or(0.0)
+                    };
+                    // Forward-rate dependence exponent: the reaction lists no
+                    // dependence for most species, which means a factor of 1.
+                    let dep_exp = dep.get(&spec).copied().unwrap_or(0.0);
+                    min_stoich.push(stoich_exp);
+                    dep_stoich.push(dep_exp);
                 }
 
-                mineral_stoich_cols.push(Column::new(m.name.clone().into(), dep_stoich));
-                dep_cols.push(Column::new(m.name.clone().into(), min_stoich));
+                mineral_stoich_cols.push(Column::new(m.name.clone().into(), min_stoich));
+                dep_cols.push(Column::new(m.name.clone().into(), dep_stoich));
             } else {
                 // This reaction is NOT a TST reaction
                 min_eq_vals.push(1.0);

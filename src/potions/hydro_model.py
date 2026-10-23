@@ -61,7 +61,10 @@ class HydrologicalModel:
                 parameterized ones. Keys are zone names. Defaults to None.
             scales (Optional[list[float]]): A list of fractional areas for each
                 surface zone, defining their contribution to the total catchment.
-                Must sum to 1. Defaults to equal scaling.
+                All values must be strictly positive and sum to 1. These area
+                fractions govern forcing distribution, the area-weighted
+                lateral transfer between zones (donor/receiver ratio), and the
+                area-weighted outlet discharge. Defaults to equal scaling.
             lapse_rates (Optional[list[LapseRateParameters]]): A list of lapse
                 rate parameters, one for each surface zone. Defaults to None.
             verbose (bool): If True, prints additional information during
@@ -111,6 +114,20 @@ class HydrologicalModel:
         self.__vert_matrix: NDArray = vert
         self.__forcing_mat: NDArray = self.get_forc_mat(scales)
         self.__forcing_rel_mat: NDArray = self.get_forc_mat(scales, relative=True)
+
+        # Per-zone area fractions, propagated down each column from the
+        # surface scales, and the area-weighted connectivity matrices. Area
+        # factors live on the *boundaries* (edges) of the connectivity graph:
+        # an edge d -> r carries the donor/receiver area ratio (s_d / s_r), and
+        # the river outflow row carries the receiver scale (s_r) so the outlet
+        # is a catchment-mean depth.
+        self.__zone_scales: NDArray = self.get_zone_scales(scales)
+        self.__lat_matrix_scaled: NDArray = self.get_scaled_lat_mat(
+            lat, self.__zone_scales
+        )
+        self.__vert_matrix_scaled: NDArray = self.get_scaled_vert_mat(
+            vert, self.__zone_scales
+        )
 
         # Validate the structure (bottom-zone placement rules, parameter
         # finiteness, scale validity) at construction time, so that a
@@ -180,9 +197,35 @@ class HydrologicalModel:
         return self.__lat_matrix
 
     @property
+    def lat_mat_scaled(self) -> NDArray[f64]:
+        """The area-weighted matrix describing lateral connectivity.
+
+        Lateral edges carry the donor/receiver area ratio (`s_d / s_r`) and
+        the river-outflow row carries the receiver scale (`s_r`). Used at
+        run time so that inter-zone transfer and outlet discharge are
+        area-consistent.
+        """
+        return self.__lat_matrix_scaled
+
+    @property
+    def zone_scales(self) -> NDArray[f64]:
+        """The area fraction of every zone, in the order of evaluation."""
+        return self.__zone_scales
+
+    @property
     def vert_mat(self) -> NDArray[f64]:
         """The matrix describing vertical connectivity between zones."""
         return self.__vert_matrix
+
+    @property
+    def vert_mat_scaled(self) -> NDArray[f64]:
+        """The area-weighted matrix describing vertical connectivity.
+
+        Vertical edges join zones of the same column (ratio 1) except where a
+        layer aggregates N zones into one, in which case the edge carries the
+        donor/receiver area ratio so mass is conserved.
+        """
+        return self.__vert_matrix_scaled
 
     @property
     def precip_mat(self) -> NDArray[f64]:
@@ -306,6 +349,122 @@ class HydrologicalModel:
             return relative_mat
         else:
             return mat
+
+    def get_zone_scales(self, scales: ArrayLike) -> NDArray[f64]:
+        """Propagates the surface-zone area fractions to every zone.
+
+        Each surface zone defines a fractional area of the catchment, and
+        every zone beneath it (within the same column) belongs to the same
+        area fraction. This mirrors the propagation used by `get_forc_mat`:
+        the per-zone scale is `size_mat @ scales`.
+
+        Args:
+            scales: An array-like object with the relative area of each
+                surface zone (must sum to 1).
+
+        Returns:
+            NDArray[f64]: A length-`num_zones` vector of the area fraction
+                for every zone, in the order of evaluation.
+        """
+        conn_mat: NDArray[f64] = self.get_size_mat()
+        s_arr: NDArray[f64] = np.array(scales, dtype=f64)
+        return conn_mat @ s_arr
+
+    @staticmethod
+    def get_scaled_lat_mat(
+        lat_mat: NDArray[f64], zone_scales: NDArray[f64]
+    ) -> NDArray[f64]:
+        """Builds an area-weighted lateral connectivity matrix.
+
+        The plain lateral matrix (`lat_mat`) encodes 0/1 adjacency, with an
+        extra final row encoding outflow to the river. This method converts
+        that adjacency into an area-consistent transfer operator:
+
+        - A lateral edge from donor zone `d` to receiver zone `r` is weighted
+          by the donor/receiver area ratio `s_d / s_r`. This conserves mass:
+          all water leaving the donor's area is concentrated onto the
+          receiver's (typically smaller) area.
+        - The river-outflow row (the last row) is weighted by the receiver
+          scale `s_r`, so that summing river-zone contributions yields a
+          catchment-mean depth (mm/d).
+
+        Args:
+            lat_mat: The `(n + 1) x n` adjacency matrix from
+                `get_connection_matrices_with_river_row` (last row = river).
+            zone_scales: The length-`n` vector of per-zone area fractions.
+
+        Returns:
+            NDArray[f64]: The area-weighted lateral matrix, same shape as
+                `lat_mat`.
+
+        Raises:
+            ModelStructureError: If any zone has a non-positive area, since
+                the donor/receiver ratio would be undefined.
+        """
+        n: int = zone_scales.shape[0]
+        HydrologicalModel._check_positive_scales(zone_scales)
+
+        scaled: NDArray[f64] = np.array(lat_mat, dtype=f64, copy=True)
+
+        # Weight each lateral edge d -> r by s_d / s_r. `lat_mat[r, d] == 1`
+        # marks an edge; scale each such entry by the donor scale of column d
+        # and divide by the receiver scale of row r.
+        receiver_scales = zone_scales[:, np.newaxis]  # shape (n, 1)
+        donor_scales = zone_scales[np.newaxis, :]  # shape (1, n)
+        scaled[:n, :] = scaled[:n, :] * donor_scales / receiver_scales
+
+        # Weight the river-outflow row by the receiver (river-zone) scale.
+        scaled[n, :] = scaled[n, :] * zone_scales
+
+        return scaled
+
+    @staticmethod
+    def get_scaled_vert_mat(
+        vert_mat: NDArray[f64], zone_scales: NDArray[f64]
+    ) -> NDArray[f64]:
+        """Builds an area-weighted vertical connectivity matrix.
+
+        A vertical edge normally joins two zones of the *same* column, so the
+        donor/receiver ratio is 1 and the matrix is unchanged. When a layer
+        aggregates (N zones above, 1 below), however, the receiving zone
+        represents the combined area of all donors, so the edge must carry the
+        ratio `s_d / s_r` for mass to be conserved.
+
+        Args:
+            vert_mat: The `n x n` vertical adjacency matrix.
+            zone_scales: The length-`n` vector of per-zone area fractions.
+
+        Returns:
+            NDArray[f64]: The area-weighted vertical matrix, same shape as
+                `vert_mat`.
+
+        Raises:
+            ModelStructureError: If any zone has a non-positive area, since
+                the donor/receiver ratio would be undefined.
+        """
+        HydrologicalModel._check_positive_scales(zone_scales)
+
+        scaled: NDArray[f64] = np.array(vert_mat, dtype=f64, copy=True)
+        receiver_scales = zone_scales[:, np.newaxis]  # shape (n, 1)
+        donor_scales = zone_scales[np.newaxis, :]  # shape (1, n)
+        scaled = scaled * donor_scales / receiver_scales
+        return scaled
+
+    @staticmethod
+    def _check_positive_scales(zone_scales: NDArray[f64]) -> None:
+        """Raise if any per-zone area fraction is not strictly positive.
+
+        The area-weighted transfer uses a donor/receiver ratio, which is
+        undefined when a zone occupies zero area.
+        """
+        if np.any(zone_scales <= 0):
+            bad = [int(i) for i in np.where(zone_scales <= 0)[0]]
+            raise ModelStructureError(
+                "All zones must have a strictly positive area fraction, but "
+                f"zones at indices {bad} have scale <= 0. The area-weighted "
+                "transfer uses a donor/receiver area ratio that requires "
+                "every zone to occupy a non-zero area."
+            )
 
     @classmethod
     def get_hydro_column_names(cls) -> list[str]:
@@ -639,7 +798,7 @@ class HydrologicalModel:
         - Valid layer geometry (each layer must have 1 zone or the same
           number of zones as the layer above it).
         - Zone parameters that are finite.
-        - `scales` that are finite, non-negative, and sum to 1.
+        - `scales` that are finite, strictly positive, and sum to 1.
 
         Raises:
             TypeError: if a `structure` entry is not a zone.
@@ -711,11 +870,13 @@ class HydrologicalModel:
             prev_zones = layer_size
 
         # Check that all scales are valid and add up to 1
-        if any(not np.isfinite(s) or s < 0 for s in self.scales):
+        if any(not np.isfinite(s) or s <= 0 for s in self.scales):
             raise ModelStructureError(
-                f"Model scales must be finite and non-negative, got: {
+                f"Model scales must be finite and strictly positive, got: {
                     self.scales
-                }"
+                }. Every zone must occupy a non-zero area so that the "
+                "area-weighted lateral transfer (donor/receiver ratio) is "
+                "well defined."
             )
         if abs(sum(self.scales) - 1) > 1e-3:
             raise ModelStructureError(f"Model scales do not add up to 1: {
@@ -1077,9 +1238,11 @@ class HydrologicalModel:
         ):
             num_fluxes = i + 1
             if num_fluxes > 0:
-                q_in_lat = np.dot(self.lat_mat[i, :num_fluxes], lat_ext_fluxes[: i + 1])
+                q_in_lat = np.dot(
+                    self.lat_mat_scaled[i, :num_fluxes], lat_ext_fluxes[: i + 1]
+                )
                 q_in_vert = np.dot(
-                    self.vert_mat[i, :num_fluxes], vert_ext_fluxes[: i + 1]
+                    self.vert_mat_scaled[i, :num_fluxes], vert_ext_fluxes[: i + 1]
                 )
             else:
                 q_in_lat, q_in_vert = 0.0, 0.0
@@ -1313,20 +1476,16 @@ class HydrologicalModel:
 
         river_zone_ids: list[int] = self.get_river_zone_ids()
 
-        def is_streamflow_col(x: str) -> bool:
-            if not x.startswith("q_lat_"):
-                return False
-
-            zone_name: str = x.replace("q_lat_", "")
-            return self.zone_indices[zone_name] in river_zone_ids
-
-        streamflow_cols: list[str] = [
-            col
-            for col in model_res.columns
-            if "lat" in col and ("ext" not in col) and is_streamflow_col(col)
-        ]
-
-        sim_streamflow = model_res[streamflow_cols].sum(axis=1)
+        # Weight each river zone's lateral outflow by its area fraction, so
+        # the outlet is a catchment-mean depth (mm/d) rather than an
+        # unweighted sum of intensive zone fluxes.
+        zone_names: list[str] = self.get_zone_names()
+        river_zone_names: list[str] = [zone_names[i] for i in river_zone_ids]
+        q_components: dict[str, Series] = {
+            name: model_res[f"q_lat_{name}"] * float(self.zone_scales[river_zone_ids[k]])
+            for k, name in enumerate(river_zone_names)
+        }
+        sim_streamflow: Series = sum(q_components.values())  # type: ignore
         sim_streamflow.name = SIM_Q_NAME
         model_res[SIM_Q_NAME] = sim_streamflow
         if meas_streamflow is not None:
@@ -1344,16 +1503,11 @@ class HydrologicalModel:
 
         obj_val_ser: Series = Series(data=obj_vals)
 
-        # Calculate some other metrics
-        streamflow_ids = self.get_river_zone_ids()
-        zone_names: list[str] = self.get_zone_names()
-
+        # Report the area-weighted share of streamflow from each river zone.
         props: dict[str, float] = {}
-        for col_id in streamflow_ids:
-            zone_name: str = zone_names[col_id]
-            col_name: str = f"q_lat_{zone_name}"
-            prop_name: str = f"prop_q_{zone_name}"
-            model_res[prop_name] = model_res[col_name] / model_res[SIM_Q_NAME]
+        for name in river_zone_names:
+            prop_name: str = f"prop_q_{name}"
+            model_res[prop_name] = q_components[name] / model_res[SIM_Q_NAME]
             props[prop_name] = model_res[prop_name].mean()
 
         # Create the object and save

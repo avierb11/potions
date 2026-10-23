@@ -164,7 +164,10 @@ class Model(ReactiveTransportModel):
                 parameterized ones. Keys are zone names. Defaults to None.
             scales (Optional[list[float]]): A list of fractional areas `for each
                 surface zone, defining their contribution to the total catchment.
-                Must sum to 1. Defaults to equal scaling.
+                All values must be strictly positive and sum to 1. These area
+                fractions govern forcing distribution, the area-weighted
+                lateral transfer between zones, and the area-weighted outlet
+                discharge. Defaults to equal scaling.
             lapse_rates (Optional[list[LapseRateParameters]]): A list of lapse
                 rate parameters, one for each surface zone. Defaults to None.
             verbose (bool): If True, prints additional information during
@@ -410,13 +413,18 @@ class Model(ReactiveTransportModel):
         num_zones: int = cls.get_num_zones()
         num_hydro_params: int = cls.get_num_hydro_parameters()
         num_dim_params: int = 2 * num_zones
+        num_minerals: int = network.num_minerals
         num_min_params: int = 0
         num_river_params: int = 0
         for zone_name, zone in config.items():
             if zone_name == "river":
-                num_river_params += 2 + PARAMETERS_PER_MINERAL * zone.do_reactions
+                num_river_params += (
+                    2 + num_minerals * PARAMETERS_PER_MINERAL * zone.do_reactions
+                )
             else:
-                num_min_params += PARAMETERS_PER_MINERAL * zone.do_reactions
+                num_min_params += (
+                    num_minerals * PARAMETERS_PER_MINERAL * zone.do_reactions
+                )
         num_expected: int = (
             num_hydro_params + num_dim_params + num_min_params + num_river_params
         )

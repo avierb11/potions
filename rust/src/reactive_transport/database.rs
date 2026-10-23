@@ -10,6 +10,68 @@ use pyo3::{
 
 const DEFAULT_DATABASE_STR: &str = include_str!("default_database.json");
 
+/// Number of names previewed per section in `ChemicalDatabase::summary()`.
+const SUMMARY_PREVIEW_LEN: usize = 5;
+
+/// Format a `String`-keyed `f64` map as a Python-style dict literal with
+/// single-quoted, sorted keys, e.g. `{'H+': -1.0, 'HCO3-': 1.0}`.
+///
+/// Keys are sorted so the output is deterministic even though `HashMap`
+/// iteration order is not.
+fn format_string_map(map: &HashMap<String, f64>) -> String {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let items: Vec<String> = keys
+        .iter()
+        .map(|k| format!("'{}': {}", k, map[*k]))
+        .collect();
+    format!("{{{}}}", items.join(", "))
+}
+
+/// Format a map's keys as a Python-style list literal of single-quoted,
+/// sorted names, e.g. `['calcite', 'gibbsite']`.
+fn format_key_list<V>(map: &HashMap<String, V>) -> String {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let items: Vec<String> = keys.iter().map(|k| format!("'{}'", k)).collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// Return a `String` map's keys as a new, sorted `Vec<String>`.
+///
+/// `HashMap` iteration order is nondeterministic; sorting gives a stable
+/// listing for display and test purposes.
+fn sorted_keys<V>(map: &HashMap<String, V>) -> Vec<String> {
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+/// Format one section of `ChemicalDatabase::summary()`: the label, the total
+/// count, and a preview of up to `SUMMARY_PREVIEW_LEN` sorted names
+/// (with `...` when truncated).
+fn summary_section(label: &str, names: &[String]) -> String {
+    let mut sorted: Vec<&String> = names.iter().collect();
+    sorted.sort();
+    let preview: Vec<&str> = sorted
+        .iter()
+        .take(SUMMARY_PREVIEW_LEN)
+        .map(|s| s.as_str())
+        .collect();
+    let preview = preview.join(", ");
+    if names.len() > SUMMARY_PREVIEW_LEN {
+        format!(
+            "  {:<16} {:>5}  ({} shown: {}...)",
+            label,
+            names.len(),
+            SUMMARY_PREVIEW_LEN,
+            preview
+        )
+    } else {
+        format!("  {:<16} {:>5}  ({})", label, names.len(), preview)
+    }
+}
+
 #[pyclass(from_py_object, module = "potions.core")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrimaryAqueousSpecies {
@@ -107,6 +169,18 @@ impl SecondarySpecies {
         }
     }
 
+    pub fn __repr__(&self) -> String {
+        format!(
+            "SecondarySpecies(name={},stoichiometry={},eq_consts={:?},dh_size_param={},charge={},molar_mass={})",
+            self.name,
+            format_string_map(&self.stoichiometry),
+            self.eq_consts,
+            self.dh_size_param,
+            self.charge,
+            self.molar_mass
+        )
+    }
+
     pub fn __getstate__(&self) -> (String, HashMap<String, f64>, Vec<f64>, f64, f64, f64) {
         (
             self.name.clone(),
@@ -191,6 +265,17 @@ impl MineralSpecies {
             eq_consts,
             molar_volume,
         }
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MineralSpecies(name={},molar_mass={},stoichiometry={},eq_consts={:?},molar_volume={})",
+            self.name,
+            self.molar_mass,
+            format_string_map(&self.stoichiometry),
+            self.eq_consts,
+            self.molar_volume
+        )
     }
 
     pub fn __getstate__(
@@ -283,6 +368,16 @@ impl TstReaction {
         }
     }
 
+    pub fn __repr__(&self) -> String {
+        format!(
+            "TstReaction(mineral_name={},label={},rate_constant={},dependence={})",
+            self.mineral_name,
+            self.label,
+            self.rate_constant,
+            format_string_map(&self.dependence)
+        )
+    }
+
     pub fn __getstate__(&self) -> (String, String, f64, std::collections::HashMap<String, f64>) {
         (
             self.mineral_name.clone(),
@@ -345,6 +440,17 @@ impl MonodReaction {
             monod_terms,
             inhib_terms,
         }
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MonodReaction(mineral_name={},label={},rate_constant={},monod_terms={},inhib_terms={})",
+            self.mineral_name,
+            self.label,
+            self.rate_constant,
+            format_string_map(&self.monod_terms),
+            format_string_map(&self.inhib_terms)
+        )
     }
 
     pub fn __getstate__(
@@ -424,6 +530,17 @@ impl MineralKineticData {
         }
     }
 
+    /// Show the mineral names of the reactions held, one list per reaction
+    /// type. Full reaction details are available through the individual
+    /// `TstReaction` / `MonodReaction` entries.
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MineralKineticData(tst_reactions={},monod_reactions={})",
+            format_key_list(&self.tst_reactions),
+            format_key_list(&self.monod_reactions)
+        )
+    }
+
     pub fn __getstate__(
         &self,
     ) -> (
@@ -483,6 +600,16 @@ impl ExchangeReaction {
             log10_k_eq,
             charge,
         }
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "ExchangeReaction(name={},stoichiometry={},log10_k_eq={},charge={})",
+            self.name,
+            format_string_map(&self.stoichiometry),
+            self.log10_k_eq,
+            self.charge
+        )
     }
 
     pub fn __getstate__(&self) -> (String, HashMap<String, f64>, f64, f64) {
@@ -591,6 +718,21 @@ impl ChemicalDatabase {
             Ok(v) => Ok(v),
             Err(_) => Err(PyValueError::new_err("Failed to deconstruct database")),
         }
+    }
+
+    /// A compact one-line summary reporting the number of entries of each
+    /// species and reaction type. Use `summary()` for a detailed,
+    /// multi-line listing of the individual names.
+    pub fn __repr__(&self) -> String {
+        format!(
+            "ChemicalDatabase(primary_species={},secondary_species={},mineral_species={},exchange_reactions={},tst_reactions={},monod_reactions={})",
+            self.primary_species.len(),
+            self.secondary_species.len(),
+            self.mineral_species.len(),
+            self.exchange_reactions.len(),
+            self.tst_reactions.len(),
+            self.monod_reactions.len()
+        )
     }
 
     pub fn get_primary_aqueous_species(
@@ -734,5 +876,72 @@ impl ChemicalDatabase {
             }
         }
         Ok(spec)
+    }
+
+    /// Names of all primary aqueous species in the database, sorted
+    /// alphabetically so the listing is stable and easy to scan.
+    pub fn get_primary_aqueous_species_names(&self) -> Vec<String> {
+        sorted_keys(&self.primary_species)
+    }
+
+    /// Names of all secondary (aqueous equilibrium) species in the database,
+    /// sorted alphabetically.
+    pub fn get_secondary_species_names(&self) -> Vec<String> {
+        sorted_keys(&self.secondary_species)
+    }
+
+    /// Names of all mineral species in the database, sorted alphabetically.
+    pub fn get_mineral_species_names(&self) -> Vec<String> {
+        sorted_keys(&self.mineral_species)
+    }
+
+    /// Names of all exchange (ion-exchange) species in the database, sorted
+    /// alphabetically.
+    pub fn get_exchange_species_names(&self) -> Vec<String> {
+        sorted_keys(&self.exchange_reactions)
+    }
+
+    /// Mineral names that carry TST (transition-state) kinetic reactions,
+    /// sorted alphabetically.
+    pub fn get_tst_mineral_names(&self) -> Vec<String> {
+        sorted_keys(&self.tst_reactions)
+    }
+
+    /// Mineral names that carry Monod kinetic reactions, sorted alphabetically.
+    pub fn get_monod_mineral_names(&self) -> Vec<String> {
+        sorted_keys(&self.monod_reactions)
+    }
+
+    /// A multi-line, human-readable listing of the database contents,
+    /// intended for `print()`.
+    ///
+    /// Each section reports the total number of entries followed by a short
+    /// preview of the first few (sorted) names, with `...` when truncated.
+    /// Use the per-type `get_*_names()` methods to obtain complete name lists.
+    pub fn summary(&self) -> String {
+        let primary_names = sorted_keys(&self.primary_species);
+        let secondary_names = sorted_keys(&self.secondary_species);
+        let mineral_names = sorted_keys(&self.mineral_species);
+        let exchange_names = sorted_keys(&self.exchange_reactions);
+        let tst_names = sorted_keys(&self.tst_reactions);
+        let monod_names = sorted_keys(&self.monod_reactions);
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "ChemicalDatabase summary: {} primary aqueous, {} secondary, {} mineral, {} exchange, {} TST minerals, {} Monod minerals",
+            primary_names.len(),
+            secondary_names.len(),
+            mineral_names.len(),
+            exchange_names.len(),
+            tst_names.len(),
+            monod_names.len()
+        ));
+        lines.push(summary_section("primary aqueous", &primary_names));
+        lines.push(summary_section("secondary", &secondary_names));
+        lines.push(summary_section("mineral", &mineral_names));
+        lines.push(summary_section("exchange", &exchange_names));
+        lines.push(summary_section("TST minerals", &tst_names));
+        lines.push(summary_section("Monod minerals", &monod_names));
+        lines.join("\n")
     }
 }

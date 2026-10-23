@@ -27,6 +27,17 @@ __all__ = [
     "MonodReaction",
     "ExchangeReaction",
     "ChemicalDatabase",
+    # Database views
+    "all_species_df",
+    "exchange_reactions_df",
+    "exchange_stoich_df",
+    "mineral_species_df",
+    "mineral_stoich_df",
+    "monod_reactions_df",
+    "primary_species_df",
+    "secondary_species_df",
+    "secondary_stoich_df",
+    "tst_reactions_df",
     "WaterVolumeError",
 ]
 
@@ -60,4 +71,16 @@ from .database import (
     MonodReaction,
     ExchangeReaction,
     ChemicalDatabase,
+)
+from .database_views import (
+    all_species_df,
+    exchange_reactions_df,
+    exchange_stoich_df,
+    mineral_species_df,
+    mineral_stoich_df,
+    monod_reactions_df,
+    primary_species_df,
+    secondary_species_df,
+    secondary_stoich_df,
+    tst_reactions_df,
 )

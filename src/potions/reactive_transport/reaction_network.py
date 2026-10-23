@@ -173,13 +173,24 @@ class ReactionNetwork:
     @property
     def tst_params(self) -> TstParameters:
         """
-        Construct the TST parameters for this reaction network
+        Construct the TST parameters for this reaction network.
+
+        ``stoich`` holds the exponents of the solubility product Q: the
+        database stoichiometric coefficient of each aqueous species, with
+        the mineral's own column set to zero (a pure phase has unit
+        activity and does not enter Q).  ``dep`` holds the forward-rate
+        dependence exponents (zero where the reaction lists none, i.e. a
+        factor of 1).  ``min_eq_const`` is the mineral equilibrium constant
+        on the linear scale (``10 ** log10_K``), matching the Rust
+        ``tst_params`` getter.
         """
         # Stoichiometry
         mineral_stoich_df: DataFrame = self.species
         for mineral in self.mineral:
             if mineral.name in self.mineral_kinetics.tst_reactions:
-                mineral_stoich_df[mineral.name] = mineral.stoichiometry
+                stoich: dict[str, float] = dict(mineral.stoichiometry)
+                stoich[mineral.name] = 0.0  # pure phase: unit activity
+                mineral_stoich_df[mineral.name] = stoich
             else:
                 mineral_stoich_df[mineral.name] = 0.0
 
@@ -196,11 +207,13 @@ class ReactionNetwork:
             tst_dep_df[name] = reaction.dependence
         tst_dep_df = tst_dep_df.drop(columns="type").fillna(0.0).T[self.species_order]
 
-        # Equilibrium constants
+        # Equilibrium constants (linear scale: 10 ** log10_K)
 
         min_eq_const: Series = Series(
             [
-                x.eq_consts[1] if x.name in self.mineral_kinetics.tst_reactions else 1.0
+                (10.0 ** x.eq_consts[1])
+                if x.name in self.mineral_kinetics.tst_reactions
+                else 1.0
                 for x in self.mineral
             ],
             index=[x.name for x in self.mineral],
@@ -260,7 +273,7 @@ class ReactionNetwork:
         return stoich_df[mineral_names].copy().fillna(0.0)
 
     @property
-    def transport_mask(self) -> NDArray:
+    def transport_mask(self) -> NDArray[np.bool_]:
         """
         Get a boolean mask for the species that are either mobile or immobile. Mineral species
         and exchange sites (X-) are immobile and will not be moved during transport
@@ -269,12 +282,12 @@ class ReactionNetwork:
         return mobile_vals.to_numpy()
 
     @property
-    def mineral_molar_masses(self) -> NDArray:
+    def mineral_molar_masses(self) -> NDArray[np.float64]:
         """The molar masses of each of the minerals"""
         return np.array([x.molar_mass for x in self.mineral])
 
     @property
-    def rate_consts(self) -> NDArray:
+    def rate_consts(self) -> NDArray[np.float64]:
         log10_rate_consts: list[float] = []
         for m in self.mineral:
             if m.name in self.mineral_kinetics.monod_reactions:
@@ -301,7 +314,9 @@ class ReactionNetwork:
         """Get the total number of aqueous species, equal to the number of primary aqueous and secondary species"""
         return self.species["type"].isin(["primary", "secondary"]).sum()
 
-    def get_default_aqueous_initial_state(self, init_conc: float = 1e-6) -> NDArray:
+    def get_default_aqueous_initial_state(
+        self, init_conc: float = 1e-6
+    ) -> NDArray[np.float64]:
         """Get an array of the initial concentrations for this zone"""
         return np.full(
             shape=(self.num_aqueous_species,), fill_value=init_conc, dtype=np.float64

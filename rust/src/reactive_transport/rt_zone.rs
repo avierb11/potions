@@ -12,7 +12,6 @@ use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
     math::find_root_multi_analytic_fused_then_lm,
     molar, molar_per_time, moles, moles_per_time,
-    units::{AmountOfSubstance, MolarConcentration, Volume, liter, mole, mole_per_liter},
     reactive_transport::{
         kinetic_structures::{
             EquilibriumParameters, MineralParameters, MonodParameters, RtParameters, TstParameters,
@@ -20,6 +19,7 @@ use crate::{
         },
         reaction_network::ReactionNetwork,
     },
+    units::{liter, mole, mole_per_liter, AmountOfSubstance, MolarConcentration, Volume},
 };
 
 /// Warm-start cache for the speciation solve. Stores the `x_free` solution from
@@ -31,8 +31,7 @@ use crate::{
 /// Debug` (a requirement of `#[pyclass]`, which a bare `RefCell` is not).
 #[derive(Debug, Clone, Default)]
 pub struct SpeciationCache {
-    inner: std::sync::Arc<std::sync::Mutex<Option<Array1<f64>>> >,
-
+    inner: std::sync::Arc<std::sync::Mutex<Option<Array1<f64>>>>,
 }
 
 impl SpeciationCache {
@@ -365,9 +364,7 @@ impl RtZone {
                 do_reactions,
             );
             let res_aq = res.slice(s![0..num_aq]).to_owned();
-            let jac_aq = jac
-                .slice(s![0..num_aq, 0..num_aq])
-                .to_owned();
+            let jac_aq = jac.slice(s![0..num_aq, 0..num_aq]).to_owned();
             (res_aq, jac_aq)
         };
 
@@ -378,7 +375,11 @@ impl RtZone {
         // zero. If it fails to converge, fall back to Levenberg-Marquardt
         // (itself using the fused analytic Jacobian) resumed from Newton's best
         // iterate.
-        let sol_aq = find_root_multi_analytic_fused_then_lm(&fused, c_0_full.slice(s![0..num_aq]).to_owned(), verbose)?;
+        let sol_aq = find_root_multi_analytic_fused_then_lm(
+            &fused,
+            c_0_full.slice(s![0..num_aq]).to_owned(),
+            verbose,
+        )?;
 
         let mut vf: Vec<f64> = Vec::with_capacity(num_spec);
         vf.extend_from_slice(sol_aq.as_slice().unwrap());
@@ -392,6 +393,9 @@ impl RtZone {
     /// `ndarray` vectors (no Python objects). This is the fast path the
     /// `run_zone_steps` driver consumes; the public `step` pymethod simply
     /// wraps this result into a `RtStep` for backwards compatibility.
+    ///
+    /// The Newton / LM kinetic solve runs here; all post-solve bookkeeping
+    /// happens in [`Self::finish_step_internal`].
     pub fn step_internal(
         &self,
         c_0: &Array1<f64>,
@@ -399,10 +403,48 @@ impl RtZone {
         dt_days: f64,
         verbose: bool,
     ) -> PyResult<StepResultAll> {
-        let num_spec: usize = self.network.num_species();
         let c_0_arr: Array1<molar> = c_0.clone(); // Initial concentrations in the zone
+
+        // let mobile_mask: Array1<bool> = self.network.mobile_mask_rust();
+
+        // let num_mobile = self.network.num_aqueous_species();
+        // let mut c_mobile = Array1::zeros(num_mobile);
+        // for i in 0..num_mobile {
+        //     c_mobile[i] = c_0_arr[i];
+        // }
+        let c_after_rt: Array1<molar> = self.solve_rt_step_rust(&c_0_arr, d, dt_days, verbose)?;
+        // let mut c_after_rt = c_0_arr.clone();
+        // for (i, c_i) in c_mobile_after_rt.iter().enumerate() {
+        //     c_after_rt[i] = *c_i;
+        // }
+
+        self.finish_step_internal(&c_0_arr, &c_after_rt, d, dt_days, verbose)
+    }
+
+    /// Finalize a zone step from an already-solved post-reaction state.
+    ///
+    /// The post-solve half of [`Self::step_internal`]: speciation
+    /// re-equilibration, then the mass / flux bookkeeping that produces
+    /// [`StepResultAll`]. `step_internal` feeds it the state from the
+    /// internal Newton / LM kinetic solve, while the `step_with_solution`
+    /// pymethod feeds it a state solved elsewhere (the
+    /// `scipy.optimize.fsolve` backup in
+    /// `ReactiveTransportModel.step_rt_model`), so every finalized step
+    /// passes through exactly this one post-solve path.
+    ///
+    /// `dt_days` is not consumed by the bookkeeping (it belongs to the
+    /// kinetic solve) but is kept for signature symmetry with
+    /// [`Self::step_internal`].
+    fn finish_step_internal(
+        &self,
+        c_0: &Array1<molar>,
+        c_after_rt: &Array1<molar>,
+        d: &RtForcing,
+        dt_days: f64,
+        verbose: bool,
+    ) -> PyResult<StepResultAll> {
+        let num_spec: usize = self.network.num_species();
         let c_in: &Array1<molar> = &d._conc_in;
-        let tot_moles_init: Array1<moles> = self.get_tot_moles_rust(&c_0_arr, d); // Initial moles of each species at the start of the step
         let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
         let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
         let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
@@ -416,40 +458,26 @@ impl RtZone {
             x
         };
 
-        // let mobile_mask: Array1<bool> = self.network.mobile_mask_rust();
-
-        // let num_mobile = self.network.num_aqueous_species();
-        // let mut c_mobile = Array1::zeros(num_mobile);
-        // for i in 0..num_mobile {
-        //     c_mobile[i] = c_0_arr[i];
-        // }
-        let c_after_rt: Array1<molar> =
-            self.solve_rt_step_rust(&c_0_arr, d, dt_days, verbose)?;
-        // let mut c_after_rt = c_0_arr.clone();
-        // for (i, c_i) in c_mobile_after_rt.iter().enumerate() {
-        //     c_after_rt[i] = *c_i;
-        // }
-
         // dbg!(&c_after_rt);
         if verbose {
-            eprintln!("c_after_rt={}", &c_after_rt);
+            eprintln!("c_after_rt={}", c_after_rt);
         }
 
         let c_after_eq = match self.do_speciation {
-            false => c_after_rt.clone(),
+            false => (*c_after_rt).clone(),
             true => {
                 if self.num_free() == 0 {
                     // The network has no equilibrium reactions (empty null space,
                     // e.g. the simple carbon network), so there are no free
                     // variables to solve for: nothing to re-speciate. The kinetic
                     // concentrations are already the final answer.
-                    c_after_rt.clone()
+                    (*c_after_rt).clone()
                 } else {
                     // Warm-start the speciation Newton iteration with the `x_free`
                     // solution from the previous time step (concentrations move
                     // slowly, so it is an excellent initial guess).
                     let initial_x = self.last_x_free.get(self.num_free());
-                    let x_free = self.eq.x_free_solve_rust(&c_after_rt, &initial_x, verbose)?;
+                    let x_free = self.eq.x_free_solve_rust(c_after_rt, &initial_x, verbose)?;
                     self.last_x_free.set(x_free.clone());
                     self.eq.conc_func_rust(&x_free)
                 }
@@ -511,7 +539,7 @@ impl RtZone {
                 (lat, vert, lc, vc)
             }
             false => {
-                let num_species = c_0_arr.len();
+                let num_species = c_0.len();
                 let z: Array1<f64> = Array1::from_elem(num_species, ZERO_CONC);
 
                 (z.clone(), z.clone(), z.clone(), z.clone())
@@ -534,7 +562,6 @@ impl RtZone {
             mineral_rates,
         })
     }
-
 }
 
 #[pymethods]
@@ -606,6 +633,18 @@ impl RtZone {
             misc: misc,
             last_x_free: SpeciationCache::default(),
         })
+    }
+
+    /// Show the zone name, the reaction / speciation flags, and the size of
+    /// the reaction network this zone integrates.
+    pub fn __repr__(&self) -> String {
+        format!(
+            "RtZone(name='{}',do_reactions={},do_speciation={},num_species={})",
+            self.name,
+            if self.do_reactions { "True" } else { "False" },
+            if self.do_speciation { "True" } else { "False" },
+            self.network.num_species()
+        )
     }
 
     pub fn mass_balance_ode<'py>(
@@ -720,7 +759,6 @@ impl RtZone {
         }
     }
 
-
     #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
     pub fn step<'py>(
         &self,
@@ -732,18 +770,36 @@ impl RtZone {
     ) -> PyResult<RtStep> {
         let c_0_arr: Array1<f64> = c_0.to_owned_array();
         let r = self.step_internal(&c_0_arr, d, dt_days, verbose)?;
-        let conc_in = d._conc_in.clone();
-        Ok(RtStep {
-            state: r.state.to_pyarray(py).unbind(),
-            total_moles: r.total_moles.to_pyarray(py).unbind(),
-            conc_in: conc_in.to_pyarray(py).unbind(),
-            mass_in: r.mass_in.to_pyarray(py).unbind(),
-            lat_conc: r.lat_conc.to_pyarray(py).unbind(),
-            vert_conc: r.vert_conc.to_pyarray(py).unbind(),
-            lat_mass: r.lat_mass.to_pyarray(py).unbind(),
-            vert_mass: r.vert_mass.to_pyarray(py).unbind(),
-            mineral_rates: r.mineral_rates.to_pyarray(py).unbind(),
-        })
+        Ok(make_rt_step(py, &r, &d._conc_in))
+    }
+
+    /// Finalize a zone step from an externally computed post-reaction state.
+    ///
+    /// Runs the exact same post-solve path as [`Self::step`] (speciation
+    /// re-equilibration, mass / flux bookkeeping, outgoing lateral / vertical
+    /// mass) but skips the internal Newton / LM kinetic solve: the caller
+    /// supplies `c_after_rt`, the full post-reaction concentration vector it
+    /// has already solved. `ReactiveTransportModel.step_rt_model` uses this
+    /// to rescue a step whose Newton / LM chain stalled, by re-solving the
+    /// aqueous block with `scipy.optimize.fsolve`.
+    ///
+    /// `c_0` must be the initial state the failed solve started from, and
+    /// `d` the same forcing (in particular the incoming concentration the
+    /// driver computed), so the bookkeeping is identical to a normal step.
+    #[pyo3(signature = (c_0, c_after_rt, d, dt_days, verbose=false))]
+    pub fn step_with_solution<'py>(
+        &self,
+        py: Python<'py>,
+        c_0: PyReadonlyArray1<f64>,
+        c_after_rt: PyReadonlyArray1<f64>,
+        d: &RtForcing,
+        dt_days: f64,
+        verbose: bool,
+    ) -> PyResult<RtStep> {
+        let c_0_arr: Array1<f64> = c_0.to_owned_array();
+        let c_after_rt_arr: Array1<f64> = c_after_rt.to_owned_array();
+        let r = self.finish_step_internal(&c_0_arr, &c_after_rt_arr, d, dt_days, verbose)?;
+        Ok(make_rt_step(py, &r, &d._conc_in))
     }
 
     pub fn monod_rate<'py>(
@@ -868,7 +924,7 @@ impl RtZone {
 /// this entry point simply assembles the Jacobian from the previously computed
 /// terms so that it is bit-for-bit identical to the historical monolithic
 /// implementation (it is what the finite-difference verification checks).
-    pub(crate) fn residual_jacobian_impl<M2C>(
+pub(crate) fn residual_jacobian_impl<M2C>(
     network: &ReactionNetwork,
     monod: &MonodParameters,
     tst: &TstParameters,
@@ -885,9 +941,25 @@ where
     M2C: Fn(&Array1<f64>) -> Array1<f64>,
 {
     let terms = reaction_terms_impl(
-        network, monod, tst, aux, misc, moles_to_conc, conc, d, do_reactions,
+        network,
+        monod,
+        tst,
+        aux,
+        misc,
+        moles_to_conc,
+        conc,
+        d,
+        do_reactions,
     );
-    assemble_ode_jacobian(network, &terms, misc, min_moles_volume, q_in, d, do_reactions)
+    assemble_ode_jacobian(
+        network,
+        &terms,
+        misc,
+        min_moles_volume,
+        q_in,
+        d,
+        do_reactions,
+    )
 }
 
 /// Shared kinetic terms for the mass-balance ODE at a single state `conc`,
@@ -956,14 +1028,16 @@ where
     // Which minerals may actually have a non-zero reaction term at this state.
     // This subsumes all possible NaN paths (e.g. missing aux parameters) and
     // keeps the Jacobian finite.
-    let mineral_active: Vec<bool> = (0..num_min).map(|i| {
-        chms[num_aq + i].is_finite()
-            && mn_vals[i].is_finite()
-            && d_vals[i].is_finite()
-            && q_vals[i].is_finite()
-            && k_min[i].is_finite()
-            && k_min[i].abs() > 0.0
-    }).collect();
+    let mineral_active: Vec<bool> = (0..num_min)
+        .map(|i| {
+            chms[num_aq + i].is_finite()
+                && mn_vals[i].is_finite()
+                && d_vals[i].is_finite()
+                && q_vals[i].is_finite()
+                && k_min[i].is_finite()
+                && k_min[i].abs() > 0.0
+        })
+        .collect();
 
     let aux_present = aux.is_some();
     let empty_reactivity = Array1::<f64>::zeros(0);
@@ -1197,13 +1271,37 @@ where
     M2C: Fn(&Array1<f64>) -> Array1<f64>,
 {
     let terms = reaction_terms_impl(
-        network, monod, tst, aux, misc, moles_to_conc, conc, d, do_reactions,
+        network,
+        monod,
+        tst,
+        aux,
+        misc,
+        moles_to_conc,
+        conc,
+        d,
+        do_reactions,
     );
     let num_spec = network.num_species();
-    let j_ode =
-        assemble_ode_jacobian(network, &terms, misc, min_moles_volume, q_in, d, do_reactions);
+    let j_ode = assemble_ode_jacobian(
+        network,
+        &terms,
+        misc,
+        min_moles_volume,
+        q_in,
+        d,
+        do_reactions,
+    );
     let jac_x: Array2<f64> = (-Array2::eye(num_spec)) + (dt_days * j_ode);
-    let ode = kinetic_ode_from_terms(network, &terms, misc, d, conc, q_in, min_start, do_reactions);
+    let ode = kinetic_ode_from_terms(
+        network,
+        &terms,
+        misc,
+        d,
+        conc,
+        q_in,
+        min_start,
+        do_reactions,
+    );
     let res = (c_0 - conc) + (dt_days * ode);
     (res, jac_x)
 }
@@ -1238,9 +1336,19 @@ fn make_rt_step<'py>(py: Python<'py>, r: &StepResultAll, conc_in: &Array1<molar>
 /// ```
 ///
 /// Surface zones skip the coupling (their precipitation `_conc_in` is already set).
-/// Returns one [`RtStep`] per zone in the same order as the input `zones`.
+/// On success, returns one [`RtStep`] per zone in the same order as the input
+/// `zones`; on failure, returns the steps computed so far together with
+/// `(failing zone index, the original exception, the incoming concentration
+/// that zone was about to step from)`.
+///
+/// `start` supports resuming a sweep the Python driver interrupted to rescue a
+/// failed zone: the sweep then runs from zone `start` instead of zone 0 and
+/// returns only the steps for zones `start..n_zones`. A resumed sweep requires
+/// `lat_mass_init` / `vert_mass_init` — the outgoing mass produced by the zones
+/// solved before the interruption — so that the Gauss-Seidel coupling yields
+/// exactly the same incoming concentrations an uninterrupted sweep would.
 #[pyfunction]
-#[pyo3(signature = (zones, states, forcings, lat_mat, vert_mat, surface_zone_ids, dt, verbose=false))]
+#[pyo3(signature = (zones, states, forcings, lat_mat, vert_mat, surface_zone_ids, dt, verbose=false, start=0, lat_mass_init=None, vert_mass_init=None))]
 pub fn run_zone_steps<'py>(
     py: Python<'py>,
     zones: Vec<Bound<'py, RtZone>>,
@@ -1251,8 +1359,13 @@ pub fn run_zone_steps<'py>(
     surface_zone_ids: Vec<usize>,
     dt: f64,
     verbose: bool,
-) -> (Vec<RtStep>, Option<(usize, PyErr, Bound<'py, PyArray1<molar>>)>)
-{
+    start: usize,
+    lat_mass_init: Option<PyReadonlyArray2<f64>>,
+    vert_mass_init: Option<PyReadonlyArray2<f64>>,
+) -> (
+    Vec<RtStep>,
+    Option<(usize, PyErr, Bound<'py, PyArray1<molar>>)>,
+) {
     let n_zones: usize = zones.len();
     // Get plain ndarray views upfront (cheaper than calling `.shape()` /
     // indexing on `PyReadonlyArray2` inside the loop).
@@ -1317,12 +1430,63 @@ pub fn run_zone_steps<'py>(
     // touching the caller's objects.
     let mut owns: Vec<RtForcing> = forcings;
 
-    let mut lat_mass: Array2<molar> = Array2::zeros((n_zones, n_spec));
-    let mut vert_mass: Array2<molar> = Array2::zeros((n_zones, n_spec));
+    // A resumed sweep (`start > 0`) must be seeded with the outgoing mass of the
+    // zones solved before the interruption, so the coupling for the remaining
+    // zones is identical to an uninterrupted sweep.
+    if start > n_zones {
+        return (
+            Vec::new(),
+            Some((
+                0,
+                PyValueError::new_err(format!(
+                    "`start` index {start} exceeds the number of zones {n_zones}"
+                )),
+                Array1::<f64>::zeros(0).to_pyarray(py),
+            )),
+        );
+    }
+    let seed_mass_buffer =
+        |init: &Option<PyReadonlyArray2<f64>>, name: &str| -> PyResult<Array2<molar>> {
+            if start == 0 {
+                return Ok(Array2::zeros((n_zones, n_spec)));
+            }
+            let Some(init) = init else {
+                return Err(PyValueError::new_err(format!(
+                    "{name} is required when resuming a sweep (start > 0)"
+                )));
+            };
+            let init_arr: Array2<f64> = init.as_array().to_owned();
+            if init_arr.shape()[0] != n_zones || init_arr.shape()[1] != n_spec {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must have shape [{n_zones} {n_spec}] but has [{}, {}]",
+                    init_arr.shape()[0],
+                    init_arr.shape()[1]
+                )));
+            }
+            Ok(init_arr)
+        };
+    let mut lat_mass: Array2<molar> = match seed_mass_buffer(&lat_mass_init, "lat_mass_init") {
+        Ok(buf) => buf,
+        Err(e) => {
+            return (
+                Vec::new(),
+                Some((0, e, Array1::<f64>::zeros(0).to_pyarray(py))),
+            );
+        }
+    };
+    let mut vert_mass: Array2<molar> = match seed_mass_buffer(&vert_mass_init, "vert_mass_init") {
+        Ok(buf) => buf,
+        Err(e) => {
+            return (
+                Vec::new(),
+                Some((0, e, Array1::<f64>::zeros(0).to_pyarray(py))),
+            );
+        }
+    };
 
-    let mut out: Vec<RtStep> = Vec::with_capacity(n_zones);
+    let mut out: Vec<RtStep> = Vec::with_capacity(n_zones - start);
 
-    for i in 0..n_zones {
+    for i in start..n_zones {
         let d: &mut RtForcing = &mut owns[i];
         let tot_water_in: f64 = d.hydro_step.q_in + d.hydro_step.forc_flux;
 

@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 import numpy as np
 from numpy.typing import NDArray
 from pandas import DataFrame, DatetimeIndex, Series, TimedeltaIndex
+from scipy.optimize import fsolve
 
 from potions.objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from potions.reactive_transport.kinetic_structures import PARAMETERS_PER_MINERAL
@@ -40,6 +41,117 @@ from .core import (
 )
 from .hydro_model import SIM_Q_NAME, HydrologicalModel
 from .result_saving import is_save_enabled, save_rt_run
+
+# A successful fsolve backup must drive the step residual at least this far
+# down before the backed-up solution is accepted (in absolute terms); results
+# above this are accepted with a printed warning instead of silently used.
+FSOLVE_BACKUP_RESIDUAL_MAX: float = 1e-3
+# Results in the band (this, FSOLVE_BACKUP_RESIDUAL_MAX] are accepted but
+# warned about, since the solver stalled short of its own tolerance.
+FSOLVE_BACKUP_RESIDUAL_WARN: float = 1e-6
+
+
+def _fsolve_backup_step(
+    zone: RtZone,
+    s_i: NDArray[np.float64],
+    d_i: RtForcing,
+    dt_days: float,
+    err: OptimizationError,
+    step_index: int,
+    verbose: bool,
+) -> RtStep | None:
+    """Rescue a failed zone step with a ``scipy.optimize.fsolve`` re-solve.
+
+    The internal Rust Newton / LM chain has already failed for this zone.
+    This re-solves *only the aqueous block* of the step residual — the same
+    system the Rust solver was driving, with the mineral (non-aqueous)
+    entries frozen at their initial values — using
+    ``scipy.optimize.fsolve``, a damped least-squares solver with a
+    different convergence strategy, and finalizes the step through
+    ``RtZone.step_with_solution``, the exact same post-solve path as a
+    normal step.
+
+    The residual is the first ``n_aq`` entries of
+    ``zone.residual_function(c_0, x_full, d_i, dt_days)`` with
+    ``x_full = [x_aq, c_0[n_aq:]]``, mirroring the fused residual the Rust
+    kinetic solve minimizes.
+
+    Warm-start candidates, in order of preference: the iterate with the best
+    residual the failed solver reached (``err.best_x``), when finite and
+    dimensioned, then the initial aqueous concentrations ``c_0[:n_aq]``.
+
+    Args:
+        zone:
+            The ``RtZone`` whose step failed.
+        s_i:
+            The full state vector the failed solve started from.
+        d_i:
+            The forcing the zone was about to step with, including the
+            computed incoming concentration.
+        dt_days:
+            Time-step length in days.
+        err:
+            The typed ``OptimizationError`` raised by the failed solve.
+        step_index:
+            The model time-step index, for log messages only.
+        verbose:
+            When true, print each warm-start attempt and the residual it
+            achieved.
+
+    Returns:
+        The finalized ``RtStep`` when fsolve converged to a residual norm of
+        at most ``FSOLVE_BACKUP_RESIDUAL_MAX``, otherwise ``None``.
+    """
+    n_aq: int = zone.network.num_aqueous_species
+    n_spec: int = zone.network.num_species
+    c_0: NDArray[np.float64] = np.asarray(s_i, dtype=np.float64)
+    if c_0.shape[0] != n_spec or len(err.last_x) != n_aq:
+        # Not the aqueous kinetic block that failed (e.g. a speciation solve,
+        # or a state that does not match the network): there is no meaningful
+        # fsolve re-solve for it.
+        return None
+
+    # The fused residual the Rust Newton / LM solver minimizes: the full
+    # step residual with the mineral entries frozen at their initial values,
+    # keeping only the aqueous block.
+    frozen_tail: NDArray[np.float64] = c_0[n_aq:]
+
+    def _residual(x_aq: NDArray[np.float64]) -> NDArray[np.float64]:
+        x_full: NDArray[np.float64] = np.concatenate([x_aq, frozen_tail])
+        return zone.residual_function(c_0, x_full, d_i, dt_days)[:n_aq]
+
+    # Warm-start candidates, in order of preference.
+    candidates: list[NDArray[np.float64]] = []
+    best_x: NDArray[np.float64] = np.asarray(err.best_x, dtype=np.float64)
+    if best_x.shape[0] == n_aq and np.all(np.isfinite(best_x)):
+        candidates.append(best_x)
+    x_init: NDArray[np.float64] = c_0[:n_aq]
+    if not any(np.array_equal(x, x_init) for x in candidates):
+        candidates.append(x_init)
+
+    x_sol: NDArray[np.float64] | None = None
+    for x0 in candidates:
+        x_try, info, ier, _ = fsolve(_residual, x0, full_output=True)
+        f_max: float = float(np.max(np.abs(info["fvec"])))
+        if ier == 1 and bool(np.all(np.isfinite(x_try))) and f_max <= FSOLVE_BACKUP_RESIDUAL_MAX:
+            x_sol = x_try
+            if verbose or f_max > FSOLVE_BACKUP_RESIDUAL_WARN:
+                print(
+                    f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                    f"converged with max|f|={f_max:.3e}"
+                )
+            break
+        if verbose:
+            print(
+                f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                f"warm start {x0} did not converge (ier={ier}, max|f|={f_max:.3e})"
+            )
+
+    if x_sol is None:
+        return None
+
+    x_full_sol: NDArray[np.float64] = np.concatenate([x_sol, frozen_tail])
+    return zone.step_with_solution(c_0, x_full_sol, d_i, dt_days, verbose)
 
 
 class ReactiveTransportModel(HydrologicalModel):
@@ -440,24 +552,52 @@ class ReactiveTransportModel(HydrologicalModel):
 
         # Run the entire per-zone sweep (Gauss-Seidel coupling of each zone's
         # incoming concentration from the upstream zones already solved this
-        # step) in a single pure-Rust call. This replaces a Python loop that
-        # made one `zone.step(...)` call per zone, so the per-step overhead
-        # (Python dispatch + per-zone array copies + GIL round-trips) is gone.
+        # step) in a pure-Rust call, resuming it whenever a zone's Newton /
+        # LM kinetic solve fails: the failed zone's aqueous block is re-solved
+        # with `scipy.optimize.fsolve` (see `_fsolve_backup_step`), the
+        # rescued step is finalized through the normal post-solve path, and
+        # the sweep is resumed from the next zone. Each resumed call seeds its
+        # mass-coupling buffers with the outgoing mass of the zones solved so
+        # far, so every downstream zone sees exactly the incoming
+        # concentrations an uninterrupted sweep would have produced. The run
+        # stops only if the backup also fails (or the failure is not a
+        # kinetic one).
         #
-        # Returns `(steps, failure)` where `failure` is `None` on success or a
-        # `(zone_index, exception, conc_in)` triple on a per-zone solver failure.
-        steps, failure = run_zone_steps(
-            zones,
-            np.asarray(state, dtype=np.float64),
-            ds_list,
-            np.asarray(self.lat_mat, dtype=np.float64),
-            np.asarray(self.vert_mat, dtype=np.float64),
-            list(self.surface_zone_ids),
-            dt_days,
-            verbose=verbose,
+        # Each `run_zone_steps` call returns `(steps, failure)` where
+        # `failure` is `None` on success or a `(zone_index, exception,
+        # conc_in)` triple for the zone that failed; `steps` holds the
+        # successfully solved zones of the current chunk (zone `start` up to
+        # but not including the failing one), and `all_steps` accumulates the
+        # full zone-ordered result list returned to the caller.
+        n_species: int = state.shape[1]
+        all_steps: list[RtStep] = []
+        lat_mass_solved: NDArray[np.float64] = np.zeros(
+            (num_zones, n_species), dtype=np.float64
         )
+        vert_mass_solved: NDArray[np.float64] = np.zeros(
+            (num_zones, n_species), dtype=np.float64
+        )
+        start: int = 0
 
-        if failure is not None:
+        while start < num_zones:
+            steps, failure = run_zone_steps(
+                zones,
+                np.asarray(state, dtype=np.float64),
+                ds_list,
+                np.asarray(self.lat_mat, dtype=np.float64),
+                np.asarray(self.vert_mat, dtype=np.float64),
+                list(self.surface_zone_ids),
+                dt_days,
+                verbose=verbose,
+                start=start,
+                lat_mass_init=lat_mass_solved if start > 0 else None,
+                vert_mass_init=vert_mass_solved if start > 0 else None,
+            )
+            all_steps.extend(steps)
+
+            if failure is None:
+                break
+
             i: int = failure[0]
             e: Exception = failure[1]
             # Reconstruct the failing forcing exactly as the Python loop built
@@ -467,6 +607,51 @@ class ReactiveTransportModel(HydrologicalModel):
             d_i.conc_in = np.asarray(failure[2], dtype=np.float64)  # type: ignore
             s_i: NDArray = np.asarray(state[i], dtype=np.float64).copy()
             zone: RtZone = zones[i]
+
+            # Only a *kinetic* solve failure (the failed vector is the
+            # aqueous block) can be re-solved with fsolve; speciation and
+            # other failures propagate as before.
+            backup_attempted: bool = False
+            rescued: RtStep | None = None
+            if isinstance(e, OptimizationError):
+                backup_attempted = (
+                    len(e.last_x) == zone.network.num_aqueous_species
+                )
+                if backup_attempted:
+                    rescued = _fsolve_backup_step(
+                        zone, s_i, d_i, dt_days, e, step_index, verbose
+                    )
+
+            if rescued is not None:
+                # The internal Newton / LM chain stalled but the fsolve backup
+                # produced an acceptable step: use it and continue the run.
+                print(
+                    f"WARNING: Newton/LM kinetic solve failed on zone {i} "
+                    f"('{zone.name}') step {step_index} ({e}); the fsolve "
+                    f"backup solution is used instead and the run continues."
+                )
+                all_steps.append(rescued)
+                # Seed the coupling buffers with the outgoing mass of every
+                # zone solved so far (the steps returned by the failed call
+                # plus the rescued zone) so the resumed sweep matches an
+                # uninterrupted one.
+                for j, st in enumerate(steps):
+                    lat_mass_solved[start + j] = np.asarray(
+                        st.lat_mass, dtype=np.float64
+                    )
+                    vert_mass_solved[start + j] = np.asarray(
+                        st.vert_mass, dtype=np.float64
+                    )
+                lat_mass_solved[i] = np.asarray(rescued.lat_mass, dtype=np.float64)
+                vert_mass_solved[i] = np.asarray(rescued.vert_mass, dtype=np.float64)
+                start = i + 1
+                continue
+
+            if backup_attempted:
+                print(
+                    f"WARNING: the fsolve backup also failed to converge for "
+                    f"zone {i} ('{zone.name}') step {step_index}; the run stops."
+                )
 
             if isinstance(e, OptimizationError):
                 # A solver (Newton / Levenberg-Marquardt) failure: the Rust
@@ -506,7 +691,7 @@ class ReactiveTransportModel(HydrologicalModel):
 
         if verbose:
             step: RtStep
-            for i, (zone, step) in enumerate(zip(zones, steps)):
+            for i, (zone, step) in enumerate(zip(zones, all_steps)):
                 print(f"Incoming concentration to zone {i}: {step.conc_in}")
                 print(f"Lateral mass transfer outwards: {step.lat_mass}")
                 print(f"Vertical mass transfer outwards: {step.vert_mass}")
@@ -518,7 +703,7 @@ class ReactiveTransportModel(HydrologicalModel):
                 print("\n\n")
             print("=" * 25 + "\n")
 
-        return steps
+        return all_steps
 
     def run_rt_model(
         self,
@@ -774,8 +959,11 @@ class ReactiveTransportModel(HydrologicalModel):
         # Quantify the river concentrations
         river_zone_ids = self.get_river_zone_ids()
         river_zone_names: list[str] = [self.zone_names[i] for i in river_zone_ids]
+        # Weight each river zone's lateral outflow by its area fraction so the
+        # mixing fractions are consistent with the area-weighted SIM_Q_NAME.
         q_components: dict[str, Series] = {
-            n: hydro_sim_df[f"q_lat_{n}"] for n in river_zone_names
+            n: hydro_sim_df[f"q_lat_{n}"] * float(self.zone_scales[river_zone_ids[k]])
+            for k, n in enumerate(river_zone_names)
         }
         q_sim: Series = hydro_sim_df[SIM_Q_NAME]
         flow_fractions: dict[str, Series] = {

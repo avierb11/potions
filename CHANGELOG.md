@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     (`is_save_enabled`, `resolve_results_dir`, `make_run_dir`,
     `save_hydro_run`, `save_rt_run`, `save_model_run`, `write_batch_info`)
     for saving results from custom entry points.
+- **Area-weighting API on `HydrologicalModel`**: `zone_scales` (per-zone area
+  fractions propagated from the surface `scales`), `lat_mat_scaled` (the
+  area-weighted lateral connectivity matrix used by the hydro step and the
+  outlet), and `vert_mat_scaled` (the area-weighted vertical matrix, which
+  matters when a layer aggregates N zones into one). The plain `lat_mat` and
+  `vert_mat` (0/1 adjacency) are retained for the reactive-transport
+  concentration coupling.
 
 ### Changed
 
@@ -100,6 +107,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The bottom layer of a model **must** consist of bottom zones (e.g.
   `GroundZoneB`). Models whose bottom is now any other zone type (e.g. a
   plain `GroundZone`) raise `ModelStructureError` at construction.
+- **Lateral transfer and outlet discharge are now area-weighted.** Previously
+  only the forcing was scaled by `scales`; inter-zone lateral fluxes and the
+  reported streamflow were unweighted sums of intensive (mm/d) zone fluxes,
+  which let the calibration implicitly absorb zone size. Now:
+  - a lateral edge from donor `d` to receiver `r` carries the area ratio
+    `s_d / s_r` (via the new `lat_mat_scaled`), so runoff from a large
+    hillslope is concentrated onto a smaller riparian footprint;
+  - the outlet is the area-weighted sum of river-zone lateral fluxes
+    (`streamflow_sim`), i.e. a catchment-mean depth (mm/d);
+  - zone fluxes themselves stay intensive (mm/d) — area factors live only on
+    the graph *boundaries*.
+  Multi-zone runs with unequal `scales` will therefore produce different
+  (correct) discharge than before. Single-zone models (`scales=[1.0]`) are
+  numerically unchanged.
+- Partition scales must now be **strictly positive** (previously
+  non-negative): a zero-area zone would make the donor/receiver ratio
+  undefined. `ModelStructureError` is raised for `s <= 0`.
 - `ZoneDimensions` is specified with `max_water` directly (plus
   `passive_water_storage`) instead of `porosity` and `depth`; the derived
   `max_water_volume` property is removed.

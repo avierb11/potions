@@ -475,7 +475,8 @@ impl SurfaceZone {
         // ET loss [mm/d] = pet * min(s/(fc*lp), 1.0); saturation is a Ratio
         // (same-dim division -> `.value` is the raw dimensionless number, M0 test 8).
         let pet = Velocity::new::<millimeter_per_day>(d.pet);
-        let saturation = (Length::new::<millimeter>(s) / Length::new::<millimeter>(self.fc * self.lp)).value;
+        let saturation =
+            (Length::new::<millimeter>(s) / Length::new::<millimeter>(self.fc * self.lp)).value;
         (pet * saturation.min(1.0)).get::<millimeter_per_day>()
     }
 

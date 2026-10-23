@@ -86,7 +86,10 @@ fn vel_mm_per_day() {
     let v2 = Velocity::new::<millimeter_per_day>(1.0);
     let expect = 1.0e-3 / 86400.0;
     let got = v2.get::<meter_per_second>();
-    assert!((got - expect).abs() / expect < 1e-12, "got={got} expect={expect}");
+    assert!(
+        (got - expect).abs() / expect < 1e-12,
+        "got={got} expect={expect}"
+    );
     // .value of a velocity is base m/s:
     let v3 = Velocity::new::<millimeter_per_day>(86400.0); // == 1e-3 m/s
     assert!((v3.value - 1.0e-3).abs() < 1e-15);
@@ -137,7 +140,11 @@ fn conc_volume_amount() {
     // available (Kind mismatch), but `.value` (base mol/m^3) works — extract / 1000.
     let n2 = AmountOfSubstance::new::<mole>(30.0);
     let c2 = n2 / vol;
-    assert!((c2.value - 2000.0).abs() / 2000.0 < 1e-12, "val={}", c2.value);
+    assert!(
+        (c2.value - 2000.0).abs() / 2000.0 < 1e-12,
+        "val={}",
+        c2.value
+    );
     let mol_per_l = c2.value / 1000.0;
     assert!((mol_per_l - 2.0).abs() < 1e-12);
     // .value of an amount is base moles:
@@ -152,7 +159,10 @@ fn vel_over_len() {
     let v = Length::new::<millimeter>(10.0);
     let r = q / v; // 10 per day
     let base = r.value; // s^-1
-    assert!((base - 10.0 / 86400.0).abs() / (10.0 / 86400.0) < 1e-12, "base={base}");
+    assert!(
+        (base - 10.0 / 86400.0).abs() / (10.0 / 86400.0) < 1e-12,
+        "base={base}"
+    );
     let per_day = base * 86400.0;
     assert!((per_day - 10.0).abs() < 1e-12);
 }

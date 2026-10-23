@@ -20,7 +20,7 @@ use crate::{
         reaction_network::ReactionNetwork,
         rt_zone::{kinetic_residual_and_jacobian_impl, SpeciationCache},
     },
-    units::{AmountOfSubstance, MolarConcentration, Volume, liter, mole, mole_per_liter},
+    units::{liter, mole, mole_per_liter, AmountOfSubstance, MolarConcentration, Volume},
 };
 
 #[pyclass(from_py_object)]
@@ -261,6 +261,18 @@ impl RiverZone {
             misc: misc,
             last_x_free: SpeciationCache::default(),
         })
+    }
+
+    /// Show the zone name, the reaction / speciation flags, and the size of
+    /// the reaction network this zone integrates.
+    pub fn __repr__(&self) -> String {
+        format!(
+            "RiverZone(name='{}',do_reactions={},do_speciation={},num_species={})",
+            self.name,
+            if self.do_reactions { "True" } else { "False" },
+            if self.do_speciation { "True" } else { "False" },
+            self.network.num_species()
+        )
     }
 
     pub fn mass_balance_ode<'py>(

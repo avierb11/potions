@@ -9,13 +9,17 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{
-        approx_fprime, find_root_multi_analytic_then_lm, null_space_scipy, pinv_scipy,
-    },
+    math::{approx_fprime, find_root_multi_analytic_then_lm, null_space_scipy, pinv_scipy},
     molar, molar_per_time,
-    units::{MolarConcentration, mole_per_liter},
+    units::{mole_per_liter, MolarConcentration},
 };
 const PARAMETERS_PER_MINERAL: usize = 4;
+
+/// Floor (mol/L) applied before `log10` in the TST activity expressions.
+/// Root finders (Newton, LM, fsolve) can probe trial states with zero or
+/// negative concentrations; clamping keeps each log-contribution large but
+/// finite instead of NaN, which the solvers' sufficiency checks would reject.
+const LOG10_CONC_FLOOR: f64 = 1e-300;
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -101,6 +105,16 @@ impl MonodParameters {
         })
     }
 
+    /// Compact summary reporting the shape of the Monod (and inhibition)
+    /// matrices: one row per mineral, one column per species.
+    pub fn __repr__(&self) -> String {
+        let shape = self.monod_np.shape();
+        format!(
+            "MonodParameters(num_minerals={},num_species={})",
+            shape[0], shape[1]
+        )
+    }
+
     pub fn rate<'py>(
         &self,
         py: Python<'py>,
@@ -147,8 +161,11 @@ impl TstParameters {
         chms: &Array1<molar>,
     ) -> (Array1<molar_per_time>, Array1<f64>) {
         // log10 / 10^x over the log-linear activity exponents — outside uom's
-        // scope (no log/exp in 0.38), so kept raw f64.
-        let log_conc: Array1<f64> = chms.map(|x| x.log10());
+        // scope (no log/exp in 0.38), so kept raw f64.  Concentrations are
+        // clamped to `LOG10_CONC_FLOOR` first: a zero or negative trial value
+        // (transient during a root find) yields a large but finite
+        // contribution instead of NaN.
+        let log_conc: Array1<f64> = chms.map(|x| x.max(LOG10_CONC_FLOOR).log10());
         let e: Array1<f64> = Self::matvec(&self.stoich_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
         (q, e)
@@ -159,7 +176,9 @@ impl TstParameters {
     pub fn calculate_dependence_term(&self, chms: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
         // log10 / 10^x over the log-linear activity exponents (forward-rate
         // dependence) — outside uom's scope (no log/exp), so kept raw f64.
-        let log_conc: Array1<f64> = chms.map(|x| x.log10());
+        // Concentrations are clamped to `LOG10_CONC_FLOOR` first (see
+        // `calculate_solubility_product`).
+        let log_conc: Array1<f64> = chms.map(|x| x.max(LOG10_CONC_FLOOR).log10());
         let e: Array1<f64> = Self::matvec(&self.dep_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
         (q, e)
@@ -238,6 +257,16 @@ impl TstParameters {
             dep_np: dep_arr,
             min_eq_const_np: eq_const_arr,
         })
+    }
+
+    /// Compact summary reporting the shape of the stoichiometry (and
+    /// dependence) matrices: one row per TST mineral, one column per species.
+    pub fn __repr__(&self) -> String {
+        let shape = self.stoich_np.shape();
+        format!(
+            "TstParameters(num_minerals={},num_species={})",
+            shape[0], shape[1]
+        )
     }
 
     pub fn rate<'py>(
@@ -466,6 +495,19 @@ impl EquilibriumParameters {
         })
     }
 
+    /// Compact summary reporting the speciation system dimensions: the number
+    /// of species (columns of the conservation matrix), the number of
+    /// conserved quantities (rows, including charge balance), and the number
+    /// of free (independent) log-concentration variables.
+    pub fn __repr__(&self) -> String {
+        let total = self.total_mat.shape();
+        let null_space = self.stoich_null_space.shape();
+        format!(
+            "EquilibriumParameters(num_species={},num_total={},num_free={})",
+            total[1], total[0], null_space[1]
+        )
+    }
+
     #[pyo3(signature = (chms, verbose=false, x0=None))]
     pub fn solve_equilibrium<'py>(
         &self,
@@ -591,6 +633,13 @@ impl MineralAuxParams {
             q_10,
             reactivity,
         }
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MineralAuxParams(sw_threshold={},sw_exp={},q_10={},reactivity={})",
+            self.sw_threshold, self.sw_exp, self.q_10, self.reactivity
+        )
     }
 
     pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
@@ -760,6 +809,15 @@ impl MineralParameters {
         }
     }
 
+    /// Compact summary reporting how many minerals these per-mineral
+    /// parameter arrays describe.
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MineralParameters(num_minerals={})",
+            self.sw_threshold.len()
+        )
+    }
+
     pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         let num_minerals = self.sw_threshold.len();
         let mut arr: Array1<f64> = Array1::zeros(PARAMETERS_PER_MINERAL * num_minerals);
@@ -905,6 +963,20 @@ impl RtParameters {
         }
     }
 
+    /// Nest the zone-dimensions repr and a compact summary of the (optional)
+    /// mineral parameters.
+    pub fn __repr__(&self) -> String {
+        let mineral_summary: String = match &self.mineral_params {
+            Some(v) => format!("MineralParameters(num_minerals={})", v.sw_threshold.len()),
+            None => "None".to_owned(),
+        };
+        format!(
+            "RtParameters(dimensions={},mineral_params={})",
+            self.dimensions.__repr__(),
+            mineral_summary
+        )
+    }
+
     pub fn to_array<'py>(
         &self,
         py: Python<'py>,
@@ -988,6 +1060,13 @@ impl RiverDimensions {
         2
     }
 
+    pub fn __repr__(&self) -> String {
+        format!(
+            "RiverDimensions(bed_depth={},passive_water_storage={})",
+            self.bed_depth, self.passive_water_storage
+        )
+    }
+
     pub fn to_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray::from_vec(py, vec![self.bed_depth, self.passive_water_storage])
     }
@@ -1025,6 +1104,20 @@ impl RiverParameters {
             dimensions,
             mineral_params,
         }
+    }
+
+    /// Nest the river-dimensions repr and a compact summary of the (optional)
+    /// mineral parameters.
+    pub fn __repr__(&self) -> String {
+        let mineral_summary: String = match &self.mineral_params {
+            Some(v) => format!("MineralParameters(num_minerals={})", v.sw_threshold.len()),
+            None => "None".to_owned(),
+        };
+        format!(
+            "RiverParameters(dimensions={},mineral_params={})",
+            self.dimensions.__repr__(),
+            mineral_summary
+        )
     }
 
     pub fn to_array<'py>(

@@ -425,6 +425,24 @@ impl RtStep {
         }
     }
 
+    /// Print all nine result arrays of this step. The arrays are owned by
+    /// Python (`Py` wrappers), so a GIL token is required to read them.
+    pub fn __repr__(&self, py: Python) -> String {
+        let array_text = |a: &Py<PyArray1<f64>>| a.bind(py).to_owned_array().to_string();
+        format!(
+            "RtStep(state={},total_moles={},conc_in={},mass_in={},lat_conc={},vert_conc={},lat_mass={},vert_mass={},mineral_rates={})",
+            array_text(&self.state),
+            array_text(&self.total_moles),
+            array_text(&self.conc_in),
+            array_text(&self.mass_in),
+            array_text(&self.lat_conc),
+            array_text(&self.vert_conc),
+            array_text(&self.lat_mass),
+            array_text(&self.vert_mass),
+            array_text(&self.mineral_rates)
+        )
+    }
+
     pub fn __getstate__(
         &self,
         py: Python<'_>,
@@ -531,6 +549,19 @@ impl MiscData {
             mineral_molar_mass: mineral_molar_mass.to_owned_array(),
             rate_const: rate_const.to_owned_array(),
         }
+    }
+
+    /// Compact summary reporting the shape of the mineral stoichiometry
+    /// matrix (one row per species, one column per mineral) and the number of
+    /// species in the mobility / molar-mass / rate-constant arrays.
+    pub fn __repr__(&self) -> String {
+        let stoich_shape = self.mineral_stoichiometry.shape();
+        format!(
+            "MiscData(mineral_stoichiometry={}x{},num_species={})",
+            stoich_shape[0],
+            stoich_shape[1],
+            self.species_mobility.len()
+        )
     }
 
     pub fn get_mineral_stoichiometry<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {

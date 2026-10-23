@@ -145,6 +145,14 @@ pub struct OptimizationError {
     pub jacobians: Vec<Vec<Vec<f64>>>,
     #[pyo3(get)]
     pub lambdas: Vec<f64>,
+    /// The iterate with the smallest residual the solver ever reached — the
+    /// natural warm start for a backup solve (e.g. `scipy.optimize.fsolve` in
+    /// `ReactiveTransportModel.step_rt_model`).
+    #[pyo3(get)]
+    pub best_x: Vec<f64>,
+    /// Residual norm (max|f|) at [`OptimizationError::best_x`].
+    #[pyo3(get)]
+    pub best_err: f64,
     #[pyo3(get)]
     pub message: String,
 }
@@ -171,6 +179,8 @@ impl OptimizationError {
             fxs,
             jacobians,
             lambdas: state.lambdas,
+            best_x: state.best_x.to_vec(),
+            best_err: state.best_err,
             message,
         }
     }
@@ -179,6 +189,7 @@ impl OptimizationError {
 #[pymethods]
 impl OptimizationError {
     #[new]
+    #[pyo3(signature = (iterations, final_err, errors, last_x, last_f_x, initial_x, jacobian, xs, fxs, jacobians, lambdas, best_x, best_err, message))]
     pub fn new(
         iterations: usize,
         final_err: f64,
@@ -191,6 +202,8 @@ impl OptimizationError {
         fxs: Vec<Vec<f64>>,
         jacobians: Vec<Vec<Vec<f64>>>,
         lambdas: Vec<f64>,
+        best_x: Vec<f64>,
+        best_err: f64,
         message: String,
     ) -> Self {
         Self {
@@ -205,6 +218,8 @@ impl OptimizationError {
             fxs,
             jacobians,
             lambdas,
+            best_x,
+            best_err,
             message,
         }
     }
@@ -231,6 +246,11 @@ pub struct OptimizerState {
     pub fxs: Vec<Array1<f64>>,
     pub jacobians: Vec<Array2<f64>>,
     pub lambdas: Vec<f64>,
+    /// The iterate with the smallest residual the solver ever reached, and
+    /// that residual (max|f|). Used to warm-start a backup solve and to
+    /// report how close the stalled run got.
+    pub best_x: Array1<f64>,
+    pub best_err: f64,
 }
 
 #[pyclass(extends=PyException)]
@@ -267,7 +287,11 @@ fn describe_vector(v: &Array1<f64>) -> String {
             max = ae;
         }
     }
-    let mean = if v.len() == 0 { 0.0 } else { sum / v.len() as f64 };
+    let mean = if v.len() == 0 {
+        0.0
+    } else {
+        sum / v.len() as f64
+    };
     let mut s = format!("mean={:.4e} max|.|={:.4e}", mean, max);
     if !nan_idx.is_empty() {
         let shown: String = if nan_idx.len() > 8 {
@@ -300,10 +324,7 @@ fn enrich_state_message(state: &OptimizerState, subsystem: &str, reason: &str) -
         describe_vector(&state.final_x),
         describe_matrix(&state.jacobian)
     );
-    format!(
-        "Levenberg-Marquardt ({}): {} | {}",
-        subsystem, reason, diag
-    )
+    format!("Levenberg-Marquardt ({}): {} | {}", subsystem, reason, diag)
 }
 
 /// Summarize a Jacobian matrix for diagnostics: shape, mean, max `|·|`, the
@@ -334,7 +355,11 @@ fn describe_matrix(m: &Array2<f64>) -> String {
             sum += e;
         }
     }
-    let mean = if n_entries == 0 { 0.0 } else { sum / n_entries as f64 };
+    let mean = if n_entries == 0 {
+        0.0
+    } else {
+        sum / n_entries as f64
+    };
     let mut s = format!(
         "shape=[{}x{}] mean={:.4e} max|.|={:.4e} nan_count={}",
         n, p, mean, maxv, n_nan
@@ -560,6 +585,27 @@ struct MultiFailureParts {
     jacobians: Vec<Array2<f64>>,
 }
 
+/// Convert a populated [`OptimizationError`] into the `PyErr` solvers return,
+/// so Python receives the *typed* exception instance — with every diagnostic
+/// getter (`best_x`, `best_err`, iteration history, Jacobian, ...) — instead
+/// of a bare `Exception` carrying only the message string (which is what
+/// `PyException::new_err(message)` produced before, and what made
+/// `isinstance(e, OptimizationError)` checks in Python silently never match).
+///
+/// The instance is allocated through the class's normal initializer: for an
+/// `extends = PyException` class the `PyException` base is constructed with
+/// empty args (the diagnostics live in this subclass's own fields, surfaced
+/// through `__str__`), and the result is raised via [`PyErr::from_value`].
+/// The (rare) allocation failure falls back to a plain exception carrying the
+/// same message, so a solver failure can never degrade into an internal error.
+fn optimization_error_to_pyerr(err: OptimizationError) -> PyErr {
+    let message = err.message.clone();
+    Python::attach(|py| match Py::new(py, err) {
+        Ok(instance) => PyErr::from_value(instance.bind(py).clone().into_any()),
+        Err(_) => PyException::new_err(message),
+    })
+}
+
 fn make_error_from_parts(parts: MultiFailureParts, reason: String) -> PyErr {
     // Build a message that names the *cause*, the *subsystem*, and the key
     // numerics (residual norm, offending vector, Jacobian) at the failure point,
@@ -590,9 +636,11 @@ fn make_error_from_parts(parts: MultiFailureParts, reason: String) -> PyErr {
         fxs: parts.fxs,
         jacobians: parts.jacobians,
         lambdas: Vec::new(),
+        best_x: parts.best_x,
+        best_err: parts.best_err,
     };
     let opt = OptimizationError::from_state(final_state, message);
-    PyException::new_err(opt.message)
+    optimization_error_to_pyerr(opt)
 }
 
 fn newton_failure(parts: MultiFailureParts) -> PyErr {
@@ -600,21 +648,30 @@ fn newton_failure(parts: MultiFailureParts) -> PyErr {
 }
 
 fn newton_nan_error(parts: MultiFailureParts) -> PyErr {
-    make_error_from_parts(
-        parts,
-        "NaN/Inf encountered in Newton iteration".to_string(),
-    )
+    make_error_from_parts(parts, "NaN/Inf encountered in Newton iteration".to_string())
 }
 
 fn newton_linear_error(parts: MultiFailureParts, e: String) -> PyErr {
-    make_error_from_parts(
-        parts,
-        format!("Newton linear solve failed: {}", e),
-    )
+    make_error_from_parts(parts, format!("Newton linear solve failed: {}", e))
 }
 
+/// Elementwise maximum absolute value, propagating NaN.
+///
+/// Rust's `f64::max` drops NaN operands, so a vector whose entries are
+/// *all* NaN would otherwise read as `0.0` and pass every `err <= tol`
+/// convergence test, letting a solver return a NaN vector as a "converged"
+/// solution. Returning NaN instead keeps all tolerance comparisons false
+/// (NaN compares false) and routes the failure to the explicit non-finite
+/// error path.
 fn max_abs(v: &Array1<f64>) -> f64 {
-    v.iter().map(|a| a.abs()).fold(0.0f64, f64::max)
+    let mut m: f64 = 0.0;
+    for a in v.iter() {
+        if a.is_nan() {
+            return f64::NAN;
+        }
+        m = m.max(a.abs());
+    }
+    m
 }
 
 /// Armijo sufficient-decrease test (in squared-residual-norm units) for a trial
@@ -1188,11 +1245,7 @@ where
     })
 }
 
-pub fn levenberg_marquardt<'a, F>(
-    f: &F,
-    x_0: Array1<f64>,
-    verbose: bool,
-) -> PyResult<Array1<f64>>
+pub fn levenberg_marquardt<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyResult<Array1<f64>>
 where
     F: Fn(&Array1<f64>) -> Array1<f64>,
 {
@@ -1269,13 +1322,19 @@ where
                 fxs,
                 jacobians,
                 lambdas,
+                best_x: best_x.clone(),
+                best_err,
             };
 
             let err = OptimizationError::from_state(
                 final_state.clone(),
-                enrich_state_message(&final_state, "reactive-transport", "NaN/Inf encountered in iteration"),
+                enrich_state_message(
+                    &final_state,
+                    "reactive-transport",
+                    "NaN/Inf encountered in iteration",
+                ),
             );
-            return Err(PyException::new_err(err.message));
+            return Err(optimization_error_to_pyerr(err));
         }
 
         let jac_x_t = jac_x.t();
@@ -1304,6 +1363,8 @@ where
                     fxs,
                     jacobians,
                     lambdas,
+                    best_x: best_x.clone(),
+                    best_err,
                 };
                 let opt_err = OptimizationError::from_state(
                     final_state.clone(),
@@ -1313,7 +1374,7 @@ where
                         &format!("linear solve failed: {}", e),
                     ),
                 );
-                return Err(PyException::new_err(opt_err.message));
+                return Err(optimization_error_to_pyerr(opt_err));
             }
         };
 
@@ -1401,13 +1462,15 @@ where
         fxs,
         jacobians,
         lambdas,
+        best_x: best_x.clone(),
+        best_err,
     };
 
     let err = OptimizationError::from_state(
         final_state.clone(),
         enrich_state_message(&final_state, "reactive-transport", "did not converge"),
     );
-    Err(PyException::new_err(err.message))
+    Err(optimization_error_to_pyerr(err))
 }
 
 pub fn matmul(a: &Array2<f64>, x: &Array1<f64>) -> Result<Array1<f64>, MatMulError> {

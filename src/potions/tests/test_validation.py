@@ -161,8 +161,15 @@ def test_nan_zone_parameter_raises() -> None:
 
 @pytest.mark.parametrize("scales", [[-0.25], [float("nan")]])
 def test_invalid_scales_raise(scales: list[float]) -> None:
-    with pytest.raises(ModelStructureError, match="finite and non-negative"):
+    with pytest.raises(ModelStructureError, match="strictly positive"):
         ValidModel(scales=scales)
+
+
+def test_zero_scale_raises() -> None:
+    # Every zone must occupy a non-zero area so the area-weighted lateral
+    # transfer (donor/receiver ratio) is well defined.
+    with pytest.raises(ModelStructureError, match="strictly positive"):
+        TwoSurfaceModel(scales=[0.0, 1.0])
 
 
 def test_scales_must_sum_to_one() -> None:

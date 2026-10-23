@@ -4,6 +4,27 @@ import polars as pl
 import numpy as np
 
 class OptimizationError(Exception):
+    # Positional-only: CPython never forwards keyword arguments to the
+    # ``__new__`` of an exception class, so only positional construction
+    # (or a direct ``__new__`` call) is possible.
+    def __init__(
+        self,
+        iterations: int,
+        final_err: float,
+        errors: list[float],
+        last_x: list[float],
+        last_f_x: list[float],
+        initial_x: list[float],
+        jacobian: list[list[float]],
+        xs: list[list[float]],
+        fxs: list[list[float]],
+        jacobians: list[list[list[float]]],
+        lambdas: list[float],
+        best_x: list[float],
+        best_err: float,
+        message: str,
+        /,
+    ) -> None: ...
     @property
     def iterations(self) -> int: ...
     @property
@@ -24,6 +45,12 @@ class OptimizationError(Exception):
     def fxs(self) -> list[list[float]]: ...
     @property
     def jacobians(self) -> list[list[list[float]]]: ...
+    @property
+    def lambdas(self) -> list[float]: ...
+    @property
+    def best_x(self) -> list[float]: ...
+    @property
+    def best_err(self) -> float: ...
     @property
     def message(self) -> str: ...
 
@@ -265,6 +292,14 @@ class RtZone:
     def step(
         self, c_0: np.ndarray, d: RtForcing, dt_days: float, verbose: bool = False
     ) -> RtStep: ...
+    def step_with_solution(
+        self,
+        c_0: np.ndarray,
+        c_after_rt: np.ndarray,
+        d: RtForcing,
+        dt_days: float,
+        verbose: bool = False,
+    ) -> RtStep: ...
     @property
     def all_species(self) -> list[str]: ...
     @property
@@ -505,6 +540,13 @@ class ChemicalDatabase:
     def get_exchange_reactions(
         self, species_names: list[str]
     ) -> list[ExchangeReaction]: ...
+    def get_primary_aqueous_species_names(self) -> list[str]: ...
+    def get_secondary_species_names(self) -> list[str]: ...
+    def get_mineral_species_names(self) -> list[str]: ...
+    def get_exchange_species_names(self) -> list[str]: ...
+    def get_tst_mineral_names(self) -> list[str]: ...
+    def get_monod_mineral_names(self) -> list[str]: ...
+    def summary(self) -> str: ...
 
 # ==== Exceptions ==== #
 class ScalarRootFindingError(Exception):
@@ -532,6 +574,9 @@ def run_zone_steps(
     surface_zone_ids: list[int],
     dt: float,
     verbose: bool = False,
+    start: int = 0,
+    lat_mass_init: Optional[np.ndarray] = None,
+    vert_mass_init: Optional[np.ndarray] = None,
 ) -> tuple[
     list[RtStep], Optional[tuple[int, Exception, np.ndarray]]
 ]: ...
