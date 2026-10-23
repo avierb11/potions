@@ -43,12 +43,10 @@ from .hydro_model import SIM_Q_NAME, HydrologicalModel
 from .result_saving import is_save_enabled, save_rt_run
 
 # A successful fsolve backup must drive the step residual at least this far
-# down before the backed-up solution is accepted (in absolute terms); results
-# above this are accepted with a printed warning instead of silently used.
+# down before the backed-up solution is accepted (in absolute terms); a
+# backup that stalls above this is rejected and the run fails with the
+# original solver error.
 FSOLVE_BACKUP_RESIDUAL_MAX: float = 1e-3
-# Results in the band (this, FSOLVE_BACKUP_RESIDUAL_MAX] are accepted but
-# warned about, since the solver stalled short of its own tolerance.
-FSOLVE_BACKUP_RESIDUAL_WARN: float = 1e-6
 
 
 def _fsolve_backup_step(
@@ -135,7 +133,7 @@ def _fsolve_backup_step(
         f_max: float = float(np.max(np.abs(info["fvec"])))
         if ier == 1 and bool(np.all(np.isfinite(x_try))) and f_max <= FSOLVE_BACKUP_RESIDUAL_MAX:
             x_sol = x_try
-            if verbose or f_max > FSOLVE_BACKUP_RESIDUAL_WARN:
+            if verbose:
                 print(
                     f"  fsolve backup (zone '{zone.name}', step {step_index}): "
                     f"converged with max|f|={f_max:.3e}"
@@ -624,12 +622,16 @@ class ReactiveTransportModel(HydrologicalModel):
 
             if rescued is not None:
                 # The internal Newton / LM chain stalled but the fsolve backup
-                # produced an acceptable step: use it and continue the run.
-                print(
-                    f"WARNING: Newton/LM kinetic solve failed on zone {i} "
-                    f"('{zone.name}') step {step_index} ({e}); the fsolve "
-                    f"backup solution is used instead and the run continues."
-                )
+                # produced an acceptable step: use it and continue the run. A
+                # rescued step is normal operation, not a failure, so it is
+                # reported only in verbose runs; the user is notified (with a
+                # warning) only when every solver fails and the run stops.
+                if verbose:
+                    print(
+                        f"Newton/LM kinetic solve failed on zone {i} "
+                        f"('{zone.name}') step {step_index} ({e}); the fsolve "
+                        f"backup solution is used instead and the run continues."
+                    )
                 all_steps.append(rescued)
                 # Seed the coupling buffers with the outgoing mass of every
                 # zone solved so far (the steps returned by the failed call
