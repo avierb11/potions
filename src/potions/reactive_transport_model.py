@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import traceback
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,12 +23,14 @@ from potions.utils import DO_LOGGING, ModelInputError, RtNumericalError
 
 from .common_types import (
     ChemicalState,
+    DerivedSpecies,
     ForcingData,
     HydroModelResults,
     RtModelResults,
     RtZoneConfiguration,
 )
 from .core import (
+    EquilibriumParameters,
     HydrologicZone,
     OptimizationError,
     ReactionNetwork,
@@ -47,6 +49,95 @@ from .result_saving import is_save_enabled, save_rt_run
 # backup that stalls above this is rejected and the run fails with the
 # original solver error.
 FSOLVE_BACKUP_RESIDUAL_MAX: float = 1e-3
+
+# A successful fsolve backup of the *speciation* re-equilibration must drive
+# the speciation residual at least this far down (in absolute terms — the
+# same 1e-6 bar the internal Newton / LM solve uses) *and* land on a
+# physically valid plateau; a backup that stalls above this or converges to
+# an invalid state is rejected and the run fails with the original solver
+# error.
+SPECIATION_BACKUP_RESIDUAL_MAX: float = 1e-6
+
+# Common shape of the two fsolve backup entry points: a failed-zone step
+# (zone, start state, forcing, step length, typed solver error, step index,
+# verbosity) mapped to the rescued step, or ``None`` when the backup cannot
+# converge to an acceptable solution.
+FsolveBackup = Callable[
+    [
+        RtZone,
+        NDArray[np.float64],
+        RtForcing,
+        float,
+        OptimizationError,
+        int,
+        bool,
+    ],
+    RtStep | None,
+]
+
+
+def _validate_derived_species(
+    derived_species: Sequence[DerivedSpecies],
+    network: ReactionNetwork,
+) -> dict[str, tuple[str, ...]]:
+    """Validate and index the declared derived measurements.
+
+    A derived measurement is a measured quantity that is not a species of
+    the reaction network, but is defined as the sum of the river
+    concentrations of several network species (for example DIC, the sum of
+    the aqueous carbonate species).  Every component must be an aqueous
+    (primary or secondary) species of the network, and the derived name
+    must not collide with a network species or with another derived
+    measurement.
+
+    Args:
+        derived_species: The declared derived measurements.
+        network: The reaction network the components are drawn from.
+
+    Returns:
+        A mapping from each derived name to its component species names.
+
+    Raises:
+        ValueError: If a derived name collides with a network species or
+            with another derived name, declares no components, or names a
+            component that is not an aqueous species of the network.
+    """
+    species_names: set[str] = set(network.species_names)
+    species_types: dict[str, str] = network.species_types
+    derived: dict[str, tuple[str, ...]] = {}
+
+    for measurement in derived_species:
+        if measurement.name in species_names:
+            raise ValueError(
+                f"Derived measurement {measurement.name!r} is already a species "
+                "of the reaction network; a derived measurement must not share "
+                "its name with a network species"
+            )
+        if measurement.name in derived:
+            raise ValueError(
+                f"Derived measurement {measurement.name!r} is declared more than once"
+            )
+        if not measurement.components:
+            raise ValueError(
+                f"Derived measurement {measurement.name!r} has no component species"
+            )
+        for component in measurement.components:
+            if component not in species_names:
+                raise ValueError(
+                    f"Derived measurement {measurement.name!r} names component "
+                    f"{component!r}, which is not a species of the reaction "
+                    f"network. Network species: {network.species_names}"
+                )
+            if species_types[component] not in ("primary", "secondary"):
+                raise ValueError(
+                    f"Derived measurement {measurement.name!r} names component "
+                    f"{component!r}, which is a {species_types[component]!r} "
+                    "species; derived-measurement components must be aqueous "
+                    "(primary or secondary) species"
+                )
+        derived[measurement.name] = tuple(measurement.components)
+
+    return derived
 
 
 def _fsolve_backup_step(
@@ -74,9 +165,19 @@ def _fsolve_backup_step(
     ``x_full = [x_aq, c_0[n_aq:]]``, mirroring the fused residual the Rust
     kinetic solve minimizes.
 
-    Warm-start candidates, in order of preference: the iterate with the best
-    residual the failed solver reached (``err.best_x``), when finite and
-    dimensioned, then the initial aqueous concentrations ``c_0[:n_aq]``.
+    Candidates, in order of preference: the iterate with the best residual
+    the failed solver reached (``err.best_x``), when finite and dimensioned,
+    then the initial aqueous concentrations ``c_0[:n_aq]``.
+
+    Each candidate is evaluated against the backup bar *before* asking
+    fsolve for a re-solve: the backup's acceptance criterion is a residual
+    norm of at most ``FSOLVE_BACKUP_RESIDUAL_MAX``, so a candidate that
+    already satisfies it is accepted directly and fsolve is only invoked
+    to *reach* the bar. This matters because the warm-start candidate is
+    precisely the failed solver's best iterate — a point the solver itself
+    proved finite and close — while fsolve's ``ier`` status is only about
+    fsolve's own iteration history and can report failure for a point that
+    satisfies the bar.
 
     Args:
         zone:
@@ -97,8 +198,9 @@ def _fsolve_backup_step(
             achieved.
 
     Returns:
-        The finalized ``RtStep`` when fsolve converged to a residual norm of
-        at most ``FSOLVE_BACKUP_RESIDUAL_MAX``, otherwise ``None``.
+        The finalized ``RtStep`` when a candidate (pre-accepted or reached
+        by fsolve) satisfies a residual norm of at most
+        ``FSOLVE_BACKUP_RESIDUAL_MAX``, otherwise ``None``.
     """
     n_aq: int = zone.network.num_aqueous_species
     n_spec: int = zone.network.num_species
@@ -118,9 +220,10 @@ def _fsolve_backup_step(
         x_full: NDArray[np.float64] = np.concatenate([x_aq, frozen_tail])
         return zone.residual_function(c_0, x_full, d_i, dt_days)[:n_aq]
 
-    # Warm-start candidates, in order of preference.
+    # Candidates, in order of preference. The payload may arrive
+    # two-dimensional (a PyO3 vector wrapped as a 1-row array); flatten it.
     candidates: list[NDArray[np.float64]] = []
-    best_x: NDArray[np.float64] = np.asarray(err.best_x, dtype=np.float64)
+    best_x: NDArray[np.float64] = np.asarray(err.best_x, dtype=np.float64).reshape(-1)
     if best_x.shape[0] == n_aq and np.all(np.isfinite(best_x)):
         candidates.append(best_x)
     x_init: NDArray[np.float64] = c_0[:n_aq]
@@ -128,7 +231,21 @@ def _fsolve_backup_step(
         candidates.append(x_init)
 
     x_sol: NDArray[np.float64] | None = None
-    for x0 in candidates:
+    for i, x0 in enumerate(candidates):
+        # Evaluate the candidate's residual before spending an fsolve on
+        # it: if it already sits under the backup bar, it satisfies the
+        # backup's acceptance criterion by itself.
+        f0: NDArray[np.float64] = _residual(x0)
+        f0_max: float = float(np.max(np.abs(f0))) if f0.size else 0.0
+        if bool(np.all(np.isfinite(f0))) and f0_max <= FSOLVE_BACKUP_RESIDUAL_MAX:
+            x_sol = x0
+            if verbose:
+                print(
+                    f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                    f"candidate {i} pre-accepted with max|f|={f0_max:.3e}"
+                )
+            break
+
         x_try, info, ier, _ = fsolve(_residual, x0, full_output=True)
         f_max: float = float(np.max(np.abs(info["fvec"])))
         if ier == 1 and bool(np.all(np.isfinite(x_try))) and f_max <= FSOLVE_BACKUP_RESIDUAL_MAX:
@@ -142,7 +259,7 @@ def _fsolve_backup_step(
         if verbose:
             print(
                 f"  fsolve backup (zone '{zone.name}', step {step_index}): "
-                f"warm start {x0} did not converge (ier={ier}, max|f|={f_max:.3e})"
+                f"candidate {i} did not converge (ier={ier}, max|f|={f_max:.3e})"
             )
 
     if x_sol is None:
@@ -150,6 +267,221 @@ def _fsolve_backup_step(
 
     x_full_sol: NDArray[np.float64] = np.concatenate([x_sol, frozen_tail])
     return zone.step_with_solution(c_0, x_full_sol, d_i, dt_days, verbose)
+
+
+def _speciation_conc_valid(
+    eq: EquilibriumParameters,
+    x_free: NDArray[np.float64],
+) -> bool:
+    """Check whether a speciation free-variable vector is physically valid.
+
+    A free-variable vector is physically valid when the concentrations it
+    implies (``eq.conc_func``, i.e. ``10^(N x_free + b)``) are all finite
+    and strictly positive. This is the same physical-validity gate the
+    internal Rust speciation solve applies to the vector it accepts, and
+    the arbiter the fsolve backup mirrors: a root that satisfies the
+    residual bar on a non-physical plateau (an absurd ``x_free`` magnitude
+    whose concentrations under/overflow) is rejected.
+
+    Args:
+        eq:
+            The zone's equilibrium parameters (the concentration function).
+        x_free:
+            The candidate free-variable vector.
+
+    Returns:
+        True when every implied concentration is finite and positive.
+    """
+    concs: NDArray[np.float64] = eq.conc_func(x_free)
+    return bool(np.all(np.isfinite(concs)) and np.all(concs > 0.0))
+
+
+def _fsolve_backup_speciation(
+    zone: RtZone,
+    s_i: NDArray[np.float64],
+    d_i: RtForcing,
+    dt_days: float,
+    err: OptimizationError,
+    step_index: int,
+    verbose: bool,
+) -> RtStep | None:
+    """Rescue a failed speciation re-equilibration with an ``fsolve`` re-solve.
+
+    The zone's *kinetic* solve succeeded, but its speciation
+    re-equilibration (the free-variable solve that restores chemical
+    equilibrium after the reaction step) failed: its Newton / LM chain
+    stalled above the 1e-6 residual bar, or converged onto a physically
+    invalid plateau. This re-solves the same free-variable system —
+    residual ``c_tot - A g(x_free)`` with the analytic Jacobian — using
+    ``scipy.optimize.fsolve``, a damped least-squares solver with a
+    different convergence strategy, from the failed solver's best iterate,
+    and finalizes the step through ``RtZone.step`` with
+    ``x_free_override``: the accepted vector is re-gated on the same
+    physical-validity check and the zone's warm-start cache is updated,
+    exactly as in a normal step.
+
+    The species totals ``c_tot`` the residual depends on are taken from a
+    deterministic re-run of the (already succeeded) kinetic solve,
+    ``zone.solve_rt_step``.
+
+    Candidates, in order of preference: the iterate with the best residual
+    the failed solver reached (``err.best_x``), then the warm start it
+    actually used (``err.initial_x``), in each case when finite and
+    dimensioned. Each candidate is evaluated against the backup bar
+    *before* asking fsolve for a re-solve: the backup's acceptance
+    criterion is a residual norm of at most
+    ``SPECIATION_BACKUP_RESIDUAL_MAX`` *and* physical validity, so a
+    candidate that already satisfies both is accepted directly and fsolve
+    is only invoked to *reach* the bar. The same criterion decides an
+    fsolve result: the solver's convergence flag ``ier`` is never
+    consulted (hybrd flags a stationary point "xtol too small" even at or
+    under the bar), mirroring the internal solver, whose own acceptance
+    is the residual norm alone at its 1e-6 tolerance.
+
+    Args:
+        zone:
+            The ``RtZone`` whose speciation re-equilibration failed.
+        s_i:
+            The full state vector the step started from.
+        d_i:
+            The forcing the zone stepped with, including the computed
+            incoming concentration.
+        dt_days:
+            Time-step length in days.
+        err:
+            The typed ``OptimizationError`` raised by the failed speciation
+            solve (tagged ``subsystem="speciation"``).
+        step_index:
+            The model time-step index, for log messages only.
+        verbose:
+            When true, print each warm-start attempt and the residual it
+            achieved.
+
+    Returns:
+        The finalized ``RtStep`` when a candidate (pre-accepted or reached
+        by fsolve) satisfies the backup bar and is physically valid,
+        otherwise ``None``.
+
+    Side effect:
+        When no candidate is accepted, a single diagnostic line is printed
+        recording why the final rejection happened (convergence status,
+        residual, physical validity), so a run stopped by the backup is
+        self-describing even in non-verbose mode.
+    """
+    n_free: int = len(err.last_x)
+    if zone.eq.get_stoich_null_space().shape[1] != n_free:
+        # The error payload does not dimension the speciation system (it is
+        # a failure from another subsystem, or a malformed payload): there
+        # is no meaningful fsolve re-solve for it.
+        return None
+
+    # The post-reaction concentrations the speciation solve was asked to
+    # re-equilibrate: a deterministic re-run of the (succeeded) kinetic
+    # solve. The residual depends on their conserved totals only.
+    c_after_rt: NDArray[np.float64] = zone.solve_rt_step(s_i, d_i, dt_days, verbose)
+
+    def _residual(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
+        return zone.eq.speciation_residual(c_after_rt, x_free)
+
+    def _jacobian(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
+        return zone.eq.speciation_jacobian(x_free)
+
+    # Candidates, in order of preference. The payload may arrive
+    # two-dimensional (a PyO3 vector wrapped as a 1-row array); flatten it.
+    candidates: list[NDArray[np.float64]] = []
+    for payload in (err.best_x, err.initial_x):
+        x: NDArray[np.float64] = np.asarray(payload, dtype=np.float64).reshape(-1)
+        if x.shape[0] != n_free or not np.all(np.isfinite(x)):
+            continue
+        if not any(np.array_equal(x, c) for c in candidates):
+            candidates.append(x)
+    if not candidates:
+        return None
+
+    x_sol: NDArray[np.float64] | None = None
+    # Why the last rejected candidate was rejected, reported at the end.
+    # ``None`` validity means the physical-validity gate was never the
+    # deciding check for that candidate (mirroring the acceptance chain's
+    # short-circuit order below).
+    last_reject: tuple[int, float, bool | None] | None = None
+    for i, x0 in enumerate(candidates):
+        # Evaluate the candidate's residual before spending an fsolve on
+        # it: if it already sits under the backup bar and is physically
+        # valid, it satisfies the backup's acceptance criterion by itself.
+        f0: NDArray[np.float64] = _residual(x0)
+        f0_max: float = float(np.max(np.abs(f0))) if f0.size else 0.0
+        if (
+            bool(np.all(np.isfinite(f0)))
+            and f0_max <= SPECIATION_BACKUP_RESIDUAL_MAX
+            and _speciation_conc_valid(zone.eq, x0)
+        ):
+            x_sol = x0
+            if verbose:
+                print(
+                    f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                    f"candidate {i} pre-accepted with max|f|={f0_max:.3e}"
+                )
+            break
+
+        x_try, info, ier, _ = fsolve(
+            _residual, x0, fprime=_jacobian, full_output=True, maxfev=900
+        )
+        f_max: float = float(np.max(np.abs(info["fvec"])))
+        # The acceptance decision never consults fsolve's convergence flag
+        # ``ier`` (hybrd flags a stationary point "xtol too small" even at
+        # or under the bar): the residual norm and physical validity are
+        # the arbiters, the same criterion the internal solver accepts on
+        # at its own 1e-6 tolerance.
+        x_finite: bool = bool(np.all(np.isfinite(x_try)))
+        under_bar: bool = bool(
+            np.isfinite(f_max) and f_max <= SPECIATION_BACKUP_RESIDUAL_MAX
+        )
+        if x_finite and under_bar and _speciation_conc_valid(zone.eq, x_try):
+            x_sol = x_try
+            if verbose:
+                print(
+                    f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                    f"reached the backup bar with max|f|={f_max:.3e} (ier={ier})"
+                )
+            break
+        if not (x_finite and under_bar):
+            last_reject = (ier, f_max, None)
+        else:
+            # fsolve reached a finite point at or under the backup bar:
+            # the physical-validity gate is what rejected this candidate.
+            last_reject = (ier, f_max, _speciation_conc_valid(zone.eq, x_try))
+        if verbose:
+            print(
+                f"  fsolve backup (zone '{zone.name}', step {step_index}): "
+                f"candidate {i} rejected (ier={ier}, max|f|={f_max:.3e})"
+            )
+
+    if x_sol is None:
+        if last_reject is not None:
+            ier_r, f_max_r, valid_r = last_reject
+            if valid_r is None:
+                reason = (
+                    f"no solution at or under the "
+                    f"{SPECIATION_BACKUP_RESIDUAL_MAX:.0e} backup bar "
+                    f"(max|f|={f_max_r:.3e}, ier={ier_r})"
+                )
+            else:
+                reason = (
+                    f"found at max|f|={f_max_r:.3e} but the solution is "
+                    f"physically invalid (non-finite or non-positive "
+                    f"concentration; ier={ier_r})"
+                )
+            print(
+                f"  fsolve speciation backup (zone '{zone.name}', "
+                f"step {step_index}): no acceptable solution: {reason}"
+            )
+        return None
+
+    # Finalize through the normal step path with the solved vector supplied:
+    # the speciation branch adopts it (re-gating physical validity) instead
+    # of re-solving, so the whole step — kinetic solve, bookkeeping,
+    # outgoing mass — is identical to a normal step.
+    return zone.step(s_i, d_i, dt_days, verbose, x_free_override=x_sol)
 
 
 class ReactiveTransportModel(HydrologicalModel):
@@ -166,6 +498,8 @@ class ReactiveTransportModel(HydrologicalModel):
         river_zone: RiverZone | None = None,
         # Other things
         verbose: bool = False,
+        # Derived measurements
+        derived_species: Sequence[DerivedSpecies] | None = None,
     ) -> None:
         super().__init__(zones, scales, verbose=verbose)
 
@@ -177,6 +511,22 @@ class ReactiveTransportModel(HydrologicalModel):
         else:
             raise ValueError(
                 "When doing reactive transport simulation, you must pass both `network` and `rt_zones` parameters, not just one of them"
+            )
+
+        # ==== Derived measurements ==== #
+        # A derived measurement is not a species of the network: its
+        # simulated river concentration is the sum of the river
+        # concentrations of its component species, so it can only be
+        # declared on a model that has a reaction network.
+        self._derived_species: dict[str, tuple[str, ...]] = {}
+        if derived_species:
+            if network is None:
+                raise ValueError(
+                    "`derived_species` requires a reactive transport `network`; "
+                    "a hydrology-only model has no species to combine"
+                )
+            self._derived_species = _validate_derived_species(
+                derived_species, network
             )
 
         if (network is not None) and (rt_zones is not None):
@@ -237,6 +587,19 @@ class ReactiveTransportModel(HydrologicalModel):
             return self._network
         else:
             raise ValueError("Model does not have reactive-transport capabilities")
+
+    @property
+    def derived_species(self) -> dict[str, tuple[str, ...]]:
+        """The declared derived measurements, mapping each name to its
+        component species.
+
+        The simulated river concentration of each derived measurement is
+        the sum of the ``{component}_riv`` columns of its components, and a
+        measurement column named after a derived measurement is scored
+        against that sum, exactly like a measured network species is scored
+        against its own ``{species}_riv`` column.
+        """
+        return self._derived_species
 
     @property
     def rt_zones(self) -> dict[str, RtZone]:
@@ -551,15 +914,22 @@ class ReactiveTransportModel(HydrologicalModel):
         # Run the entire per-zone sweep (Gauss-Seidel coupling of each zone's
         # incoming concentration from the upstream zones already solved this
         # step) in a pure-Rust call, resuming it whenever a zone's Newton /
-        # LM kinetic solve fails: the failed zone's aqueous block is re-solved
-        # with `scipy.optimize.fsolve` (see `_fsolve_backup_step`), the
-        # rescued step is finalized through the normal post-solve path, and
-        # the sweep is resumed from the next zone. Each resumed call seeds its
+        # LM solve fails: a failed kinetic solve has its aqueous block
+        # re-solved with `scipy.optimize.fsolve` (see
+        # `_fsolve_backup_step`), a failed speciation re-equilibration has
+        # its free-variable system re-solved the same way (see
+        # `_fsolve_backup_speciation`, dispatched on the `subsystem` tag of
+        # the typed error), and each rescued step is finalized through the
+        # normal post-solve path before the sweep is resumed from the next
+        # zone. Each resumed call seeds its
         # mass-coupling buffers with the outgoing mass of the zones solved so
         # far, so every downstream zone sees exactly the incoming
         # concentrations an uninterrupted sweep would have produced. The run
-        # stops only if the backup also fails (or the failure is not a
-        # kinetic one).
+        # stops only if the backup also fails (or the failure is not one of
+        # the two backup-able subsystems); a backup that converges but whose
+        # finalization fails is wrapped in a typed ``RtNumericalError`` with
+        # the repro context attached, so no raw solver exception escapes this
+        # method.
         #
         # Each `run_zone_steps` call returns `(steps, failure)` where
         # `failure` is `None` on success or a `(zone_index, exception,
@@ -606,19 +976,69 @@ class ReactiveTransportModel(HydrologicalModel):
             s_i: NDArray = np.asarray(state[i], dtype=np.float64).copy()
             zone: RtZone = zones[i]
 
-            # Only a *kinetic* solve failure (the failed vector is the
-            # aqueous block) can be re-solved with fsolve; speciation and
-            # other failures propagate as before.
-            backup_attempted: bool = False
+            # Which fsolve backup applies is decided by the `subsystem` tag
+            # on the typed error — the machine-readable discriminator: the
+            # dimension of the failed vector is ambiguous, because on
+            # networks whose speciation null space carries as many free
+            # variables as the network has aqueous species, the two failure
+            # types are indistinguishable by dimension alone. A speciation
+            # failure re-solves the free-variable system
+            # (`_fsolve_backup_speciation`); a kinetic failure re-solves the
+            # aqueous block of the step residual (`_fsolve_backup_step`).
+            # Failures with no recognized tag propagate as before.
+            opt_err: OptimizationError | None = (
+                e if isinstance(e, OptimizationError) else None
+            )
+            is_speciation: bool = (
+                opt_err is not None
+                and opt_err.subsystem == "speciation"
+                and zone.do_speciation
+            )
+            is_kinetic: bool = (
+                opt_err is not None
+                and len(opt_err.last_x) == zone.network.num_aqueous_species
+            )
+            backup_attempted: bool = is_speciation or is_kinetic
             rescued: RtStep | None = None
-            if isinstance(e, OptimizationError):
-                backup_attempted = (
-                    len(e.last_x) == zone.network.num_aqueous_species
+            if backup_attempted and opt_err is not None:
+                backup: FsolveBackup = (
+                    _fsolve_backup_speciation
+                    if is_speciation
+                    else _fsolve_backup_step
                 )
-                if backup_attempted:
-                    rescued = _fsolve_backup_step(
-                        zone, s_i, d_i, dt_days, e, step_index, verbose
+                try:
+                    rescued = backup(
+                        zone, s_i, d_i, dt_days, opt_err, step_index, verbose
                     )
+                except Exception as backup_err:
+                    # Finalizing the fsolve-rescued step failed: surface it
+                    # exactly like a direct failure of this zone, with the
+                    # repro context attached, so no raw solver exception
+                    # ever escapes `step_rt_model`.
+                    backup_context = self._failed_repro_context(
+                        i, zone, step_index, dt_days, s_i, d_i, backup_err
+                    )
+                    backup_err.__rt_repro__ = backup_context  # type: ignore[attr-defined]
+                    print(
+                        f"Failed on zone {i} ('{zone.name}') step {step_index} "
+                        f"during fsolve backup finalization:"
+                    )
+                    print(f"exception: {type(backup_err).__name__}: {backup_err}")
+                    if isinstance(backup_err, OptimizationError):
+                        backup_rt_err: RtNumericalError = RtNumericalError(
+                            "other",
+                            model_type=type(self),
+                            zone=zone,
+                            parameters=self.to_array(),
+                            state=s_i,
+                            rt_forcing=d_i.copy(),
+                            math_err=backup_err,
+                        )
+                        backup_rt_err.__rt_repro__ = (  # type: ignore[attr-defined]
+                            backup_context
+                        )
+                        raise backup_rt_err from backup_err
+                    raise
 
             if rescued is not None:
                 # The internal Newton / LM chain stalled but the fsolve backup
@@ -627,11 +1047,18 @@ class ReactiveTransportModel(HydrologicalModel):
                 # reported only in verbose runs; the user is notified (with a
                 # warning) only when every solver fails and the run stops.
                 if verbose:
-                    print(
-                        f"Newton/LM kinetic solve failed on zone {i} "
-                        f"('{zone.name}') step {step_index} ({e}); the fsolve "
-                        f"backup solution is used instead and the run continues."
-                    )
+                    if is_speciation:
+                        print(
+                            f"Newton/LM speciation solve failed on zone {i} "
+                            f"('{zone.name}') step {step_index} ({e}); the fsolve "
+                            f"backup solution is used instead and the run continues."
+                        )
+                    else:
+                        print(
+                            f"Newton/LM kinetic solve failed on zone {i} "
+                            f"('{zone.name}') step {step_index} ({e}); the fsolve "
+                            f"backup solution is used instead and the run continues."
+                        )
                 all_steps.append(rescued)
                 # Seed the coupling buffers with the outgoing mass of every
                 # zone solved so far (the steps returned by the failed call
@@ -650,10 +1077,17 @@ class ReactiveTransportModel(HydrologicalModel):
                 continue
 
             if backup_attempted:
-                print(
-                    f"WARNING: the fsolve backup also failed to converge for "
-                    f"zone {i} ('{zone.name}') step {step_index}; the run stops."
-                )
+                if is_speciation:
+                    print(
+                        f"WARNING: the fsolve backup also failed to converge for "
+                        f"the speciation re-equilibration of zone {i} "
+                        f"('{zone.name}') step {step_index}; the run stops."
+                    )
+                else:
+                    print(
+                        f"WARNING: the fsolve backup also failed to converge for "
+                        f"zone {i} ('{zone.name}') step {step_index}; the run stops."
+                    )
 
             if isinstance(e, OptimizationError):
                 # A solver (Newton / Levenberg-Marquardt) failure: the Rust
@@ -742,6 +1176,25 @@ class ReactiveTransportModel(HydrologicalModel):
         """
         # ==== Set up the forcing ==== #
         zones_list: list[RtZone] = list(self.rt_zones.values())
+
+        # Measured river-concentration columns must name either a species of
+        # the reaction network or a declared derived measurement (for
+        # example DIC); reject unknown names before the simulation starts.
+        if meas_river_conc is not None:
+            scored_names: set[str] = set(self.network.species_names) | set(
+                self._derived_species
+            )
+            unknown_species: list[str] = [
+                spec
+                for spec in meas_river_conc.columns
+                if spec not in scored_names
+            ]
+            if unknown_species:
+                raise ModelInputError(
+                    f"meas_river_conc columns {unknown_species} are neither species "
+                    f"of the reaction network {self.network.species_names} nor "
+                    f"declared derived measurements {list(self._derived_species)}"
+                )
 
         hydro_sim_df: DataFrame = hydro_res.simulation
         forc: ForcingData | list[ForcingData] = hydro_res.forcing
@@ -987,7 +1440,20 @@ class ReactiveTransportModel(HydrologicalModel):
 
             res_df[f"{spec_name}_riv"] = weighted_comps
 
-        # Calculate the objective functions
+        # Add the river concentration of every declared derived measurement
+        # (for example DIC, the sum of the aqueous carbonate species), so a
+        # measurement column named after a derived measurement can be scored
+        # against it just like a measured network species.
+        for derived_name, components in self._derived_species.items():
+            derived_conc: Series = res_df[f"{components[0]}_riv"]
+            for component in components[1:]:
+                derived_conc = derived_conc + res_df[f"{component}_riv"]
+            res_df[f"{derived_name}_riv"] = derived_conc
+
+        # Calculate the objective functions. The measured columns were
+        # validated against the network (and declared derived measurements)
+        # before the simulation started, so every column has a `{spec}_riv`
+        # series to score against.
         if meas_river_conc is not None:
             test_species: list[str] = list(meas_river_conc.columns)  # type: ignore
             obj_df_cols: list[str] = [x[0] for x in objective_functions]

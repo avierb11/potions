@@ -155,10 +155,18 @@ pub struct OptimizationError {
     pub best_err: f64,
     #[pyo3(get)]
     pub message: String,
+    /// The subsystem that owns the failed solve, e.g. `"speciation"` or
+    /// `"kinetic"`; empty for solvers outside a named subsystem. Set on the
+    /// Rust side by [`tag_subsystem`] when a shared-solver error crosses a
+    /// subsystem boundary, so the Python driver can route the fsolve backup
+    /// to the right sub-problem (the failure *message* names the subsystem
+    /// only in prose; this field is the machine-readable discriminator).
+    #[pyo3(get, set)]
+    pub subsystem: String,
 }
 
 impl OptimizationError {
-    pub fn from_state(state: OptimizerState, message: String) -> Self {
+    pub fn from_state(state: OptimizerState, message: String, subsystem: &str) -> Self {
         let xs: Vec<Vec<f64>> = state.xs.iter().map(|x| x.to_vec()).collect();
         let fxs: Vec<Vec<f64>> = state.fxs.iter().map(|x| x.to_vec()).collect();
         let jacobians: Vec<Vec<Vec<f64>>> = state
@@ -182,6 +190,7 @@ impl OptimizationError {
             best_x: state.best_x.to_vec(),
             best_err: state.best_err,
             message,
+            subsystem: subsystem.to_string(),
         }
     }
 }
@@ -189,7 +198,7 @@ impl OptimizationError {
 #[pymethods]
 impl OptimizationError {
     #[new]
-    #[pyo3(signature = (iterations, final_err, errors, last_x, last_f_x, initial_x, jacobian, xs, fxs, jacobians, lambdas, best_x, best_err, message))]
+    #[pyo3(signature = (iterations, final_err, errors, last_x, last_f_x, initial_x, jacobian, xs, fxs, jacobians, lambdas, best_x, best_err, message, subsystem="".to_string()))]
     pub fn new(
         iterations: usize,
         final_err: f64,
@@ -205,6 +214,7 @@ impl OptimizationError {
         best_x: Vec<f64>,
         best_err: f64,
         message: String,
+        subsystem: String,
     ) -> Self {
         Self {
             iterations,
@@ -221,6 +231,7 @@ impl OptimizationError {
             best_x,
             best_err,
             message,
+            subsystem,
         }
     }
 
@@ -606,6 +617,31 @@ fn optimization_error_to_pyerr(err: OptimizationError) -> PyErr {
     })
 }
 
+/// Tag a solver error with the subsystem that owns it.
+///
+/// The multi-species Newton / LM chain in this module is *shared* by several
+/// subsystems: the kinetic step solve and the speciation re-equilibration
+/// both call into it, so the [`OptimizationError`] it raises cannot know by
+/// itself which subsystem failed (its message carries only the hard-coded
+/// `"reactive-transport"` label). Each subsystem's entry point calls this on
+/// the error before propagating it, so the Python driver can route the
+/// fsolve backup to the right sub-problem via `err.subsystem`.
+///
+/// Errors that are not `OptimizationError` instances (e.g. plain
+/// `ValueError`s) pass through untouched; a failed `subsystem` attribute
+/// write degrades to the untagged error rather than masking the original.
+pub fn tag_subsystem(err: PyErr, subsystem: &str) -> PyErr {
+    if subsystem.is_empty() {
+        return err;
+    }
+    Python::attach(|py| {
+        if err.is_instance_of::<OptimizationError>(py) {
+            let _ = err.value(py).setattr("subsystem", subsystem);
+        }
+    });
+    err
+}
+
 fn make_error_from_parts(parts: MultiFailureParts, reason: String) -> PyErr {
     // Build a message that names the *cause*, the *subsystem*, and the key
     // numerics (residual norm, offending vector, Jacobian) at the failure point,
@@ -639,7 +675,7 @@ fn make_error_from_parts(parts: MultiFailureParts, reason: String) -> PyErr {
         best_x: parts.best_x,
         best_err: parts.best_err,
     };
-    let opt = OptimizationError::from_state(final_state, message);
+    let opt = OptimizationError::from_state(final_state, message, "");
     optimization_error_to_pyerr(opt)
 }
 
@@ -655,6 +691,27 @@ fn newton_linear_error(parts: MultiFailureParts, e: String) -> PyErr {
     make_error_from_parts(parts, format!("Newton linear solve failed: {}", e))
 }
 
+/// Convert an accepted-but-physically-invalid solver state into the Python
+/// [`OptimizationError`] a non-converged solve would raise, so the existing
+/// Python-side failure handling (repro context, typed error wrapping) applies
+/// unchanged to a state that *met* the residual bar but is not physically
+/// valid. `subsystem` and `reason` name what was rejected; the diagnostic line
+/// follows the same format as a non-convergence failure.
+pub fn invalid_state_error(state: &OptimizerState, subsystem: &str, reason: &str) -> PyErr {
+    let diag = format!(
+        "iteration={}/{} | max|f|={} | best max|f|={} | x=[{}] | J: {}",
+        state.iteration,
+        MULTI_MAXITER,
+        state.error,
+        state.best_err,
+        describe_vector(&state.final_x),
+        describe_matrix(&state.jacobian)
+    );
+    let message = format!("{}: {} | {}", subsystem, reason, diag);
+    let err = OptimizationError::from_state(state.clone(), message, subsystem);
+    optimization_error_to_pyerr(err)
+}
+
 /// Elementwise maximum absolute value, propagating NaN.
 ///
 /// Rust's `f64::max` drops NaN operands, so a vector whose entries are
@@ -663,7 +720,7 @@ fn newton_linear_error(parts: MultiFailureParts, e: String) -> PyErr {
 /// solution. Returning NaN instead keeps all tolerance comparisons false
 /// (NaN compares false) and routes the failure to the explicit non-finite
 /// error path.
-fn max_abs(v: &Array1<f64>) -> f64 {
+pub fn max_abs(v: &Array1<f64>) -> f64 {
     let mut m: f64 = 0.0;
     for a in v.iter() {
         if a.is_nan() {
@@ -683,6 +740,63 @@ fn satisfies_sufficient_decrease(f_new: &Array1<f64>, f_x: &Array1<f64>, alpha: 
     let norm_new: f64 = f_new.iter().map(|x| x * x).sum();
     let norm_x: f64 = f_x.iter().map(|x| x * x).sum();
     norm_new <= (1.0 - ARMIJO_C * alpha) * norm_x
+}
+
+/// A per-coordinate hyper-rectangle of iterate space: `lower[i] <= x[i] <=
+/// upper[i]` for every coordinate.
+///
+/// The bounded solver variants clip each trial step to the largest fraction
+/// that keeps the trial point inside the box, so iterates cannot leave the
+/// region where the model is well-scaled. For the speciation sub-solve the
+/// box is centered on the warm start with a uniform half-width in log10
+/// decades (see `SPECIATION_X_FREE_HALF_WIDTH` in `reactive_transport`), which
+/// keeps `10^(N x + b)` inside f64's range at every tested point.
+#[derive(Clone, Debug)]
+pub struct IterBox {
+    lower: Array1<f64>,
+    upper: Array1<f64>,
+}
+
+impl IterBox {
+    /// Box centered on `center` with the same per-coordinate half-width
+    /// `half_width` on every side.
+    pub fn centered_on(center: &Array1<f64>, half_width: f64) -> Self {
+        let lower: Array1<f64> = center.mapv(|c| c - half_width);
+        let upper: Array1<f64> = center.mapv(|c| c + half_width);
+        Self { lower, upper }
+    }
+}
+
+/// Largest step fraction `alpha` in `(0, 1]` such that `x - alpha * d` lies
+/// inside `box_`.
+///
+/// Returns `1.0` when the full step stays inside (the unconstrained limit),
+/// and `0.0` when no positive fraction is feasible — the iterate sits on the
+/// box boundary and `d` points outside, or an operand is non-finite. Callers
+/// treat a non-positive result as "the step is blocked" (Newton stalls, LM
+/// rejects and damps).
+fn max_alpha_in_box(x: &Array1<f64>, d: &Array1<f64>, box_: &IterBox) -> f64 {
+    let mut alpha_max: f64 = 1.0;
+    for i in 0..x.len() {
+        let x_i: f64 = x[i];
+        let d_i: f64 = d[i];
+        if !x_i.is_finite() || !d_i.is_finite() {
+            return 0.0;
+        }
+        // Fraction at which coordinate i reaches the box edge on the side the
+        // step is heading toward:
+        //   d_i > 0: x_i - alpha*d_i falls down to `lower[i]`
+        //   d_i < 0: x_i - alpha*d_i rises up to `upper[i]`
+        let limit: f64 = if d_i > 0.0 {
+            (x_i - box_.lower[i]) / d_i
+        } else if d_i < 0.0 {
+            (x_i - box_.upper[i]) / d_i
+        } else {
+            f64::INFINITY
+        };
+        alpha_max = alpha_max.min(limit);
+    }
+    alpha_max
 }
 
 /// Armijo backtracking along a Newton direction.
@@ -721,36 +835,6 @@ fn newton_relative_step_step(x: &Array1<f64>, step: &Array1<f64>) -> bool {
     let x_scale: f64 = f64::max(max_abs(x), 1.0);
     let step_norm: f64 = max_abs(step);
     step_norm <= MULTI_TOL_STEP * x_scale
-}
-
-/// Fraction of the *initial* objective that a stalled iterate must reach before
-/// it is accepted as a converged plateau (on top of the absolute floor chosen by
-/// the caller). The absolute floor is `MULTI_TOL` (1e-6, `max|f|`) for both the
-/// Newton primaries and the Levenberg-Marquardt fallback: every accepted solve —
-/// primary or fallback — must satisfy the same "absolute error < 1e-6" bar.
-const STAGNATION_REL_TOL: f64 = 1e-9;
-
-/// The objective `err` must fall below the *larger* of `abs_floor` and
-/// `STAGNATION_REL_TOL` times the objective at the solver's start, for a stalled
-/// iterate to be accepted. Callers always pass `MULTI_TOL` as `abs_floor`, so an
-/// accepted plateau always meets the absolute-residual bar; `STAGNATION_REL_TOL`
-/// only ever *tightens* the bar for large residuals on cold starts.
-fn stagnation_objective_bar(abs_floor: f64, initial_err: f64) -> f64 {
-    abs_floor.max(STAGNATION_REL_TOL * initial_err)
-}
-
-/// Whether a solve should be accepted as a converged plateau: the relative step
-/// `step_converged` is true (the iterate has stopped moving, e.g. LM damping at
-/// its cap) and the best objective found is at or below the stagnation bar for
-/// this solve. Callers pass the best objective seen so the plateau, not the
-/// (possibly-worse) current iterate, decides.
-fn should_accept_stagnation(
-    step_converged: bool,
-    abs_floor: f64,
-    initial_err: f64,
-    best_err: f64,
-) -> bool {
-    step_converged && best_err <= stagnation_objective_bar(abs_floor, initial_err)
 }
 
 /// Find the root of the linear problem using Newton's method with a
@@ -894,7 +978,7 @@ where
     F: Fn(&Array1<f64>) -> Array1<f64>,
     G: Fn(&Array1<f64>) -> Array2<f64>,
 {
-    match newton_analytic_core(f, jf, x_0, verbose) {
+    match newton_analytic_core(f, jf, x_0, None, verbose) {
         Ok(x) => Ok(x),
         Err(parts) => Err(newton_failure(parts)),
     }
@@ -918,9 +1002,42 @@ where
     F: Fn(&Array1<f64>) -> Array1<f64>,
     G: Fn(&Array1<f64>) -> Array2<f64>,
 {
-    match newton_analytic_core(f, jf, x_0, verbose) {
+    match newton_analytic_core(f, jf, x_0, None, verbose) {
         Ok(x) => Ok(x),
         Err(parts) => levenberg_marquardt_with_jacobian(f, jf, parts.best_x, verbose),
+    }
+}
+
+/// Newton-with-analytical-Jacobian followed by a Levenberg-Marquardt
+/// fallback, with every iterate of *both* solvers confined to `box_`.
+///
+/// Same contract as [`find_root_multi_analytic_then_lm`]; the only difference
+/// is that each Newton/LM step is clipped to the largest fraction that keeps
+/// the trial point inside `box_` (a per-coordinate hyper-rectangle, typically
+/// centered on the warm start). A step whose feasible fraction is zero is
+/// treated as a stall/rejection instead of a move. With no box
+/// ([`find_root_multi_analytic_then_lm`]) the historical unbounded behavior is
+/// reproduced exactly.
+///
+/// Intended for the speciation sub-solve, where the free variables live in
+/// log10 space and the Jacobian's near-null directions (condition number
+/// ~1e20 on the ill-conditioned basins) can otherwise carry accepted damped
+/// steps to |x_free| ~ 1e13, from which `10^(N x + b)` over/underflows and the
+/// accepted state fails the physical-validity gate.
+pub fn find_root_multi_analytic_then_lm_bounded<'a, F, G>(
+    f: &F,
+    jf: &G,
+    x_0: Array1<f64>,
+    box_: &IterBox,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+    G: Fn(&Array1<f64>) -> Array2<f64>,
+{
+    match newton_analytic_core(f, jf, x_0, Some(box_), verbose) {
+        Ok(x) => Ok(x),
+        Err(parts) => levenberg_marquardt_with_jacobian_bounded(f, jf, parts.best_x, box_, verbose),
     }
 }
 
@@ -929,10 +1046,17 @@ where
 /// absolute-residual bar is met; otherwise `Err(MultiFailureParts)` carrying the
 /// usual diagnostics *plus* the best iterate (`best_x`) and its error, so a
 /// caller can warm-start a fallback from the best point Newton saw.
+///
+/// When `box_` is `Some`, each full Newton step is clipped to the largest
+/// fraction that keeps the trial point inside the box; a fully blocked step
+/// (no positive fraction feasible) stalls the solver exactly like an
+/// exhausted line search. With `box_ = None` the historical unbounded Newton
+/// behavior is reproduced exactly.
 fn newton_analytic_core<F, G>(
     f: &F,
     jf: &G,
     x_0: Array1<f64>,
+    box_: Option<&IterBox>,
     verbose: bool,
 ) -> Result<Array1<f64>, MultiFailureParts>
 where
@@ -1005,6 +1129,24 @@ where
                     jacobians: std::mem::take(&mut jacobians),
                 });
             }
+        };
+
+        // Bounded variant: clip the full Newton step to the largest fraction
+        // that keeps the trial point inside the box. A fully blocked step
+        // (no positive fraction feasible) stalls exactly like an exhausted
+        // line search.
+        let alpha_max: f64 = match box_ {
+            Some(b) => max_alpha_in_box(&x, &step, b),
+            None => 1.0,
+        };
+        if alpha_max <= 0.0 {
+            stall_iter = Some(i);
+            break;
+        }
+        let step: Array1<f64> = if alpha_max < 1.0 {
+            &step * alpha_max
+        } else {
+            step
         };
 
         match backtrack_line_search(f, &x, &f_x, &step) {
@@ -1249,7 +1391,7 @@ pub fn levenberg_marquardt<'a, F>(f: &F, x_0: Array1<f64>, verbose: bool) -> PyR
 where
     F: Fn(&Array1<f64>) -> Array1<f64>,
 {
-    levenberg_marquardt_impl(f, None, x_0, verbose)
+    levenberg_marquardt_impl(f, None, x_0, None, verbose)
 }
 
 /// Levenberg-Marquardt with an *analytical* Jacobian. The Jacobian of the
@@ -1266,13 +1408,41 @@ where
     F: Fn(&Array1<f64>) -> Array1<f64>,
     G: Fn(&Array1<f64>) -> Array2<f64>,
 {
-    levenberg_marquardt_impl(f, Some(jf), x_0, verbose)
+    levenberg_marquardt_impl(f, Some(jf), x_0, None, verbose)
 }
 
+/// Levenberg-Marquardt with an analytical Jacobian, with every trial point
+/// confined to `box_` (see [`IterBox`]). The unbounded
+/// [`levenberg_marquardt_with_jacobian`] is the same solver with no box.
+///
+/// The backtracking start is the largest fraction of the damped step that
+/// stays inside the box (the full step when no box is given), so the
+/// historical trial sequence `{1, 1/2, ...}` is reproduced exactly in the
+/// unbounded case; a fully blocked step is rejected and damped instead of
+/// tested.
+pub fn levenberg_marquardt_with_jacobian_bounded<'a, F, G>(
+    f: &F,
+    jf: &G,
+    x_0: Array1<f64>,
+    box_: &IterBox,
+    verbose: bool,
+) -> PyResult<Array1<f64>>
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+    G: Fn(&Array1<f64>) -> Array2<f64>,
+{
+    levenberg_marquardt_impl(f, Some(jf), x_0, Some(box_), verbose)
+}
+
+/// Shared Levenberg-Marquardt iterate body (finite-difference or analytic
+/// Jacobian). When `box_` is `Some`, trial steps are clipped to the box (see
+/// [`max_alpha_in_box`]); a fully blocked step is rejected and damped. With
+/// `box_ = None` the historical unbounded behavior is reproduced exactly.
 fn levenberg_marquardt_impl<'a, F>(
     f: &F,
     jac: Option<&dyn Fn(&Array1<f64>) -> Array2<f64>>,
     x_0: Array1<f64>,
+    box_: Option<&IterBox>,
     verbose: bool,
 ) -> PyResult<Array1<f64>>
 where
@@ -1287,7 +1457,6 @@ where
     // absolute residual max|f|, the same metric the Newton primary uses, so the
     // whole solver chain agrees on what "absolute error <= MULTI_TOL" means.
     let mut err_max: f64 = max_abs(&f_x);
-    let initial_err_max: f64 = err_max;
     let mut best_x: Array1<f64> = x.clone();
     let mut best_err: f64 = err_max;
     let mut jac_x: Array2<f64> = Array2::zeros((1, 1));
@@ -1333,6 +1502,7 @@ where
                     "reactive-transport",
                     "NaN/Inf encountered in iteration",
                 ),
+                "",
             );
             return Err(optimization_error_to_pyerr(err));
         }
@@ -1373,64 +1543,130 @@ where
                         "reactive-transport",
                         &format!("linear solve failed: {}", e),
                     ),
+                    "",
                 );
                 return Err(optimization_error_to_pyerr(opt_err));
             }
         };
 
         let step_converged = newton_relative_step_step(&x, &step);
-        let x_test: Array1<f64> = &x - &step;
-        let f_x_test: Array1<f64> = f(&x_test);
-        let err_test: f64 = 0.5 * f_x_test.dot(&f_x_test);
-        let err_test_max: f64 = max_abs(&f_x_test);
-        // Track the best iterate so a stalled (damping-limited) run can still
-        // return the most reduced residual it ever reached.
-        if err_test_max < best_err && !err_test_max.is_nan() {
-            best_err = err_test_max;
-            best_x = x_test.clone();
-        }
 
-        // Calculate gain ratio
-        let actual_reduction = err - err_test;
-        let predicted_reduction = step.dot(&b) - 0.5 * step.dot(&a_mat_base.dot(&step));
-        let rho = if predicted_reduction.abs() < 1e-12 {
-            0.0
-        } else {
-            actual_reduction / predicted_reduction
+        // Full-step quantities, reused by the backtracking loop below: for
+        // the displacement `-alpha*step` the quadratic model's predicted
+        // objective decrease is `alpha * step·b - 0.5 * alpha^2 *
+        // stepᵀA·step` (alpha = 1 is the historical formula), so a
+        // shortened step costs only extra residual evaluations, not a
+        // re-solve or a re-Jacobian.
+        let step_b: f64 = step.dot(&b);
+        let step_a_step: f64 = step.dot(&a_mat_base.dot(&step));
+
+        // Armijo-style backtracking on the damped step, mirroring the line
+        // search every full Newton step gets: a step that fails to decrease
+        // the objective is retried at half length before it is rejected. The
+        // quadratic model can mis-predict a step that overshoots a kink or a
+        // flat non-unique manifold, in which case the shorter step still
+        // descends and accepting it makes progress where the historical
+        // "reject + double lambda" stalls.
+        // Bounded variant: start backtracking at the largest fraction of the
+        // damped step that stays inside the box, not at the full step (the
+        // full-step quantities `step_b` / `step_a_step` above are scaled by
+        // alpha in the predicted-reduction formula, so a shortened start only
+        // costs extra residual evaluations, not a re-solve or a re-Jacobian).
+        let alpha_max: f64 = match box_ {
+            Some(b) => max_alpha_in_box(&x, &step, b),
+            None => 1.0,
         };
-
-        if rho > 0.0 {
-            // The step was good, accept it
-            x = x_test;
-            f_x = f_x_test;
-            err = err_test;
-            err_max = err_test_max;
-
-            // Update lambda based on how good the prediction was
-            lambda *= ((1.0 / 3.0) as f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
-            lambda = lambda.max(1e-16); // Lower bound for lambda
-
-            // Only record state on successful steps
-            errors.push(err_max);
-            xs.push(x.clone());
-            fxs.push(f_x.clone());
-            lambdas.push(lambda);
-            jacobians.push(jac_x.clone());
-
-            if step_converged && err_max <= MULTI_TOL {
-                return Ok(x);
-            }
-        } else {
-            // The step was bad, reject it and become more cautious
+        let alpha_min: f64 = 2.0_f64.powi(-(LINE_SEARCH_MAX as i32));
+        if alpha_max <= 0.0 {
+            // The box blocks every positive fraction of this step (the
+            // iterate sits on its boundary and the step points outside):
+            // reject it and become more cautious, exactly as a failed test
+            // would.
             lambda *= 2.0;
             lambda = lambda.min(1e16); // Upper bound for lambda
+        } else {
+            let mut alpha: f64 = alpha_max;
+            let mut x_test: Array1<f64> = &x - &(alpha * &step);
+            let mut f_x_test: Array1<f64> = f(&x_test);
+            let mut err_test: f64 = 0.5 * f_x_test.dot(&f_x_test);
+            let mut err_test_max: f64 = max_abs(&f_x_test);
+            let mut actual_reduction: f64 = err - err_test;
+            let mut predicted_reduction: f64 = alpha * step_b - 0.5 * (alpha * alpha) * step_a_step;
+            loop {
+                // Track the best iterate so a stalled (damping-limited) run can
+                // still return the most reduced residual it ever reached. Every
+                // tested point is inside the box, so `best_x` stays there too.
+                if err_test_max < best_err && !err_test_max.is_nan() {
+                    best_err = err_test_max;
+                    best_x = x_test.clone();
+                }
+                // `<=` (not the historical `==`): a non-power-of-two start
+                // fraction never lands exactly on `alpha_min`, so the halving
+                // series must also terminate by crossing it.
+                if actual_reduction > 0.0 || alpha <= alpha_min {
+                    break;
+                }
+                alpha *= 0.5;
+                x_test = &x - &(alpha * &step);
+                f_x_test = f(&x_test);
+                err_test = 0.5 * f_x_test.dot(&f_x_test);
+                err_test_max = max_abs(&f_x_test);
+                actual_reduction = err - err_test;
+                predicted_reduction = alpha * step_b - 0.5 * (alpha * alpha) * step_a_step;
+            }
 
-            // Do not record the state, as we haven't moved
+            // Gain ratio of the (possibly shortened) step. The floor on the
+            // predicted decrease is relative (1e-12 * err, err = 0.5*‖f‖²)
+            // rather than the historical absolute 1e-12: at a huge residual a
+            // predicted decrease that is a negligible sliver of the objective is
+            // model noise (the historical floor passed it), while near
+            // convergence the absolute floor zeroed the gain ratio and forced
+            // pure damping on steps that still descend.
+            let rho: f64 = if predicted_reduction.abs() < 1e-12 * err {
+                0.0
+            } else {
+                actual_reduction / predicted_reduction
+            };
+
+            if rho > 0.0 {
+                // The step was good, accept it
+                x = x_test;
+                f_x = f_x_test;
+                err = err_test;
+                err_max = err_test_max;
+
+                // Update lambda based on how good the prediction was
+                lambda *= ((1.0 / 3.0) as f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
+                lambda = lambda.max(1e-16); // Lower bound for lambda
+
+                // Only record state on successful steps
+                errors.push(err_max);
+                xs.push(x.clone());
+                fxs.push(f_x.clone());
+                lambdas.push(lambda);
+                jacobians.push(jac_x.clone());
+
+                if step_converged && err_max <= MULTI_TOL {
+                    return Ok(x);
+                }
+            } else {
+                // The step was bad, reject it and become more cautious
+                lambda *= 2.0;
+                lambda = lambda.min(1e16); // Upper bound for lambda
+
+                // Do not record the state, as we haven't moved
+            }
         }
 
         // The iterate has stopped moving (relative step converged, e.g. damping at
-        // its cap): accept the best iterate if it still meets the absolute bar.
-        if should_accept_stagnation(step_converged, MULTI_TOL, initial_err_max, best_err) {
+        // its cap): accept the best iterate only if it still meets the *absolute*
+        // residual bar (max|f| <= MULTI_TOL, 1e-6). No relative loosening is
+        // allowed: with a cold-start residual above 1e3 a fraction-of-initial bar
+        // would accept a plateau that sits above the 1e-6 bar, and on
+        // ill-conditioned speciation systems that plateau can carry
+        // non-physical (overflowed/underflowed) concentrations that poison the
+        // next step's warm start.
+        if step_converged && best_err <= MULTI_TOL {
             return Ok(best_x);
         }
 
@@ -1469,6 +1705,7 @@ where
     let err = OptimizationError::from_state(
         final_state.clone(),
         enrich_state_message(&final_state, "reactive-transport", "did not converge"),
+        "",
     );
     Err(optimization_error_to_pyerr(err))
 }

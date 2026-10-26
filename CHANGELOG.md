@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     that are finite, non-negative, and sum to one.
   - **Input-data checks** (all `ModelInputError`): no NaN/Inf in forcing
     series; no negative precipitation or PET; consistent time-series lengths;
-    non-empty, numeric forcing; and measured-streamflow/`init_state` length,
+    non-empty, numeric forcing; measured-streamflow length, non-negativity,
+    and rejection of infinite values (NaN entries mark missing measurements
+    and are excluded from the objective functions); and `init_state` length,
     finiteness, and non-negativity.
   - **Reactive-transport forcing checks**: `precip_conc` must have the correct
     `(num_surface_zones, n_steps, num_species)` shape and be finite.
@@ -88,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   matters when a layer aggregates N zones into one). The plain `lat_mat` and
   `vert_mat` (0/1 adjacency) are retained for the reactive-transport
   concentration coupling.
+- **Model-level derived measurements** (e.g. DIC as the sum of the aqueous
+  carbonate species): a new `DerivedSpecies` type (name + component species
+  names), exportable from `potions`, accepted by `Model`,
+  `ReactiveTransportModel`, and `Model.from_array` via a
+  `derived_species=` keyword. A model that declares a derived measurement
+  adds a `{name}_riv` column to the RT results (the sum of its
+  components' river concentrations), and a `meas_river_conc` column named
+  after the measurement is scored against that sum, exactly like a measured
+  network species. Components must be aqueous (primary or secondary) species
+  of the network; names must not collide with a network species or another
+  derived measurement. Unknown `meas_river_conc` columns (neither a network
+  species nor a declared derived measurement) raise `ModelInputError`
+  before the simulation starts.
 
 ### Changed
 

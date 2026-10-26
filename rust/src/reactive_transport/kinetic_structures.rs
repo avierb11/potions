@@ -9,17 +9,112 @@ use pyo3_polars::{PyDataFrame, PySeries};
 
 use crate::{
     common_types::RtForcing,
-    math::{approx_fprime, find_root_multi_analytic_then_lm, null_space_scipy, pinv_scipy},
+    math::{
+        approx_fprime, find_root_multi_analytic_then_lm_bounded, invalid_state_error, max_abs,
+        null_space_scipy, pinv_scipy, tag_subsystem, IterBox, OptimizerState,
+    },
     molar, molar_per_time,
     units::{mole_per_liter, MolarConcentration},
 };
 const PARAMETERS_PER_MINERAL: usize = 4;
 
-/// Floor (mol/L) applied before `log10` in the TST activity expressions.
+/// Half-width, in log10 decades, of the per-coordinate box that confines the
+/// speciation solver's free-variable iterates around the warm start.
+///
+/// The free variables enter the concentrations as `10^(N x_free + b)` with
+/// `N` the orthonormal stoichiometry null-space basis (‖N‖₂ = 1, so
+/// ‖N x‖₂ ≤ ‖x‖₂). The worst-case exponent inside a box of half-width W
+/// around a warm start is therefore bounded by `max_s |log10 c0_s| +
+/// W · max_s ‖N[s, :]‖₁`; measured on the East River system (11 species,
+/// 8 free variables) that bound is ≈ 100 decades at W = 50, far inside
+/// f64's range (overflow at 10^±308), while the unbounded solver's
+/// near-null Jacobian directions (condition number ~1e20) carried damped
+/// steps to |x_free| ~ 1e13 (10^±1e13 = 0/inf), after which the
+/// physical-validity gate had to reject every solve.
+///
+/// W = 10 was tested and is too tight: on the ill-conditioned basins the
+/// legitimate convergence path requires >10-decade excursions along the
+/// near-null direction, and clipping pinned the LM iterate exactly at
+/// `x0 − 10` with max|f| still above the 1e-6 bar, regressing the rows
+/// the unbounded solver converged on. W = 50 leaves ~4x more headroom
+/// than that observed need while keeping the worst-case exponent more
+/// than three orders of magnitude inside f64's limit.
+const SPECIATION_X_FREE_HALF_WIDTH: f64 = 50.0;
+
+/// Floor (mol/L) applied in the TST activity expressions before `log10`.
 /// Root finders (Newton, LM, fsolve) can probe trial states with zero or
-/// negative concentrations; clamping keeps each log-contribution large but
-/// finite instead of NaN, which the solvers' sufficiency checks would reject.
+/// negative concentrations; keeping each log-contribution large but finite
+/// instead of NaN is what the solvers' sufficiency checks require.
+///
+/// The floor is applied through the smooth transition [`smoothed_conc`]
+/// (a softplus) instead of a hard `max(c, LOG10_CONC_FLOOR)` clamp: the
+/// hard clamp created a derivative kink at every zero-concentration plane
+/// (the value is C^0 there, while dQ/dc jumped from 0 to a finite O(1)
+/// value), and that kink is what stalled Newton / LM at the zero-CO3
+/// plane. The floor is still the exact value used below c ≈ -6e-28, so the
+/// old extreme-behaviour sanitisation (log10 = -300) is preserved.
 const LOG10_CONC_FLOOR: f64 = 1e-300;
+
+/// Smoothing scale (mol/L) of the softplus transition in
+/// [`smoothed_conc`]. The transition sits ~10 orders of magnitude below
+/// the smallest physical concentration observed (1e-17 mol/L): for
+/// c ≥ 1e-25 the softplus correction underflows to exactly zero, so
+/// `s(c)` is bit-identical to `c` (and the relative derivative to `1/c`)
+/// for every physical state; the smoothing is confined to the non-physical
+/// side of the zero plane.
+const SOFTPLUS_DELTA: f64 = 1e-30;
+
+/// Smooth stand-in for `c.max(LOG10_CONC_FLOOR)` in the TST activity
+/// expressions: `s(c) = max(δ·softplus(c/δ), LOG10_CONC_FLOOR)`,
+/// δ = [`SOFTPLUS_DELTA`].
+///
+/// Bit-identical to the old hard clamp for every c ≥ 1e-25 (the
+/// softplus correction is below ulp and rounds to c itself) and below
+/// c ≈ -6e-28 (the floor, log10 = -300); the change is confined to the
+/// non-physical side of the zero plane, where the value and its derivative
+/// vary smoothly instead of the old O(1) kink (the only remaining corner
+/// is a ~1e-270-scale one where the floor takes over at c ≈ -6e-28, below
+/// any solver's resolution). NaN trial values keep the old sanitisation
+/// (the floor), since `f64::max` returns the non-NaN operand.
+pub(crate) fn smoothed_conc(c: f64) -> f64 {
+    let z: f64 = c / SOFTPLUS_DELTA;
+    if z > 50.0 {
+        // c + δ·e^(-c/δ): written without the δ·(c/δ) round-trip, so no
+        // division error can perturb c; for z > 745 the exp underflows to
+        // 0 and the sum is exactly c.
+        c + SOFTPLUS_DELTA * (-z).exp()
+    } else if z < -50.0 {
+        (SOFTPLUS_DELTA * z.exp()).max(LOG10_CONC_FLOOR)
+    } else {
+        // ln(1 + e^z) directly: e^50 ≈ 5e21 << f64::MAX, no overflow.
+        (SOFTPLUS_DELTA * (1.0 + z.exp()).ln()).max(LOG10_CONC_FLOOR)
+    }
+}
+
+/// Relative derivative `s'(c)/s(c)` of [`smoothed_conc`]:
+/// `sigmoid(c/δ) / s(c)`.
+///
+/// This is the quantity the TST Jacobian needs: the TST value is a power
+/// product (10^(Σ ν·log10 c) = Π c^ν exactly), whose derivative is
+/// V·ν·s'/s — with no ln(10), which cancels. For c ≥ 1e-25 this is
+/// bit-identical to the old clamp's `1/c` (sigmoid = 1, s = c); on the
+/// non-physical side it decays smoothly through the zero plane (≈ 0 below
+/// c ≈ -7.5e-28, where `e^z` underflows — the old zero derivative) instead
+/// of the old 0 / 1/c jump. NaN: 0.
+pub(crate) fn smoothed_rel_deriv(c: f64) -> f64 {
+    if c.is_nan() {
+        return 0.0;
+    }
+    let z: f64 = c / SOFTPLUS_DELTA;
+    let sig: f64 = if z > 50.0 {
+        1.0
+    } else if z < -50.0 {
+        z.exp()
+    } else {
+        1.0 / (1.0 + (-z).exp())
+    };
+    sig / smoothed_conc(c)
+}
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -162,10 +257,11 @@ impl TstParameters {
     ) -> (Array1<molar_per_time>, Array1<f64>) {
         // log10 / 10^x over the log-linear activity exponents — outside uom's
         // scope (no log/exp in 0.38), so kept raw f64.  Concentrations are
-        // clamped to `LOG10_CONC_FLOOR` first: a zero or negative trial value
-        // (transient during a root find) yields a large but finite
-        // contribution instead of NaN.
-        let log_conc: Array1<f64> = chms.map(|x| x.max(LOG10_CONC_FLOOR).log10());
+        // passed through [`smoothed_conc`] first: a zero or negative trial
+        // value (transient during a root find) yields a large but finite
+        // contribution instead of NaN, without the derivative kink a hard
+        // clamp would create at the zero-concentration plane.
+        let log_conc: Array1<f64> = chms.map(|x| smoothed_conc(*x).log10());
         let e: Array1<f64> = Self::matvec(&self.stoich_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
         (q, e)
@@ -176,9 +272,9 @@ impl TstParameters {
     pub fn calculate_dependence_term(&self, chms: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
         // log10 / 10^x over the log-linear activity exponents (forward-rate
         // dependence) — outside uom's scope (no log/exp), so kept raw f64.
-        // Concentrations are clamped to `LOG10_CONC_FLOOR` first (see
+        // Concentrations go through [`smoothed_conc`] first (see
         // `calculate_solubility_product`).
-        let log_conc: Array1<f64> = chms.map(|x| x.max(LOG10_CONC_FLOOR).log10());
+        let log_conc: Array1<f64> = chms.map(|x| smoothed_conc(*x).log10());
         let e: Array1<f64> = Self::matvec(&self.dep_np, &log_conc);
         let q: Array1<f64> = e.map(|x| (10_f64).powf(*x)); // Convert back to linear scale
         (q, e)
@@ -351,6 +447,34 @@ impl EquilibriumParameters {
         jac
     }
 
+    /// Total (conserved) concentrations `c_tot = total_mat . chms` for the
+    /// speciation residual, with the charge-balance row zeroed.
+    ///
+    /// `total_mat` has one row per independent conserved quantity (mass
+    /// balances plus charge balance) and one column per species. The
+    /// row matching the hydrogen-ion species ("H+") is the charge-balance
+    /// row; it is zeroed because charge balance is already imposed by the
+    /// free-variable null-space structure, not as an additional constraint
+    /// on the conserved totals. This is the same computation the internal
+    /// solve performs before driving Newton / LM; it is factored out so the
+    /// Python-side fsolve backup can expose the *same* residual without
+    /// reconstructing `c_tot` on the Python side.
+    pub fn totals_rust(&self, chms: &Array1<f64>) -> Array1<f64> {
+        let s: &DataFrame = &self.total.0;
+        let mut c_tot: Array1<f64> = self.total_mat.dot(chms);
+
+        // Get the charge balance location
+        let charge_ind = s
+            .get_column_names()
+            .into_iter()
+            .position(|x| x.as_str() == "H+");
+
+        if let Some(i) = charge_ind {
+            c_tot[i] = 0.0;
+        }
+        c_tot
+    }
+
     // Solve the speciation problem for the *free-variables* `x_free`, i.e. the
     // values in the null-space basis such that `10^(N x_free + b)` reproduces the
     // equilibrium concentrations.
@@ -358,6 +482,10 @@ impl EquilibriumParameters {
     // `initial_x` is a warm start for the Newton iteration (typically the
     // solution from the previous time step, which is usually very close to the new
     // solution), or zeros for a cold start.
+    //
+    // A solved `x_free` whose concentrations `10^(N x_free + b)` under/overflow
+    // to 0.0/inf (an ill-conditioned plateau the residual bar cannot see) is
+    // rejected with a typed `OptimizationError` instead of returned.
     pub fn x_free_solve_rust(
         &self,
         chms: &Array1<f64>,
@@ -403,21 +531,7 @@ impl EquilibriumParameters {
             return Err(PyValueError::new_err(msg));
         }
 
-        let chms_arr: Array1<f64> = chms.clone();
-        let mut c_tot: Array1<f64> = self.total_mat.dot(&chms_arr);
-
-        // Get the charge balance location
-        let s: &DataFrame = &self.total.0;
-
-        let charge_ind = s
-            .get_column_names()
-            .into_iter()
-            .position(|x| x.as_str() == "H+");
-
-        match charge_ind {
-            Some(i) => c_tot[i] = 0.0,
-            None => (),
-        };
+        let c_tot: Array1<f64> = self.totals_rust(chms);
 
         // Create the callable functions for solving the root
         let f_to_solve = |x: &Array1<f64>| self.residual_rust(x, &c_tot);
@@ -426,7 +540,67 @@ impl EquilibriumParameters {
         // Solve with Newton's method using the analytical Jacobian, falling back
         // to Levenberg-Marquardt (itself using the analytic Jacobian) if that fails to
         // converge. LM resumes from the best iterate Newton reached.
-        find_root_multi_analytic_then_lm(&f_to_solve, &j_to_solve, initial_x.clone(), verbose)
+        //
+        // Every iterate of both solves is confined to a box centered on the
+        // warm start with half-width SPECIATION_X_FREE_HALF_WIDTH (log10
+        // decades): without the bound, the damped steps could random-walk the
+        // Jacobian's near-null directions to |x_free| ~ 1e13, from which the
+        // concentrations under/overflow and the validity gate below must
+        // reject the solve (and the failed vector would poison the next
+        // step's warm start if it were ever cached).
+        let box_: IterBox = IterBox::centered_on(initial_x, SPECIATION_X_FREE_HALF_WIDTH);
+        let x_free: Array1<f64> = match find_root_multi_analytic_then_lm_bounded(
+            &f_to_solve,
+            &j_to_solve,
+            initial_x.clone(),
+            &box_,
+            verbose,
+        ) {
+            Ok(x) => x,
+            // The shared Newton / LM chain does not know which subsystem it
+            // is serving (its message carries only the hard-coded
+            // "reactive-transport" label). Tag the error at this boundary so
+            // the Python driver can route the fsolve backup to the
+            // speciation sub-problem via `err.subsystem`.
+            Err(e) => return Err(tag_subsystem(e, "speciation")),
+        };
+
+        // Physical-validity gate on the accepted state: a speciation solve can
+        // satisfy the 1e-6 residual bar at an absurd `x_free` magnitude, because
+        // the Jacobian's near-null directions (condition number ~1e20 on the
+        // ill-conditioned basins) are almost invisible to the residual. The
+        // resulting concentrations 10^(N x_free + b) then under/overflow to
+        // 0.0/inf: not a valid equilibrium state, and if cached as the next
+        // step's warm start it would poison every subsequent solve in the zone.
+        // Reject it with the same typed `OptimizationError` a non-converged
+        // solve raises, so the Python-side failure handling (repro context,
+        // typed wrapping) applies unchanged.
+        let concs: Array1<f64> = self.conc_func_rust(&x_free);
+        if !concs.iter().all(|c| c.is_finite() && *c > 0.0) {
+            let f_x: Array1<f64> = self.residual_rust(&x_free, &c_tot);
+            let err: f64 = max_abs(&f_x);
+            let state = OptimizerState {
+                iteration: 0,
+                final_x: x_free.clone(),
+                last_f_x: f_x.clone(),
+                initial_x: initial_x.clone(),
+                jacobian: self.jacobian_residual_rust(&x_free),
+                error: err,
+                errors: vec![err],
+                xs: vec![x_free.clone()],
+                fxs: vec![f_x.clone()],
+                jacobians: Vec::new(),
+                lambdas: Vec::new(),
+                best_x: x_free.clone(),
+                best_err: err,
+            };
+            return Err(invalid_state_error(
+                &state,
+                "speciation",
+                "accepted plateau is physically invalid (non-finite or non-positive concentration)",
+            ));
+        }
+        Ok(x_free)
     }
 
     // Public speciation entry point: returns the equilibrium *concentrations*.
@@ -572,6 +746,63 @@ impl EquilibriumParameters {
         let jac = approx_fprime(&f, &x_free_arr, false);
 
         jac.to_pyarray(py)
+    }
+
+    /// Speciation residual `f(x_free) = c_tot - total_mat . g(x_free)` for a
+    /// caller-supplied species concentration vector `chms`, where
+    /// `g(x_free) = 10^(N x_free + b)` and `c_tot` is computed internally
+    /// (see [`EquilibriumParameters::totals_rust`]) exactly as the internal
+    /// solve does.
+    ///
+    /// Exposed for the Python-side `scipy.optimize.fsolve` backup in
+    /// `ReactiveTransportModel.step_rt_model`, which re-solves the same
+    /// residual the Rust Newton / LM chain failed to converge and needs
+    /// `c_tot` without reconstructing it on the Python side.
+    #[pyo3(signature = (chms, x_free))]
+    pub fn speciation_residual<'py>(
+        &self,
+        py: Python<'py>,
+        chms: PyReadonlyArray1<f64>,
+        x_free: PyReadonlyArray1<f64>,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let c_tot: Array1<f64> = self.totals_rust(&chms.to_owned_array());
+        let f: Array1<f64> = self.residual_rust(&x_free.to_owned_array(), &c_tot);
+        f.to_pyarray(py)
+    }
+
+    /// Analytic Jacobian of the speciation residual with respect to
+    /// `x_free` (`-ln(10) * (A * g[:, None]) @ N`, see
+    /// [`EquilibriumParameters::jacobian_residual_rust`]); the same matrix
+    /// the Rust Newton / LM chain uses, exposed as the `fprime` argument of
+    /// the Python-side `scipy.optimize.fsolve` backup.
+    pub fn speciation_jacobian<'py>(
+        &self,
+        py: Python<'py>,
+        x_free: PyReadonlyArray1<f64>,
+    ) -> Bound<'py, PyArray2<f64>> {
+        self.jacobian_residual_rust(&x_free.to_owned_array())
+            .to_pyarray(py)
+    }
+
+    /// Solve the speciation free variables `x_free` for the supplied
+    /// concentrations `chms` from an explicit warm start `initial_x`, using
+    /// the same bounded Newton / LM chain the internal zone step uses, and
+    /// return the solved `x_free` (not the equilibrium concentrations).
+    ///
+    /// A solved vector whose concentrations are non-finite or non-positive
+    /// is rejected with a typed `OptimizationError` tagged
+    /// `subsystem="speciation"`, as is a non-converged solve.
+    #[pyo3(signature = (chms, initial_x, verbose=false))]
+    pub fn speciation_x_free_solve<'py>(
+        &self,
+        py: Python<'py>,
+        chms: PyReadonlyArray1<f64>,
+        initial_x: PyReadonlyArray1<f64>,
+        verbose: bool,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let x: Array1<f64> =
+            self.x_free_solve_rust(&chms.to_owned_array(), &initial_x.to_owned_array(), verbose)?;
+        Ok(x.to_pyarray(py))
     }
 
     pub fn total_mat_shape(&self) -> () {

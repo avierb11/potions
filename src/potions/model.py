@@ -6,6 +6,7 @@ from typing import (
     Callable,
     Final,
     Optional,
+    Sequence,
 )
 import numpy as np
 from numpy import float64 as f64
@@ -21,6 +22,7 @@ from .reactive_transport_model import ReactiveTransportModel
 from .common_types import (
     BatchParams,
     ChemicalState,
+    DerivedSpecies,
     ForcingData,
     HydroModelResults,
     RtModelResults,
@@ -155,6 +157,8 @@ class Model(ReactiveTransportModel):
         # River zone
         river_zone: Optional[RiverZone] = None,
         verbose: bool = False,
+        # Derived measurements
+        derived_species: Optional[Sequence[DerivedSpecies]] = None,
     ) -> None:
         """Initializes the model engine.
 
@@ -172,6 +176,13 @@ class Model(ReactiveTransportModel):
                 rate parameters, one for each surface zone. Defaults to None.
             verbose (bool): If True, prints additional information during
                 initialization. Defaults to False.
+            derived_species (Optional[Sequence[DerivedSpecies]]): Measured
+                quantities that are not species of the reaction network but
+                are defined as the sum of several network species (for
+                example DIC, the sum of the aqueous carbonate species). The
+                model scores a measurement column named after a derived
+                measurement against the sum of its components' river
+                concentrations. Defaults to None.
         """
 
         super().__init__(
@@ -181,6 +192,7 @@ class Model(ReactiveTransportModel):
             rt_zones=rt_zones,
             river_zone=river_zone,
             verbose=verbose,
+            derived_species=derived_species,
         )
 
     @classmethod
@@ -327,7 +339,8 @@ class Model(ReactiveTransportModel):
             init_hydro_state (Optional[NDArray[f64]]): Initial state of the
                 hydrologic model. Defaults to None.
             meas_streamflow (Optional[Series]): Observed streamflow, used to
-                calculate objective functions. Defaults to None.
+                calculate objective functions. Missing days may be NaN and are
+                excluded from every metric. Defaults to None.
             meas_river_conc (Optional[DataFrame]): Observed river concentrations,
                 used to calculate RT objective functions. Defaults to None.
             objective_functions (Optional[list[tuple[str, ...]]]): Custom objective
@@ -391,6 +404,7 @@ class Model(ReactiveTransportModel):
         config: dict[str, RtZoneConfiguration],
         verbose: bool = False,
         natural_scales: bool = True,
+        derived_species: Optional[Sequence[DerivedSpecies]] = None,
     ) -> Model:
         """
         Creates a new model instance from a single array containing both
@@ -403,6 +417,17 @@ class Model(ReactiveTransportModel):
             network (ReactionNetwork): The reaction network for the RT model.
             config (dict[str, RtZoneConfiguration]): A dictionary of RT configurations,
                 one for each zone in order.
+            verbose (bool): If True, prints additional information about the
+                model construction. Defaults to False.
+            natural_scales (bool): If True, the dimensional parameters are
+                scaled to their natural ranges. Defaults to True.
+            derived_species (Optional[Sequence[DerivedSpecies]]): Measured
+                quantities that are not species of the reaction network but
+                are defined as the sum of several network species (for
+                example DIC, the sum of the aqueous carbonate species). The
+                model scores a measurement column named after a derived
+                measurement against the sum of its components' river
+                concentrations. Defaults to None.
 
         Returns:
             Model: A new, fully parameterized model instance.
@@ -506,4 +531,5 @@ class Model(ReactiveTransportModel):
             network=network,
             rt_zones=rt_zones,
             river_zone=river_zone,
+            derived_species=derived_species,
         )

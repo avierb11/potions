@@ -10,17 +10,34 @@ use pyo3::{
 
 use crate::{
     common_types::{MiscData, RtForcing, RtStep, ZERO_CONC},
-    math::find_root_multi_analytic_fused_then_lm,
+    math::{
+        find_root_multi_analytic_fused_then_lm, invalid_state_error, max_abs, tag_subsystem,
+        OptimizerState,
+    },
     molar, molar_per_time, moles, moles_per_time,
     reactive_transport::{
         kinetic_structures::{
-            EquilibriumParameters, MineralParameters, MonodParameters, RtParameters, TstParameters,
-            ZoneDimensions,
+            smoothed_rel_deriv, EquilibriumParameters, MineralParameters, MonodParameters,
+            RtParameters, TstParameters, ZoneDimensions,
         },
         reaction_network::ReactionNetwork,
     },
     units::{liter, mole, mole_per_liter, AmountOfSubstance, MolarConcentration, Volume},
 };
+
+/// Absolute tolerance (mol/m^3) by which an accepted kinetic state may dip
+/// below zero in any *aqueous* entry before it is rejected as physically
+/// invalid.
+///
+/// A converged kinetic solve routinely leaves trace species (notably CO3--)
+/// slightly negative: the step residual is insensitive to the sign of a
+/// near-zero concentration (the rate-law log terms clamp), and the
+/// speciation re-solve repairs the excursion. Across the East River corpora
+/// the observed excursions reach at most ~2e-7 mol/m^3 (against a CO3--
+/// equilibrium of ~2.5e-11), while genuinely non-physical "monster" states
+/// (e.g. DOC = -1.198) exceed this tolerance by more than five orders of
+/// magnitude and remain fatal.
+const KINETIC_AQ_TOLERANCE: f64 = 2.0e-6;
 
 /// Warm-start cache for the speciation solve. Stores the `x_free` solution from
 /// the previous time step, which is usually an excellent initial guess for the
@@ -375,11 +392,19 @@ impl RtZone {
         // zero. If it fails to converge, fall back to Levenberg-Marquardt
         // (itself using the fused analytic Jacobian) resumed from Newton's best
         // iterate.
-        let sol_aq = find_root_multi_analytic_fused_then_lm(
+        let sol_aq = match find_root_multi_analytic_fused_then_lm(
             &fused,
             c_0_full.slice(s![0..num_aq]).to_owned(),
             verbose,
-        )?;
+        ) {
+            Ok(x) => x,
+            // The shared Newton / LM chain does not know which subsystem it
+            // is serving (its message carries only the hard-coded
+            // "reactive-transport" label). Tag the error at this boundary so
+            // the Python driver can route the fsolve backup to the kinetic
+            // sub-problem via `err.subsystem`.
+            Err(e) => return Err(tag_subsystem(e, "kinetic")),
+        };
 
         let mut vf: Vec<f64> = Vec::with_capacity(num_spec);
         vf.extend_from_slice(sol_aq.as_slice().unwrap());
@@ -396,12 +421,19 @@ impl RtZone {
     ///
     /// The Newton / LM kinetic solve runs here; all post-solve bookkeeping
     /// happens in [`Self::finish_step_internal`].
+    ///
+    /// `x_free_override` is `None` on the normal path. When the speciation
+    /// re-equilibration has failed and the Python-side `scipy.optimize.fsolve`
+    /// backup has converged its own free-variable vector, `step` passes it
+    /// here and the speciation branch adopts it directly (gated on the same
+    /// physical-validity check as the internal solve).
     pub fn step_internal(
         &self,
         c_0: &Array1<f64>,
         d: &RtForcing,
         dt_days: f64,
         verbose: bool,
+        x_free_override: Option<&Array1<f64>>,
     ) -> PyResult<StepResultAll> {
         let c_0_arr: Array1<molar> = c_0.clone(); // Initial concentrations in the zone
 
@@ -418,7 +450,7 @@ impl RtZone {
         //     c_after_rt[i] = *c_i;
         // }
 
-        self.finish_step_internal(&c_0_arr, &c_after_rt, d, dt_days, verbose)
+        self.finish_step_internal(&c_0_arr, &c_after_rt, d, dt_days, verbose, x_free_override)
     }
 
     /// Finalize a zone step from an already-solved post-reaction state.
@@ -435,6 +467,13 @@ impl RtZone {
     /// `dt_days` is not consumed by the bookkeeping (it belongs to the
     /// kinetic solve) but is kept for signature symmetry with
     /// [`Self::step_internal`].
+    ///
+    /// `x_free_override` is `None` on the normal path and on
+    /// `step_with_solution`. When the speciation re-equilibration itself
+    /// failed and the Python-side fsolve backup converged its own
+    /// free-variable vector, `step` passes it here: the speciation branch
+    /// then adopts the vector directly (gated on the same physical-validity
+    /// check as the internal solve) instead of re-solving.
     fn finish_step_internal(
         &self,
         c_0: &Array1<molar>,
@@ -442,7 +481,61 @@ impl RtZone {
         d: &RtForcing,
         dt_days: f64,
         verbose: bool,
+        x_free_override: Option<&Array1<f64>>,
     ) -> PyResult<StepResultAll> {
+        // Physical-validity gate on the accepted post-reaction state: every
+        // *aqueous* entry must be finite and at least -KINETIC_AQ_TOLERANCE.
+        // The kinetic solve minimizes the step residual, which is insensitive
+        // to the sign of a near-zero concentration (the log terms clamp), so
+        // a stalled or non-unique solve can "converge" onto a non-physical
+        // branch (a largely negative or zeroed aqueous species, huge exchange
+        // values) while still meeting the residual bar. Without this gate such
+        // a state is accepted here and only rejected one step later by the
+        // speciation solve, with the failure mis-attributed to that solve;
+        // catching it here fails the run at the step that *created* the
+        // invalid state, with correct subsystem attribution.
+        //
+        // The tolerance (rather than strict positivity) is essential:
+        // healthy converged solves routinely leave trace species slightly
+        // negative (see KINETIC_AQ_TOLERANCE), and rejecting those turned
+        // every affected row into a failure.
+        //
+        // The non-aqueous tail (minerals, exchange) is deliberately not
+        // gated: those entries are legitimately zero in many steps. The
+        // final speciation state is still screened by B1a after
+        // re-equilibration, so no previously rejected state passes through.
+        let num_aq: usize = self.network.num_aqueous_species();
+        if !c_after_rt
+            .slice(s![0..num_aq])
+            .iter()
+            .all(|c| c.is_finite() && *c >= -KINETIC_AQ_TOLERANCE)
+        {
+            let last_f_x: Array1<f64> = self.residual_function_rust(c_0, c_after_rt, d, dt_days);
+            let jacobian: Array2<f64> =
+                self.jacobian_residual_function_rust(c_0, c_after_rt, d, dt_days);
+            let error: f64 = max_abs(&last_f_x);
+            let state = OptimizerState {
+                iteration: 0,
+                final_x: c_after_rt.clone(),
+                last_f_x,
+                initial_x: c_0.clone(),
+                jacobian,
+                error,
+                errors: Vec::new(),
+                xs: Vec::new(),
+                fxs: Vec::new(),
+                jacobians: Vec::new(),
+                lambdas: Vec::new(),
+                best_x: c_after_rt.clone(),
+                best_err: error,
+            };
+            return Err(invalid_state_error(
+                &state,
+                "kinetic",
+                "accepted kinetic state is physically invalid (non-finite or unreasonably negative aqueous concentration)",
+            ));
+        }
+
         let num_spec: usize = self.network.num_species();
         let c_in: &Array1<molar> = &d._conc_in;
         let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
@@ -472,14 +565,64 @@ impl RtZone {
                     // variables to solve for: nothing to re-speciate. The kinetic
                     // concentrations are already the final answer.
                     (*c_after_rt).clone()
+                } else if let Some(x_override) = x_free_override {
+                    // The internal speciation solve failed and the Python-side
+                    // fsolve backup converged its own free-variable vector:
+                    // adopt it directly. Gate it on the same physical-validity
+                    // check the internal solve applies, so a non-finite /
+                    // non-positive "solution" is rejected with a typed
+                    // `OptimizationError` (tagged "speciation") instead of
+                    // propagating into the zone state.
+                    let concs: Array1<f64> = self.eq.conc_func_rust(x_override);
+                    if !concs.iter().all(|c| c.is_finite() && *c > 0.0) {
+                        let f_x: Array1<f64> = self
+                            .eq
+                            .residual_rust(x_override, &self.eq.totals_rust(c_after_rt));
+                        let err: f64 = max_abs(&f_x);
+                        let state = OptimizerState {
+                            iteration: 0,
+                            final_x: x_override.clone(),
+                            last_f_x: f_x.clone(),
+                            initial_x: x_override.clone(),
+                            jacobian: self.eq.jacobian_residual_rust(x_override),
+                            error: err,
+                            errors: vec![err],
+                            xs: vec![x_override.clone()],
+                            fxs: vec![f_x.clone()],
+                            jacobians: Vec::new(),
+                            lambdas: Vec::new(),
+                            best_x: x_override.clone(),
+                            best_err: err,
+                        };
+                        return Err(invalid_state_error(
+                            &state,
+                            "speciation",
+                            "supplied free-variable vector is physically invalid (non-finite or non-positive concentration)",
+                        ));
+                    }
+                    // The gate proved the state is physically valid, so it is a
+                    // safe warm start for the next step's speciation solve
+                    // (equivalent to the conditional cache write in the normal
+                    // branch below, which caches after the same gate).
+                    self.last_x_free.set(x_override.clone());
+                    concs
                 } else {
                     // Warm-start the speciation Newton iteration with the `x_free`
                     // solution from the previous time step (concentrations move
                     // slowly, so it is an excellent initial guess).
                     let initial_x = self.last_x_free.get(self.num_free());
                     let x_free = self.eq.x_free_solve_rust(c_after_rt, &initial_x, verbose)?;
-                    self.last_x_free.set(x_free.clone());
-                    self.eq.conc_func_rust(&x_free)
+                    let c_after_eq = self.eq.conc_func_rust(&x_free);
+                    // Cache the warm start only for a physically valid state
+                    // (all concentrations finite and positive): `last_x_free`
+                    // is the initial guess for the *next* step's speciation
+                    // solve, so a poisoned guess must never be stored, even
+                    // though `x_free_solve_rust` already rejects invalid
+                    // plateaus.
+                    if c_after_eq.iter().all(|c| c.is_finite() && *c > 0.0) {
+                        self.last_x_free.set(x_free);
+                    }
+                    c_after_eq
                 }
             }
         };
@@ -759,7 +902,7 @@ impl RtZone {
         }
     }
 
-    #[pyo3(signature = (c_0, d, dt_days, verbose=false))]
+    #[pyo3(signature = (c_0, d, dt_days, verbose=false, x_free_override=None))]
     pub fn step<'py>(
         &self,
         py: Python<'py>,
@@ -767,9 +910,11 @@ impl RtZone {
         d: &RtForcing,
         dt_days: f64,
         verbose: bool,
+        x_free_override: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<RtStep> {
         let c_0_arr: Array1<f64> = c_0.to_owned_array();
-        let r = self.step_internal(&c_0_arr, d, dt_days, verbose)?;
+        let x_override: Option<Array1<f64>> = x_free_override.map(|a| a.to_owned_array());
+        let r = self.step_internal(&c_0_arr, d, dt_days, verbose, x_override.as_ref())?;
         Ok(make_rt_step(py, &r, &d._conc_in))
     }
 
@@ -798,7 +943,7 @@ impl RtZone {
     ) -> PyResult<RtStep> {
         let c_0_arr: Array1<f64> = c_0.to_owned_array();
         let c_after_rt_arr: Array1<f64> = c_after_rt.to_owned_array();
-        let r = self.finish_step_internal(&c_0_arr, &c_after_rt_arr, d, dt_days, verbose)?;
+        let r = self.finish_step_internal(&c_0_arr, &c_after_rt_arr, d, dt_days, verbose, None)?;
         Ok(make_rt_step(py, &r, &d._conc_in))
     }
 
@@ -904,14 +1049,23 @@ impl RtZone {
 ///   ```text
 ///   dM_i/dchms_j = A_i * ( δ_{j,m_i} (Mn_i+T_i) + chms[m_i] * d(Mn_i+T_i)/dchms_j )
 ///   ```
-///   where the log-derivative of the Monod product is
-///   `dMn_i/dchms_j = Mn_i * ( Kmonod_ij/(Kmonod_ij+chms_j)² − Kinhib_ij/(Kinhib_ij+chms_j)² )`
+///   where the log-derivative of the Monod product
+///   `Mn_i = Π_f c/(K_f+c) · Π_h K_h/(K_h+c)` is
+///   `dMn_i/dchms_j = Mn_i * ( Kmonod_ij/(chms_j·(Kmonod_ij+chms_j)) − 1/(Kinhib_ij+chms_j) )`
 ///   (a term present only when that entry is finite), and the TST term
 ///   `T_i = D_i (1 − Q_i/K_i)` with `Q_i = 10^(E_q_i)`, `D_i = 10^(E_d_i)`:
+///   Q and D are power products (10^(Σ ν·log10 c) = Π c^ν exactly), so their
+///   derivatives are V·ν·s'/s — no ln(10), which cancels — where s'/s is the
+///   relative derivative of the smoothed concentration `s`
+///   ([`kinetic_structures::smoothed_conc`]):
 ///   ```text
-///   dT_i/dchms_j = D_i dep_ij / chms_j (1 − Q_i/K_i)
-///                 − D_i Q_i stoich_ij / (chms_j K_i)
+///   dT_i/dchms_j = D_i dep_ij (1 − Q_i/K_i) · s'(chms_j)/s(chms_j)
+///                 − D_i Q_i stoich_ij · s'(chms_j)/s(chms_j) / K_i
 ///   ```
+///   with `s'/s = sigmoid(chms_j/δ)/s(chms_j)`: bit-identical to the
+///   historical `1/chms_j` for every chms_j ≥ 1e-25, and smoothly decaying
+///   through zero on the non-physical side of the zero plane (the historical
+///   form jumped 0 → 1/chms_j there, a kink that stalled Newton / LM).
 ///
 /// Only the aqueous rows `r < num_aq` are non-empty (the mineral/exchange rows of
 /// the ODE are fixed at zero, so their Jacobian rows are zero).
@@ -981,8 +1135,15 @@ pub(crate) struct KineticReactionTerms {
 }
 
 /// Compute the shared kinetic terms at state `conc`. This mirrors, factor for
-/// factor, the reaction block that [`residual_jacobian_impl`] used to contain,
-/// so the resulting `dm` is bit-for-bit identical to the historical one. When
+/// factor, the reaction block that [`residual_jacobian_impl`] used to contain.
+/// For every physical state (concentrations ≥ 1e-25 mol/L) all values and
+/// derivatives here are bit-for-bit identical to the historical ones:
+/// [`kinetic_structures::smoothed_conc`] and its relative derivative coincide
+/// exactly with the historical hard clamp and `1/c` there. The change is
+/// confined to the non-physical side of the zero-concentration plane, where
+/// the TST value and derivative now vary smoothly instead of kinked (the
+/// historical hard clamp kinked dQ/dc from 0 to a finite value at every
+/// zero-concentration plane — the stall that fix 3 removes). When
 /// `do_reactions` is false the terms hold the renormalised concentrations and
 /// empty kinetic blocks (the Jacobian / ODE then reduce to pure transport).
 pub(crate) fn reaction_terms_impl<M2C>(
@@ -1060,7 +1221,10 @@ where
         }
     }
 
-    // dM/dchms : (num_min x num_spec)
+    // dM/dchms : (num_min x num_spec). The relative derivative s'/s of the
+    // smoothed concentration for every species is computed once here and
+    // reused by the TST derivative below (see `smoothed_rel_deriv`).
+    let rel_dsc: Array1<f64> = chms.map(|x| smoothed_rel_deriv(*x));
     let mut dm: Array2<f64> = Array2::zeros((num_min, num_spec));
     for i in 0..num_min {
         if !mineral_active[i] || !aux_present || !reactivity[i].is_finite() {
@@ -1074,34 +1238,36 @@ where
         let k_i = k_min[i];
         for jidx in 0..num_spec {
             let c_j = chms[jidx];
-            let (inv_cj, safe_cj) = if c_j.abs() > 0.0 {
-                (1.0 / c_j, c_j)
-            } else {
-                (0.0, 0.0)
-            };
+            let safe_cj: f64 = if c_j.abs() > 0.0 { c_j } else { 0.0 };
 
             // dMn_i/dchms_j, where Mn_i = Π_f c/(K_f+c) · Π_h K_h/(K_h+c)
             //   d ln(Mn)/dc_j = [ K_f/(c_j(c_j+K_f)) ]_finite-monod
-            //                  − [ K_h/(c_j(c_j+K_h)) ]_finite-inhib
+            //                  − [ 1/(K_h+c_j) ]_finite-inhib
+            // The Monod term keeps its c_j ≠ 0 guard (its derivative has a
+            // true pole at c_j = 0); the inhibitor 1/(K_h+c_j) has no pole at
+            // c_j = 0, so only its finiteness is guarded.
             let mut g = 0.0;
             let mk = monod_np[(i, jidx)];
             if mk.is_finite() && safe_cj.abs() > 0.0 {
                 g += mk / (safe_cj * (mk + safe_cj));
             }
             let ikv = inhib_np[(i, jidx)];
-            if ikv.is_finite() && safe_cj.abs() > 0.0 {
-                g -= ikv / (safe_cj * (ikv + safe_cj));
+            if ikv.is_finite() {
+                g -= 1.0 / (ikv + c_j);
             }
             let dmn = mn_i * g;
 
-            // dT_i/dchms_j, where T_i = D_i (1 − Q_i/K_i), Q_i=D_i·10^(Σ ν log10 c)
-            //   dT = D·dep_j (1−Q/K)/c_j  − D·Q·stoich_j/(K·c_j)
-            let dts = if safe_cj.abs() > 0.0 {
-                d_i * dep_np[(i, jidx)] * inv_cj * (1.0 - q_i / k_i)
-                    - d_i * q_i * stoich_np[(i, jidx)] * inv_cj / k_i
-            } else {
-                0.0
-            };
+            // dT_i/dchms_j, where T_i = D_i (1 − Q_i/K_i) and
+            // Q_i = D_i·Π c^ν (a power product: 10^(Σ ν log10 c) = Π c^ν
+            // exactly). Its derivative is V·ν·s'/s — no ln(10), which
+            // cancels — with s'/s = `smoothed_rel_deriv`. For every physical
+            // state (c_j ≥ 1e-25) this is bit-identical to the old 1/c_j
+            // form; on the non-physical side it decays smoothly through the
+            // zero plane instead of jumping 0 → 1/c_j, which removes the
+            // kink that stalled Newton / LM at zero-concentration planes.
+            let rel_j: f64 = rel_dsc[jidx];
+            let dts = d_i * dep_np[(i, jidx)] * rel_j * (1.0 - q_i / k_i)
+                - d_i * q_i * stoich_np[(i, jidx)] * rel_j / k_i;
 
             dm[(i, jidx)] = a * (dmn + dts);
         }
@@ -1523,7 +1689,7 @@ pub fn run_zone_steps<'py>(
         // so a shared borrow is all we need; the speciation cache (an `Arc`)
         // stays shared with the caller across steps, so warm-starts still work.
         let zone = zones[i].borrow();
-        match zone.step_internal(&s_i, d, dt, verbose) {
+        match zone.step_internal(&s_i, d, dt, verbose, None) {
             Ok(r) => {
                 // Record outgoing mass so downstream zones (k > i) can consume it.
                 lat_mass.row_mut(i).assign(&r.lat_mass);

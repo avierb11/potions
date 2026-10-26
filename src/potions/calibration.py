@@ -146,10 +146,18 @@ def _build_init_states(data: RtCalibrationData) -> dict[str, ChemicalState]:
         else float(data.conc_df[data.target_species].mean())
     )
 
-    for zone_name in data.zone_configs:
+    for zone_name, zone_cfg in data.zone_configs.items():
         if zone_name == "river":
             continue
         init_states[zone_name] = ChemicalState(
+            mineral=(
+                # The RT model requires an initial state for every mineral in
+                # any zone that does reactions; give all reactive zones the
+                # documented ``data.mineral_conc`` value.
+                {sp.name: data.mineral_conc for sp in data.network.mineral}
+                if zone_cfg.do_reactions
+                else {}
+            ),
             primary={
                 sp.name: (mean_target if sp.name == data.target_species else data.init_aq_conc)
                 for sp in data.network.primary_aqueous

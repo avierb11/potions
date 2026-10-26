@@ -31,6 +31,7 @@ from ..model_components import (
     is_bottom_zone,
     register_bottom_zone,
 )
+from ..objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from ..reactive_transport.common_networks import get_carbon_network
 from ..reactive_transport_model import ReactiveTransportModel
 from ..utils import (
@@ -311,13 +312,37 @@ def test_meas_streamflow_negative_raises(
         model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
 
 
-def test_meas_streamflow_nan_raises(
+def test_meas_streamflow_nan_allowed(
+    model: ValidModel, dates: pd.DatetimeIndex
+) -> None:
+    stream = pd.Series(np.linspace(0.1, 1.0, len(dates)), index=dates)
+    stream.iloc[1] = float("nan")
+
+    res = model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+
+    # NaN marks a missing measurement: the run completes, the series is carried
+    # through to the results as given, and it is scored as given (the default
+    # objective functions skip missing observations pairwise).
+    assert res.simulation["meas_streamflow_mmd"].isna().sum() == 1
+    assert list(res.objective_functions.index) == [
+        name for name, _ in DEFAULT_OBJECTIVE_FUNCTIONS
+    ]
+    expected = np.array(
+        [
+            func(stream, res.simulation["streamflow_sim"])
+            for _, func in DEFAULT_OBJECTIVE_FUNCTIONS
+        ]
+    )
+    np.testing.assert_allclose(res.objective_functions.to_numpy(), expected)
+
+
+def test_meas_streamflow_inf_raises(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
     stream = pd.Series(0.1, index=dates)
-    stream.iloc[1] = float("nan")
+    stream.iloc[1] = float("inf")
     with pytest.raises(
-        ModelInputError, match="meas_streamflow contains non-finite"
+        ModelInputError, match="meas_streamflow contains infinite"
     ):
         model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
 

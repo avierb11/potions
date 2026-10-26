@@ -44,6 +44,33 @@ class ForcingData:
     pet: Series
 
 
+@dataclass(frozen=True)
+class DerivedSpecies:
+    """A measured river quantity defined as a sum of network species.
+
+    Some measurements do not name a single species of the reaction
+    network, but are derived from several of them.  Dissolved inorganic
+    carbon (DIC), for example, is the sum of the aqueous carbonate
+    species (``CO2(aq)``, ``HCO3-``, and ``CO3--``).  Declaring such a
+    quantity on the model lets the reactive transport model score a
+    measurement column named :attr:`name` against the simulated river
+    concentration of the sum of :attr:`components`, exactly as it scores
+    a measured network species against its own ``{species}_riv`` column.
+
+    Attributes:
+        name: The name of the derived measurement (for example ``"DIC"``).
+            Must not collide with the name of a network species.
+        components: The names of the network species whose river
+            concentrations are summed, in concentration units (for
+            example ``("CO2(aq)", "HCO3-", "CO3--")``).  Every component
+            must be an aqueous (primary or secondary) species of the
+            network.
+    """
+
+    name: str
+    components: tuple[str, ...]
+
+
 @dataclass
 class LapseRateParameters:
     temp_factor: float  # The slope of the temperature line

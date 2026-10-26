@@ -1066,8 +1066,10 @@ class HydrologicalModel:
           equal-length precip/temp/pet series;
         - no non-finite (NaN/Inf) values in precip, temp, or pet;
         - precipitation and PET are non-negative at every step;
-        - measured streamflow (if given) is finite, non-negative, and the
-          same length as the forcing series;
+        - measured streamflow (if given) has the same length as the forcing
+          series and contains no infinite or negative values (NaN entries
+          mark missing measurements and are excluded from the objective
+          functions);
         - `init_state` (if given) has one value per zone, all finite and
           non-negative.
 
@@ -1151,16 +1153,18 @@ class HydrologicalModel:
                     "have the same length."
                 )
             stream_vals = self._series_to_floats(meas_streamflow, "meas_streamflow")
-            if not np.all(np.isfinite(stream_vals)):
-                bad_idx = np.where(~np.isfinite(stream_vals))[0][:5]
+            inf_idx = np.where(np.isinf(stream_vals))[0][:5]
+            if inf_idx.size:
                 raise ModelInputError(
-                    f"meas_streamflow contains non-finite (NaN/Inf) values at "
-                    f"index{'s' if len(bad_idx) > 1 else ''} {list(map(int, bad_idx))}."
+                    "meas_streamflow contains infinite values at "
+                    f"{'indices' if inf_idx.size > 1 else 'index'} "
+                    f"{list(map(int, inf_idx))}."
                 )
-            if np.any(stream_vals < 0):
+            measured_vals = stream_vals[~np.isnan(stream_vals)]
+            if measured_vals.size and np.any(measured_vals < 0):
                 raise ModelInputError(
                     "meas_streamflow contains negative values "
-                    f"(min = {float(np.min(stream_vals)):.6g}). Measured "
+                    f"(min = {float(np.min(measured_vals)):.6g}). Measured "
                     "streamflow must be >= 0."
                 )
 
@@ -1349,7 +1353,9 @@ class HydrologicalModel:
             init_state (Optional[NDArray[f64]]): The initial storage for each
                 zone. If None, uses `default_init_state()`. Defaults to None.
             meas_streamflow (Optional[Series]): A time series of observed
-                streamflow for calculating performance metrics. Defaults to None.
+                streamflow for calculating performance metrics. Missing days
+                may be NaN and are excluded from every metric; infinite and
+                negative values are rejected. Defaults to None.
             average_elevation (Optional[float]): The average elevation of the
                 meteorological gauge (required for lapse rates). Defaults to None.
             elevations (Optional[list[float]]): A list of mean elevations for

@@ -29,6 +29,7 @@ __all__ = [
     "SnowZone",
     "SurfaceZone",
     "BatchResults",
+    "DerivedSpecies",
     "ForcingData",
     "HbvLateralModel",
     "HbvModel",
@@ -103,6 +104,7 @@ from .common_types import (
     HydroModelResults,
     RtModelResults,
     ModelResults,
+    DerivedSpecies,
     ForcingData,
 )
 
