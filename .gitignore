@@ -202,6 +202,7 @@ doc/_static/
 compiled/
 doc.bak/
 misc/
+results/
 *.bak/
 docs/
 AGENTS.md

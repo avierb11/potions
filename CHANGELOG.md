@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **East River calibration GUI** in `potions.gui`: an interactive
+  Streamlit app (one sidebar slider per calibrated parameter, a
+  per-run objective-function table, and streamflow / river-concentration /
+  zone / reaction-rate figures) that re-runs the East River three-layer
+  lateral hydrology–reactive-transport model on every change.  Start it
+  with the new `potions-gui` console script; the East River series CSV
+  ships with the package, and the *Save run* button writes a fresh
+  timestamped directory under `results/` in the current working
+  directory.  Streamlit (>= 1.28) is now a core dependency.
 - **Pre-run model validation** with descriptive, typed errors:
   - New error types in `potions.utils`: `ModelStructureError` and
     `ModelInputError` (both subclass `ValueError` and `HydrologyError`).
