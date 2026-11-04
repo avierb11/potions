@@ -68,8 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`parameters.csv`, from `describe_parameters()`), the evaluated objective
   functions when measured data was provided (`objective_functions.csv`), and a
   `run_info.json` with metadata (version, run length, objective values, ...);
-  RT runs additionally store the complete step/state objects in
-  `results.pkl` (with a text note if the state cannot be pickled).
+  RT runs additionally store their results object in
+  `results.pkl` (with a text note if it cannot be pickled).
   `run_batch` writes each member's time series and parameters into a
   timestamped batch folder, plus a batch-level `run_info.json`.
   - Saving is configurable: pass `save_results=False` (or keep
@@ -168,6 +168,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   lateral / vertical outgoing mass for a post-reaction state on demand.
   `RtStep` objects pickled in `results.pkl` by a previous release (nine
   fields) can no longer be unpickled.
+- **`RtModelResults` is reduced to its tabular output.** The `rt_forcings`,
+  `steps`, and `other` fields are removed: the per-step `RtStep` objects and
+  the stacked state arrays were redundant with the `simulation` DataFrame
+  (which is assembled from them), and the forcing matrix is a deterministic
+  function of the hydro results and `precip_conc`. `run_rt_model` still
+  computes the forcing and the per-step states during the run, but only the
+  assembled `simulation` DataFrame (plus the objective functions) is kept in
+  the returned and pickled results object. `RtModelResults` pickled by a
+  previous release can no longer be unpickled.
+- **`{mineral}_rate_{zone}` columns are emitted only for zones in which
+  reactions run** (the zone's `do_reactions` flag). Zones with reactions
+  disabled no longer carry their (always zero) rate columns, so the RT
+  `simulation.csv` and `results.pkl` shrink by one rate column per mineral
+  per non-reacting zone.
 
 ### Fixed
 

@@ -1220,9 +1220,45 @@ class ReactiveTransportModel(HydrologicalModel):
         save_results: bool | None = None,
         results_dir: str | None = None,
     ) -> RtModelResults:
-        """Run the reactive transport simulation forwards
-        `mineral_conc` is a dictionary containing the mineral volume fractions (0,porosity) of the minerals
-        of each of the zones
+        """Run the reactive transport simulation forwards in time.
+
+        Steps every reactive transport zone forward over the hydrological
+        simulation's time steps, coupling the zones through their lateral and
+        vertical concentrations, and assembles the per-step states and
+        mineral rates into the run's output DataFrame.
+
+        Args:
+            hydro_res: The results of the hydrological run whose fluxes and
+                storages force the transport simulation.
+            precip_conc: The precipitation concentrations, one matrix per
+                surface zone, shape `(num_surface_zones, num_steps,
+                num_species)`.
+            initial_state: The initial chemical state of every zone
+                (aqueous, secondary, mineral, and exchange concentrations).
+            meas_river_conc: Optional measured river concentrations; when
+                provided, the simulated ones are scored against them.
+            objective_functions: The metrics to evaluate when measured
+                river concentrations are provided.
+            verbose: Print progress information as the run proceeds.
+            return_partial: On a failed step, return the results computed
+                up to that step instead of raising.
+            failed_dir: Optional directory for failed-step diagnostic
+                files.
+            save_results: Whether to save the run's results and parameters
+                to disk (see the Saving section below).
+            results_dir: Base directory under which the saved run folder is
+                written.
+
+        Returns:
+            An `RtModelResults` whose `simulation` DataFrame carries, per
+            time step, each zone's species concentrations
+            (`{species}_{zone}`), the mineral reaction rates of every zone
+            in which reactions run (`{mineral}_rate_{zone}`), and the
+            simulated river concentrations of every network species and
+            declared derived measurement (`{name}_riv`);
+            `objective_functions` is a DataFrame of metric values per
+            measured species, or None when no measured river concentrations
+            were provided.
 
         Saving:
         Like `run_hydro_model`, the run's results and the model's parameters are
@@ -1369,9 +1405,10 @@ class ReactiveTransportModel(HydrologicalModel):
         # ============================ #
 
         # ==== Run the model forwards ==== #
+        # `steps` accumulates every zone's per-step state and mineral rates;
+        # it is the sole source for the output DataFrame and is not kept
+        # beyond the return value of this method.
         steps: list[list[RtStep]] = []
-        old_states: list[NDArray] = []
-        new_states: list[NDArray] = []
 
         final_completed: int = len(dates)
         try:
@@ -1383,8 +1420,6 @@ class ReactiveTransportModel(HydrologicalModel):
                 dt_days: float = time_step_days[i]
                 if dt_days < 1e-6:
                     raise ValueError(f"Time step on step {i} is too small: {dt_days}")
-
-                old_states.append(state)
 
                 # print(f"Surface state before: {state[1]}")
 
@@ -1403,7 +1438,6 @@ class ReactiveTransportModel(HydrologicalModel):
                 new_state = np.array([x.state.copy() for x in step]).copy()
                 # print(f"Surface state after: {new_state[1]}")
 
-                new_states.append(new_state[:])
                 state[:] = new_state[:]
                 # print(f"New state: {state[:, 0]}")
 
@@ -1436,15 +1470,19 @@ class ReactiveTransportModel(HydrologicalModel):
                 col_name: str = f"{species_name}_{zone_name}"
                 data_cols[col_name] = conc
 
-            # Get the mineral species
-            for species_id, species_name in enumerate(mineral_names):
-                conc = np.empty(num_steps, dtype=np.float64)
-                for i in range(final_completed):
-                    single_step = steps[i][zone_id]
-                    conc[i] = single_step.mineral_rates[species_id]
+            # Mineral reaction rates only exist for zones in which the
+            # mineral reactions run (the zone's own `do_reactions` flag);
+            # for the other zones the solver returns zero rates, so no
+            # `{mineral}_rate_{zone}` columns are emitted for them.
+            if self.rt_zones[zone_name].do_reactions:
+                for species_id, species_name in enumerate(mineral_names):
+                    conc = np.empty(num_steps, dtype=np.float64)
+                    for i in range(final_completed):
+                        single_step = steps[i][zone_id]
+                        conc[i] = single_step.mineral_rates[species_id]
 
-                col_name = f"{species_name}_rate_{zone_name}"
-                data_cols[col_name] = conc
+                    col_name = f"{species_name}_rate_{zone_name}"
+                    data_cols[col_name] = conc
 
         res_df: DataFrame = DataFrame(data=data_cols, index=dates)
 
@@ -1511,9 +1549,6 @@ class ReactiveTransportModel(HydrologicalModel):
         rt_sim_res: RtModelResults = RtModelResults(
             simulation=res_df,
             objective_functions=obj_df,
-            rt_forcings=rt_forcing,
-            steps=steps,
-            other={"old_states": old_states, "new_states": new_states},
         )
 
         # Save the run's results and parameters (on by default; see result_saving).

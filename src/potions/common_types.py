@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from typing import (
-    Any,
     Callable,
     Literal,
     Optional,
@@ -12,8 +11,6 @@ from typing import (
 import numpy as np
 from numpy import float64 as f64
 from pandas import DataFrame, Series
-
-from .core import RtStep
 
 if TYPE_CHECKING:
     from scipy.optimize import OptimizeResult
@@ -186,11 +183,24 @@ class HydroModelResults:
 
 @dataclass
 class RtModelResults:
+    """A type containing the results of a reactive transport model run.
+
+    Attributes:
+        simulation (DataFrame): A DataFrame with the time series of each
+            zone's species concentrations, the mineral reaction rates of
+            every zone in which reactions run (``{mineral}_rate_{zone}``),
+            and the simulated river concentrations of every network species
+            and declared derived measurement (``{name}_riv``).
+        objective_functions (Optional[DataFrame]): One row per measured
+            species and one column per objective function; None when the
+            run was not scored against measured river concentrations.
+        saved_dir (Optional[str]): The directory this run was saved to
+            (`"results/run_<timestamp>"` by default); None if saving was
+            disabled.
+    """
+
     simulation: DataFrame
     objective_functions: Optional[DataFrame]
-    rt_forcings: np.ndarray
-    steps: list[list[RtStep]]
-    other: dict[str, Any]
     saved_dir: Optional[str] = None
 
 

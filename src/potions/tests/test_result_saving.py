@@ -50,9 +50,6 @@ def _make_rt_results(sim_df: DataFrame) -> RtModelResults:
     return RtModelResults(
         simulation=sim_df,
         objective_functions=None,
-        rt_forcings=np.zeros((len(sim_df), 2)),
-        steps=[],
-        other={"old_states": np.zeros((2, 6)), "new_states": np.zeros((2, 6))},
     )
 
 
