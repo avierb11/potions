@@ -3,10 +3,7 @@ This file contains commonly-used model configurations
 """
 
 from .model import Model
-from .core import SnowZone, SurfaceZone, GroundZone, GroundZoneB
-
-SubsurfaceZone = GroundZone
-SubsurfaceZoneB = GroundZoneB
+from .core import SnowZone, SurfaceZone, SubsurfaceZone, SubsurfaceZoneB
 
 
 class HbvModel(Model):

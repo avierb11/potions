@@ -2,10 +2,10 @@ import numpy as np
 from numpy import float64 as f64
 
 from ..core import (
-    GroundZone,
     HydroForcing,
     HydroStep,
     SnowZone,
+    SubsurfaceZone,
     SurfaceZone,
 )
 
@@ -72,10 +72,10 @@ def test_SurfaceZone() -> None:
     assert 0.0 <= new_state.vap_flux
 
 
-def test_GroundZone() -> None:
+def test_SubsurfaceZone() -> None:
     d: HydroForcing = HydroForcing(precip=1.0, temp=5.0, pet=2.0, q_in=0.0)
 
-    gz: GroundZone = GroundZone(1e-3, 1.0, 1.0)
+    gz: SubsurfaceZone = SubsurfaceZone(1e-3, 1.0, 1.0)
 
     assert gz.param_list() == [1e-3, 1.0, 1.0]
 
@@ -86,7 +86,7 @@ def test_GroundZone() -> None:
     assert abs(gz.vert_flux(0.3, d) - 0.3) < 1e-9
 
     # A different percolation cap should bind instead.
-    gz_low_perc: GroundZone = GroundZone(1e-3, 1.0, 0.3)
+    gz_low_perc: SubsurfaceZone = SubsurfaceZone(1e-3, 1.0, 0.3)
     assert abs(gz_low_perc.vert_flux(50.0, d) - 0.3) < 1e-9
     assert abs(gz_low_perc.vert_flux(0.2, d) - 0.2) < 1e-9
 
@@ -98,8 +98,8 @@ def test_GroundZone() -> None:
     _assert_step_mass_balance(gz, s_0, d, d_t)
 
 
-def test_GroundZone_default() -> None:
-    gz: GroundZone = GroundZone.default()
-    assert isinstance(gz, GroundZone)
+def test_SubsurfaceZone_default() -> None:
+    gz: SubsurfaceZone = SubsurfaceZone.default()
+    assert isinstance(gz, SubsurfaceZone)
     # Parameter round-trip is exact.
     assert gz.param_list() == [1e-2, 1.0, 1.0]

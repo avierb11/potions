@@ -74,12 +74,12 @@ impl RiverZone {
         let monod_rate: Array1<molar_per_time> = self.monod.rate_rust(&chms);
         let tst_rate: Array1<molar_per_time> = self.tst.rate_rust(&chms);
         let aux_rate: Array1<f64>;
-        let reactivity: &Array1<f64>;
+        let k_a: &Array1<f64>;
         // let aux_rate: Array1<f64> = self.aux.unwrap().factor_rust(d);
 
         match &self.aux {
             Some(v) => {
-                reactivity = &v.reactivity;
+                k_a = &v.k_a;
                 aux_rate = v.factor_rust(d);
             }
             None => {
@@ -98,11 +98,11 @@ impl RiverZone {
         // mineral concentrations.
         let min_start_ind: usize = self.network.num_aqueous_species();
 
-        // Mineral reaction rate: the `86400 * reactivity` factor converts the
+        // Mineral reaction rate: the `86400 * k_a` factor converts the
         // per-second rate constant to a per-day one (with the dimensionless aux
         // factor) — a rate-parameter conversion, kept raw f64.
         let mineral_conc_rates: Array1<molar_per_time> =
-            86_400.0 * reactivity * aux_rate * (monod_rate + tst_rate);
+            86_400.0 * k_a * aux_rate * (monod_rate + tst_rate);
 
         // Convert the molar rate of production to the total amount per unit area by multiplying by the depth
         // Because 1 mm * m^2 = 1 L, so (moles/L/T) * (depth) = (moles/T) to get the total production rate
@@ -351,20 +351,6 @@ impl RiverZone {
     ) -> PyResult<RtStep> {
         // Solve kinetic reactions first
         let c_0_arr: Array1<molar> = c_0.to_owned_array(); // Initial concentrations in the zone
-        let c_in: &Array1<molar> = &d._conc_in;
-        let tot_moles_init: Array1<moles> = self.get_tot_moles_rust(&c_0_arr, d); // Initial moles of each species at the start of the step
-        let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
-        let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
-        let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
-        let tot_moles_ext: Array1<f64> = q_ext * c_in; // Total moles that just pass through the zone and do not interact with mass balance
-
-        let set_minerals_to_zero = |conc: Array1<f64>| {
-            let mut x = conc.clone();
-            for i in self.network.num_aqueous_species()..self.network.num_species() {
-                x[i] = 0.0
-            }
-            x
-        };
 
         // For RiverZone the water flux driving transport is q_internal(). The
         // mineral block sits right after the aqueous species, i.e.
@@ -455,56 +441,6 @@ impl RiverZone {
             }
         };
 
-        let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);
-
-        let tot_moles_out_internal: Array1<moles> = set_minerals_to_zero(&c_after_eq * q_int); // Minerals are immobile
-
-        let tot_moles_out: Array1<moles> =
-            set_minerals_to_zero(&tot_moles_ext + tot_moles_out_internal);
-
-        let total_q_out_water: f64 = q_int + q_ext;
-        let frac_lat = d.hydro_step.lat_flux_ext / total_q_out_water;
-        let frac_vert = d.hydro_step.vert_flux_ext / total_q_out_water;
-
-        let lat_mass: Array1<moles>;
-        let vert_mass: Array1<moles>;
-        let lat_conc: Array1<molar>;
-        let vert_conc: Array1<molar>;
-        let (lat_mass, vert_mass, lat_conc, vert_conc) = match q_int + q_ext > 1e-6 {
-            true => {
-                let lat: Array1<moles> = &tot_moles_out * frac_lat;
-                let vert: Array1<moles> = &tot_moles_out * frac_vert;
-                let mut lc: Array1<molar> = lat.clone();
-                let mut vc: Array1<molar> = vert.clone();
-
-                let q_lat = d.hydro_step.lat_flux_ext;
-                let q_vert = d.hydro_step.vert_flux_ext;
-
-                for (i, (l_i, v_i)) in lat.iter().zip(&vert).enumerate() {
-                    if i < self.network.num_aqueous_species() {
-                        if q_lat.abs() <= 1e-6 {
-                            lc[i] = ZERO_CONC;
-                        } else {
-                            lc[i] = l_i / q_lat;
-                        }
-                        if q_vert.abs() <= 1e-6 {
-                            vc[i] = ZERO_CONC;
-                        } else {
-                            vc[i] = v_i / q_vert;
-                        }
-                    }
-                }
-
-                (lat, vert, lc, vc)
-            }
-            false => {
-                let num_species = c_0_arr.len();
-                let z: Array1<f64> = Array1::from_elem(num_species, ZERO_CONC);
-
-                (z.clone(), z.clone(), z.clone(), z.clone())
-            }
-        };
-
         let mineral_rates: Array1<f64> = match self.do_reactions {
             true => self.reaction_rate_rust(&c_after_eq, d, true),
             false => Array1::zeros(self.network.num_minerals()),
@@ -512,13 +448,6 @@ impl RiverZone {
 
         Ok(RtStep {
             state: c_after_eq.to_pyarray(py).unbind(),
-            total_moles: tot_moles_after_eq.to_pyarray(py).unbind(),
-            conc_in: d._conc_in.clone().to_pyarray(py).unbind(),
-            mass_in: (&d._conc_in * d.hydro_step.q_in).to_pyarray(py).unbind(),
-            lat_conc: lat_conc.clone().to_pyarray(py).unbind(),
-            vert_conc: vert_conc.clone().to_pyarray(py).unbind(),
-            lat_mass: lat_mass.to_pyarray(py).unbind(),
-            vert_mass: vert_mass.to_pyarray(py).unbind(),
             mineral_rates: mineral_rates.to_pyarray(py).unbind(),
         })
     }

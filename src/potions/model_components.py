@@ -3,7 +3,7 @@ import operator
 
 from functools import reduce
 
-from .core import GroundZoneB, HydrologicZone
+from .core import HydrologicZone, SubsurfaceZoneB
 
 from typing import Any, Iterator, Optional, overload
 
@@ -166,7 +166,7 @@ BOTTOM_ZONE_CLASSES: set[type] = set()
 of a model structure.
 
 A "bottom zone" is a zone that transmits no vertical flux to a zone below it
-(e.g. ``GroundZoneB``, which has a hardcoded zero vertical flux). Model
+(e.g. ``SubsurfaceZoneB``, which has a hardcoded zero vertical flux). Model
 structure validation enforces two rules against this registry:
 
 1. A bottom zone must *not* appear in any layer other than the last one.
@@ -179,10 +179,10 @@ def register_bottom_zone(cls: type) -> type:
     """Mark a zone class as a "bottom zone" (only valid in the model's bottom layer).
 
     Use as a class decorator on a custom zone class that, like
-    ``GroundZoneB``, discharges no vertical flux to a zone below it::
+    ``SubsurfaceZoneB``, discharges no vertical flux to a zone below it::
 
         @register_bottom_zone
-        class MyNoThroughflowZone(GroundZoneB):
+        class MyNoThroughflowZone(SubsurfaceZoneB):
             ...
 
     The decorated class is registered in ``BOTTOM_ZONE_CLASSES`` and returned
@@ -214,6 +214,6 @@ def is_bottom_zone(zone: Any) -> bool:
     return any(issubclass(ztype, c) for c in BOTTOM_ZONE_CLASSES)
 
 
-# Register the built-in bottom zone: ``GroundZoneB`` has a hardcoded zero
+# Register the built-in bottom zone: ``SubsurfaceZoneB`` has a hardcoded zero
 # vertical flux (no throughflow), making it the canonical base zone.
-BOTTOM_ZONE_CLASSES.add(GroundZoneB)
+BOTTOM_ZONE_CLASSES.add(SubsurfaceZoneB)

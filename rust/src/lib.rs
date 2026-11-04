@@ -21,7 +21,7 @@ type molar_per_time = f64;
 
 use crate::{
     common_types::{HydroForcing, HydroStep, LapseRateParameters, RtForcing, RtStep},
-    hydro::{GroundZone, GroundZoneB, HydrologicZone, SnowZone, SurfaceZone},
+    hydro::{HydrologicZone, SnowZone, SubsurfaceZone, SubsurfaceZoneB, SurfaceZone},
     math::OptimizationError,
     reactive_transport::{
         database::{
@@ -58,8 +58,8 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RtForcing>()?;
 
     // Hydrology
-    m.add_class::<GroundZone>()?;
-    m.add_class::<GroundZoneB>()?;
+    m.add_class::<SubsurfaceZone>()?;
+    m.add_class::<SubsurfaceZoneB>()?;
     m.add_class::<SnowZone>()?;
     m.add_class::<SurfaceZone>()?;
     m.add_class::<HydrologicZone>()?;

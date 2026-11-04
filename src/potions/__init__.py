@@ -21,10 +21,6 @@ __all__ = [
     "SecondarySpecies",
     # "SurfaceComplexationReaction",
     "TstReaction",
-    "GroundZone",
-    "GroundZoneB",
-    # "GroundZoneLinear",
-    # "GroundZoneLinearB",
     "HydrologicZone",
     "SnowZone",
     "SurfaceZone",
@@ -64,6 +60,7 @@ __all__ = [
     "RtNumericalError",
     "HydrologyNumericalError",
     "OptimizationError",
+    "SolverBackupWarning",
     # River things
     "RiverDimensions",
     "RiverParameters",
@@ -112,10 +109,10 @@ from .core import (
     HydroForcing,
     HydroStep,
     RtForcing,
-    GroundZone,
-    GroundZoneB,
     SnowZone,
     SurfaceZone,
+    SubsurfaceZone,
+    SubsurfaceZoneB,
     HydrologicZone,
     # Database and things
     RtZone,
@@ -149,8 +146,6 @@ from .common_models import (
     HbvNonlinearModel,
     ThreeLayerModel,
     LateralThreeLayerModel,
-    SubsurfaceZone,
-    SubsurfaceZoneB,
 )
 
 from .model_components import (
@@ -210,6 +205,7 @@ from .reactive_transport import (
     WaterVolumeError,
 )
 from .utils import objective_function, RtNumericalError, HydrologyNumericalError
+from .reactive_transport_model import SolverBackupWarning
 
 from .math import (
     find_root_multi,

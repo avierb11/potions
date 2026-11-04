@@ -575,7 +575,7 @@ impl SurfaceZone {
 
 #[pyclass(from_py_object, extends=HydrologicZone)]
 #[derive(Clone, Debug)]
-pub struct GroundZone {
+pub struct SubsurfaceZone {
     #[pyo3(get, set)]
     k: f64,
     #[pyo3(get, set)]
@@ -585,7 +585,7 @@ pub struct GroundZone {
 }
 
 #[pymethods]
-impl GroundZone {
+impl SubsurfaceZone {
     #[new]
     #[pyo3(signature=(k=1e-2, alpha=1.0, perc=1.0, name="ground".to_owned()))]
     fn new(k: f64, alpha: f64, perc: f64, name: String) -> PyClassInitializer<Self> {
@@ -754,7 +754,7 @@ impl GroundZone {
 
     fn __repr__(&self) -> String {
         format!(
-            "GroundZone(k={:.2e},alpha={:.2},perc={:.2})",
+            "SubsurfaceZone(k={:.2e},alpha={:.2},perc={:.2})",
             self.k, self.alpha, self.perc
         )
     }
@@ -762,7 +762,7 @@ impl GroundZone {
 
 #[pyclass(from_py_object, extends=HydrologicZone)]
 #[derive(Clone, Debug)]
-pub struct GroundZoneB {
+pub struct SubsurfaceZoneB {
     #[pyo3(get, set)]
     k: f64,
     #[pyo3(get, set)]
@@ -770,7 +770,7 @@ pub struct GroundZoneB {
 }
 
 #[pymethods]
-impl GroundZoneB {
+impl SubsurfaceZoneB {
     #[new]
     #[pyo3(signature=(k=1e-2, alpha=1.0, name="ground_bottom".to_owned()))]
     fn new(k: f64, alpha: f64, name: String) -> PyClassInitializer<Self> {
@@ -932,6 +932,6 @@ impl GroundZoneB {
     }
 
     fn __repr__(&self) -> String {
-        format!("GroundZone(k={:.2e},alpha={:.2})", self.k, self.alpha)
+        format!("SubsurfaceZone(k={:.2e},alpha={:.2})", self.k, self.alpha)
     }
 }

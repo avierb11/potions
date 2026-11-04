@@ -55,25 +55,25 @@ class SurfaceZone(HydrologicZone):
     name: str = "surface"
 
 @dataclass
-class GroundZone(HydrologicZone):
+class SubsurfaceZone(HydrologicZone):
     k: float = 1e-3
     alpha: float = 1.0
     perc: float = 1.0
     name: str = "ground"
 
 @dataclass
-class GroundZoneB(HydrologicZone):
+class SubsurfaceZoneB(HydrologicZone):
     k: float = 1e-3
     alpha: float = 1.0
     name: str = "ground"
 
 @dataclass
-class GroundZoneLinear(HydrologicZone):
+class SubsurfaceZoneLinear(HydrologicZone):
     k: float = 1e-3
     perc: float = 1.0
     name: str = "ground"
 
 @dataclass
-class GroundZoneLinearB(HydrologicZone):
+class SubsurfaceZoneLinearB(HydrologicZone):
     k: float = 1e-3
     name: str = "ground"

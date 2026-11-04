@@ -841,35 +841,35 @@ impl EquilibriumParameters {
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct MineralAuxParams {
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     sw_threshold: f64,
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     sw_exp: f64,
-    // #[pyo3(get)]
+    // #[pyo3(get, set)]
     // n_alpha: f64,
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     q_10: f64,
-    #[pyo3(get)]
-    reactivity: f64,
+    #[pyo3(get, set)]
+    k_a: f64,
 }
 
 #[pymethods]
 impl MineralAuxParams {
     #[new]
-    pub fn new(sw_threshold: f64, sw_exp: f64, q_10: f64, reactivity: f64) -> Self {
+    pub fn new(sw_threshold: f64, sw_exp: f64, q_10: f64, k_a: f64) -> Self {
         Self {
             sw_threshold,
             sw_exp,
             // n_alpha,
             q_10,
-            reactivity,
+            k_a,
         }
     }
 
     pub fn __repr__(&self) -> String {
         format!(
-            "MineralAuxParams(sw_threshold={},sw_exp={},q_10={},reactivity={})",
-            self.sw_threshold, self.sw_exp, self.q_10, self.reactivity
+            "MineralAuxParams(sw_threshold={},sw_exp={},q_10={},k_a={})",
+            self.sw_threshold, self.sw_exp, self.q_10, self.k_a
         )
     }
 
@@ -879,7 +879,7 @@ impl MineralAuxParams {
             self.sw_exp,
             // self.n_alpha,
             self.q_10,
-            self.reactivity,
+            self.k_a,
         ];
         Array1::from_vec(param_vec).to_pyarray(py)
     }
@@ -899,7 +899,7 @@ impl MineralAuxParams {
                 sw_exp: nd_arr[1],
                 // n_alpha: nd_arr[2],
                 q_10: nd_arr[2],
-                reactivity: nd_arr[3],
+                k_a: nd_arr[3],
             })
         }
     }
@@ -962,7 +962,7 @@ pub struct MineralParameters {
     pub sw_exp: Array1<f64>,
     // pub n_alpha: Array1<f64>,
     pub q_10: Array1<f64>,
-    pub reactivity: Array1<f64>,
+    pub k_a: Array1<f64>,
 }
 
 impl MineralParameters {
@@ -1029,14 +1029,14 @@ impl MineralParameters {
         sw_exp: PyReadonlyArray1<f64>,
         // n_alpha: PyReadonlyArray1<f64>,
         q_10: PyReadonlyArray1<f64>,
-        reactivity: PyReadonlyArray1<f64>,
+        k_a: PyReadonlyArray1<f64>,
     ) -> Self {
         Self {
             sw_threshold: sw_threshold.to_owned_array(),
             sw_exp: sw_exp.to_owned_array(),
             // n_alpha: n_alpha.to_owned_array(),
             q_10: q_10.to_owned_array(),
-            reactivity: reactivity.to_owned_array(),
+            k_a: k_a.to_owned_array(),
         }
     }
 
@@ -1058,7 +1058,7 @@ impl MineralParameters {
             arr[i * ppm + 1] = self.sw_exp[i];
             // arr[i * ppm + 2] = self.n_alpha[i];
             arr[i * ppm + 2] = self.q_10[i];
-            arr[i * ppm + 3] = self.reactivity[i];
+            arr[i * ppm + 3] = self.k_a[i];
         }
 
         arr.to_pyarray(py)
@@ -1079,14 +1079,14 @@ impl MineralParameters {
         let mut sw_exp: Array1<f64> = Array1::zeros(num_minerals);
         // let mut n_alpha: Array1<f64> = Array1::zeros(num_minerals);
         let mut q_10: Array1<f64> = Array1::zeros(num_minerals);
-        let mut reactivity: Array1<f64> = Array1::zeros(num_minerals);
+        let mut k_a: Array1<f64> = Array1::zeros(num_minerals);
 
         for i in 0..num_minerals {
             sw_threshold[i] = x[i * PARAMETERS_PER_MINERAL + 0];
             sw_exp[i] = x[i * PARAMETERS_PER_MINERAL + 1];
             // n_alpha[i] = x[i * PARAMETERS_PER_MINERAL + 2];
             q_10[i] = x[i * PARAMETERS_PER_MINERAL + 2];
-            reactivity[i] = if natural_scales {
+            k_a[i] = if natural_scales {
                 (10_f64).powf(x[i * PARAMETERS_PER_MINERAL + 3])
             } else {
                 x[i * PARAMETERS_PER_MINERAL + 3]
@@ -1098,7 +1098,7 @@ impl MineralParameters {
             sw_exp,
             // n_alpha,
             q_10,
-            reactivity,
+            k_a,
         })
     }
 
@@ -1136,14 +1136,14 @@ impl MineralParameters {
         let mut sw_exps: Vec<f64> = Vec::new();
         // let mut n_alphas: Vec<f64> = Vec::new();
         let mut q_10s: Vec<f64> = Vec::new();
-        let mut reactivitys: Vec<f64> = Vec::new();
+        let mut k_as: Vec<f64> = Vec::new();
 
         for m in minerals {
             sw_thrs.push(m.sw_threshold);
             sw_exps.push(m.sw_exp);
             // n_alphas.push(m.n_alpha);
             q_10s.push(m.q_10);
-            reactivitys.push(m.reactivity);
+            k_as.push(m.k_a);
         }
 
         Ok(Self {
@@ -1151,12 +1151,12 @@ impl MineralParameters {
             sw_exp: Array1::from_vec(sw_exps),
             // n_alpha: Array1::from_vec(n_alphas),
             q_10: Array1::from_vec(q_10s),
-            reactivity: Array1::from_vec(reactivitys),
+            k_a: Array1::from_vec(k_as),
         })
     }
 
-    pub fn get_reactivity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        return self.reactivity.to_pyarray(py);
+    pub fn get_k_a<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        return self.k_a.to_pyarray(py);
     }
 
     pub fn get_sw_threshold<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {

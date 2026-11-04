@@ -100,7 +100,7 @@ def test_flow_weighted_kge_perfect_fit(q_meas_fixture: Series) -> None:
 def _zone_configs() -> dict[str, RtZoneConfiguration]:
     cfg = RtZoneConfiguration(do_reactions=True, do_speciation=True)
     return {
-        "sur": cfg,
+        "surface": cfg,
         "shallow": cfg,
         "deep": RtZoneConfiguration(do_reactions=False, do_speciation=True),
     }
@@ -120,8 +120,8 @@ def test_build_bounds_hbv_has_hydro_params() -> None:
 def test_build_bounds_hbv_has_zone_dims() -> None:
     network = _network()
     bounds = build_rt_bounds(HbvModel, network, _zone_configs())
-    assert "sur.max_water" in bounds
-    assert "sur.passive_water_storage" in bounds
+    assert "surface.max_water" in bounds
+    assert "surface.passive_water_storage" in bounds
     assert "shallow.max_water" in bounds
     assert "deep.passive_water_storage" in bounds
 
@@ -131,8 +131,8 @@ def test_build_bounds_hbv_reactive_zone_mineral_params() -> None:
     num_min = network.num_minerals
     bounds = build_rt_bounds(HbvModel, network, _zone_configs())
     for mid in range(num_min):
-        assert f"sur.sw_threshold[{mid}]" in bounds
-        assert f"sur.reactivity[{mid}]" in bounds
+        assert f"surface.sw_threshold[{mid}]" in bounds
+        assert f"surface.k_a[{mid}]" in bounds
     for mid in range(num_min):
         assert f"deep.sw_threshold[{mid}]" not in bounds
 
@@ -155,10 +155,16 @@ def test_build_bounds_no_river_zone() -> None:
 def test_build_bounds_mineral_bounds_values() -> None:
     network = _network()
     bounds = build_rt_bounds(HbvModel, network, _zone_configs())
-    assert bounds["sur.sw_threshold[0]"] == (0.0, 1.0)
-    assert bounds["sur.sw_exp[0]"] == (0.5, 2.5)
-    assert bounds["sur.q_10[0]"] == (1.0, 5.0)
-    assert bounds["sur.reactivity[0]"] == (-16.0, -6.0)
+    # Surface zone: free soil-moisture / temperature / rate bounds.
+    assert bounds["surface.sw_threshold[0]"] == (0.0, 1.0)
+    assert bounds["surface.sw_exp[0]"] == (0.5, 2.5)
+    assert bounds["surface.q_10[0]"] == (1.0, 5.0)
+    assert bounds["surface.k_a[0]"] == (-15.0, -5.0)
+    # Subsurface zone: dependencies fixed (degenerate bounds), only k_a varies.
+    assert bounds["shallow.sw_threshold[0]"] == (0.0, 0.0)
+    assert bounds["shallow.sw_exp[0]"] == (0.0, 0.0)
+    assert bounds["shallow.q_10[0]"] == (1.0, 1.0)
+    assert bounds["shallow.k_a[0]"] == (-15.0, -5.0)
 
 
 def test_build_bounds_custom_hydro_bounds() -> None:

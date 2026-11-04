@@ -45,7 +45,6 @@ from .core import (
 from .utils import (
     PotionsError,
 )
-from .utils import setup_logging
 from .result_saving import (
     DEFAULT_RESULTS_DIR,
     is_save_enabled,
@@ -53,8 +52,6 @@ from .result_saving import (
     save_model_run,
     write_batch_info,
 )
-
-setup_logging(__file__)
 
 # Define a TypeVar for Zones to make Layer, Hillslope, and Model generic
 
@@ -221,9 +218,8 @@ class Model(ReactiveTransportModel):
                 uses all available CPU cores. Defaults to -1.
             write_time_series_results (Optional[bool]): If True, saves the full
                 time series output of selected runs to CSV files (under
-                ``<output_dir>/run_<timestamp>/``). If None, falls back to the
-                `POTIONS_SAVE_RESULTS` environment variable, and if that is
-                unset, saving is on by default. Defaults to None.
+                ``<output_dir>/run_<timestamp>/``). If None, saving is on by
+                default. Defaults to None.
             threshold_function (Optional[Callable]): A function that returns True
                 if a run's results should be saved. Defaults to None (save all).
             output_dir (str): Base directory under which the `run_<timestamp>`
@@ -347,13 +343,11 @@ class Model(ReactiveTransportModel):
                 functions. Defaults to None (use the defaults).
             verbose (bool): Whether to print progress messages. Defaults to False.
             save_results (Optional[bool]): Whether to save the run's results and
-                parameters to disk. If None, falls back to the
-                ``POTIONS_SAVE_RESULTS`` environment variable, and if that is
-                unset, saving is on by default. Defaults to None.
-            results_dir (Optional[str]): Base directory under which the
-                ``run_<timestamp>`` folder is created. If None, falls back to the
-                ``POTIONS_RESULTS_DIR`` environment variable, then to ``"results"``.
+                parameters to disk. If None, saving is on by default.
                 Defaults to None.
+            results_dir (Optional[str]): Base directory under which the
+                ``run_<timestamp>`` folder is created. If None, uses the default
+                ``"results"`` directory. Defaults to None.
         """
         if verbose:
             print("Starting hydrologic simulation")

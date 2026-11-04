@@ -851,7 +851,7 @@ class HydrologicalModel:
                         "a bottom zone: as the lowest zone of the model, it "
                         "would discharge vertical flux out of the domain and "
                         "silently lose water. Use a bottom zone (e.g. "
-                        "GroundZoneB / SubsurfaceZoneB), or mark your custom "
+                        "SubsurfaceZoneB), or mark your custom "
                         "zone as one with register_bottom_zone()."
                     )
         # ============================= #
@@ -1362,13 +1362,12 @@ class HydrologicalModel:
                 each surface zone (required for lapse rates). Defaults to None.
             verbose (bool): Not currently used.
             save_results (Optional[bool]): Whether to save this run's results
-                (and the model's parameters) to disk. If None, falls back to
-                the `POTIONS_SAVE_RESULTS` environment variable, and if that is
-                unset, saving is on by default. Defaults to None.
+                (and the model's parameters) to disk. If None, saving is on by
+                default. Defaults to None.
             results_dir (Optional[str]): The base directory under which the
-                `run_<timestamp>` folder is created. If None, falls back to the
-                `POTIONS_RESULTS_DIR` environment variable, then to the default
-                `"results"`. Only used when saving is enabled. Defaults to None.
+                `run_<timestamp>` folder is created. If None, uses the default
+                `"results"` directory. Only used when saving is enabled.
+                Defaults to None.
 
         Returns:
             HydroModelResults: A `HydroModelResults` dictionary. The

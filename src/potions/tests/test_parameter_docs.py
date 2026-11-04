@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from ..core import (
-    GroundZoneB,
     HydrologicZone,
     MineralParameters,
     RiverDimensions,
@@ -11,6 +10,7 @@ from ..core import (
     RtParameters,
     RtZone,
     SnowZone,
+    SubsurfaceZoneB,
     SurfaceZone,
     ZoneDimensions,
 )
@@ -26,7 +26,7 @@ class HydroTestModel(Model):
     structure: list[list] = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
 
 
@@ -37,7 +37,7 @@ def _hydro_zones() -> dict[str, HydrologicZone]:
     return {
         "snow": SnowZone(name="snow"),
         "surface": SurfaceZone(name="surface"),
-        "ground": GroundZoneB(name="ground"),
+        "ground": SubsurfaceZoneB(name="ground"),
     }
 
 
@@ -144,7 +144,7 @@ class RtTestModel(ReactiveTransportModel):
     structure: list[list] = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
 
 
@@ -198,7 +198,7 @@ def test_rt_describe_mineral_params_present(network) -> None:
     df = model.describe_parameters()
     snow = df[df["zone"] == "snow"]
     # One mineral in the network -> four per-mineral rows.
-    for field in ("sw_threshold", "sw_exp", "q_10", "reactivity"):
+    for field in ("sw_threshold", "sw_exp", "q_10", "k_a"):
         assert f"SOC(s).{field}" in snow["name"].values
     # Dimensions are also present.
     assert {"max_water", "passive_water_storage"} <= set(

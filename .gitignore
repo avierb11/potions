@@ -201,7 +201,6 @@ doc/_static/
 *.c
 compiled/
 doc.bak/
-.potions_logs/
 misc/
 *.bak/
 docs/

@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     construction (see *Changed* — this is a **breaking change**).
   - **Python bottom-zone registry** in `potions.model_components`:
     `register_bottom_zone` (decorator), `BOTTOM_ZONE_CLASSES` (the registry
-    set), and `is_bottom_zone()` (membership test). `GroundZoneB` is
+    set), and `is_bottom_zone()` (membership test). `SubsurfaceZoneB` is
     registered by default.
   - **Structural checks** (all `ModelStructureError`): a non-empty structure;
     finite zone parameters (including `zones=` overrides); and partition scales
@@ -74,9 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   timestamped batch folder, plus a batch-level `run_info.json`.
   - Saving is configurable: pass `save_results=False` (or keep
     `write_time_series_results=False` for batches) to disable, and
-    `results_dir=` / `output_dir=` to redirect. Environment variables
-    `POTIONS_SAVE_RESULTS` and `POTIONS_RESULTS_DIR` provide the same control
-    without code changes.
+    `results_dir=` / `output_dir=` to redirect.
   - Results objects (`HydroModelResults`, `RtModelResults`) gain a
     `saved_dir: Optional[str]` field pointing at the written folder.
   - New `potions.result_saving` module with the building blocks
@@ -109,19 +107,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > **Breaking changes** — the following alter public behavior or APIs.
 
 - Model runs **write to disk by default** (see *Added*). Opt out per call with
-  `save_results=False` / `write_time_series_results=False`, or globally with
-  `POTIONS_SAVE_RESULTS=0`.
+  `save_results=False` / `write_time_series_results=False`.
 - `run_batch`'s `write_time_series_results` was `bool = False` (off) and is
-  now `Optional[bool] = None`, meaning "fall back to
-  `POTIONS_SAVE_RESULTS` (saving on by default)". Passing `True`/`False`
-  explicitly behaves as before.
+  now `Optional[bool] = None`, meaning "use the built-in default (saving on)".
+  Passing `True`/`False` explicitly behaves as before.
 - `run_batch`'s `output_dir` default changed from `"batch_results"` to
   `"results"`, and saved output now lands in a timestamped
   `<output_dir>/run_<timestamp>/` subfolder (member files are named
   `run_<i>.csv` / `run_<i>_parameters.csv`).
 - The bottom layer of a model **must** consist of bottom zones (e.g.
-  `GroundZoneB`). Models whose bottom is now any other zone type (e.g. a
-  plain `GroundZone`) raise `ModelStructureError` at construction.
+  `SubsurfaceZoneB`). Models whose bottom is now any other zone type (e.g. a
+  plain `SubsurfaceZone`) raise `ModelStructureError` at construction.
 - **Lateral transfer and outlet discharge are now area-weighted.** Previously
   only the forcing was scaled by `scales`; inter-zone lateral fluxes and the
   reported streamflow were unweighted sums of intensive (mm/d) zone fluxes,
@@ -139,6 +135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Partition scales must now be **strictly positive** (previously
   non-negative): a zero-area zone would make the donor/receiver ratio
   undefined. `ModelStructureError` is raised for `s <= 0`.
+- The subsurface hydro zones are renamed `GroundZone` -> `SubsurfaceZone`
+  and `GroundZoneB` -> `SubsurfaceZoneB` (Rust classes and Python exports
+  alike); the old names are not retained.
 - `ZoneDimensions` is specified with `max_water` directly (plus
   `passive_water_storage`) instead of `porosity` and `depth`; the derived
   `max_water_volume` property is removed.
@@ -156,6 +155,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The example notebook
   `notebooks/Run Reactive Transport Model.ipynb` is updated to the new
   `ZoneDimensions` / `reactivity` API.
+- The reactive-transport step result `RtStep` is shrunk from nine fields
+  to two: `state` (the final concentrations) and `mineral_rates`. The
+  derivable per-step bookkeeping fields `conc_in`, `total_moles`,
+  `mass_in`, `lat_conc`, `vert_conc`, `lat_mass`, and `vert_mass` are
+  removed from the step result and from the `simulation.csv` output,
+  which now carries only the `{species}_{zone}` state columns, the
+  `{mineral}_rate_{zone}` columns, and the `{species}_riv` river
+  columns. Each step's incoming concentration remains available through
+  the forcing (`RtForcing.conc_in`, i.e. `results.rt_forcings`), and a
+  new `RtZone.outgoing_mass(c_after_eq, d)` method computes a zone's
+  lateral / vertical outgoing mass for a post-reaction state on demand.
+  `RtStep` objects pickled in `results.pkl` by a previous release (nine
+  fields) can no longer be unpickled.
 
 ### Fixed
 

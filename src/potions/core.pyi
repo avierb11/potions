@@ -131,13 +131,13 @@ class HydrologicZone:
     ) -> HydrologicZone: ...
 
 @dataclass
-class GroundZone(HydrologicZone):
+class SubsurfaceZone(HydrologicZone):
     k: float = 0.01
     alpha: float = 1.0
     perc: float = 1.0
 
 @dataclass
-class GroundZoneB(HydrologicZone):
+class SubsurfaceZoneB(HydrologicZone):
     k: float = 0.01
     alpha: float = 1.0
 
@@ -209,8 +209,15 @@ class MineralAuxParams:
     sw_threshold: float
     sw_exp: float
     q_10: float
-    reactivity: float
+    k_a: float
 
+    def __init__(
+        self,
+        sw_threshold: float,
+        sw_exp: float,
+        q_10: float,
+        k_a: float,
+    ) -> None: ...
     def to_array(self) -> np.ndarray: ...
     @staticmethod
     def from_array(arr: np.ndarray) -> MineralAuxParams: ...
@@ -228,14 +235,14 @@ class MineralParameters:
     sw_threshold: np.ndarray
     sw_exp: np.ndarray
     q_10: np.ndarray
-    reactivity: np.ndarray
+    k_a: np.ndarray
 
     def __init__(
         self,
         sw_threshold: np.ndarray,
         sw_exp: np.ndarray,
         q_10: np.ndarray,
-        reactivity: np.ndarray,
+        k_a: np.ndarray,
     ) -> None: ...
     def to_array(self) -> np.ndarray: ...
     @staticmethod
@@ -249,7 +256,7 @@ class MineralParameters:
     def from_mineral_parameters(
         minerals: list[MineralAuxParams],
     ) -> MineralParameters: ...
-    def get_reactivity(self) -> np.ndarray: ...
+    def get_k_a(self) -> np.ndarray: ...
     def get_q_10(self) -> np.ndarray: ...
     def get_sw_threshold(self) -> np.ndarray: ...
     def get_sw_exp(self) -> np.ndarray: ...
@@ -317,6 +324,9 @@ class RtZone:
         dt_days: float,
         verbose: bool = False,
     ) -> RtStep: ...
+    def outgoing_mass(
+        self, c_after_eq: np.ndarray, d: RtForcing
+    ) -> tuple[np.ndarray, np.ndarray]: ...
     @property
     def all_species(self) -> list[str]: ...
     @property
@@ -387,13 +397,6 @@ class RiverZone(RtZone):
 @dataclass
 class RtStep:
     state: np.ndarray
-    conc_in: np.ndarray
-    total_moles: np.ndarray
-    mass_in: np.ndarray
-    lat_conc: np.ndarray
-    vert_conc: np.ndarray
-    lat_mass: np.ndarray
-    vert_mass: np.ndarray
     mineral_rates: np.ndarray
 
 class ReactionNetwork:
@@ -595,5 +598,6 @@ def run_zone_steps(
     lat_mass_init: Optional[np.ndarray] = None,
     vert_mass_init: Optional[np.ndarray] = None,
 ) -> tuple[
-    list[RtStep], Optional[tuple[int, Exception, np.ndarray]]
+    list[RtStep],
+    Optional[tuple[int, Exception, np.ndarray, np.ndarray, np.ndarray]],
 ]: ...

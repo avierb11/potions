@@ -7,7 +7,7 @@ use numpy::{
 use pyo3::prelude::*;
 use pyo3_polars::PySeries;
 
-use crate::{celsius, mm_water, molar, moles};
+use crate::{celsius, mm_water, molar};
 
 pub const ZERO_CONC: f64 = 1e-20;
 
@@ -381,146 +381,42 @@ pub struct RtStep {
     #[pyo3(get, set)]
     pub state: Py<PyArray1<molar>>,
     #[pyo3(get, set)]
-    pub total_moles: Py<PyArray1<moles>>,
-    #[pyo3(get, set)]
-    pub conc_in: Py<PyArray1<molar>>,
-    #[pyo3(get, set)]
-    pub mass_in: Py<PyArray1<moles>>,
-    #[pyo3(get, set)]
-    pub lat_conc: Py<PyArray1<molar>>,
-    #[pyo3(get, set)]
-    pub vert_conc: Py<PyArray1<molar>>,
-    #[pyo3(get, set)]
-    pub lat_mass: Py<PyArray1<moles>>,
-    #[pyo3(get, set)]
-    pub vert_mass: Py<PyArray1<moles>>,
-    #[pyo3(get, set)]
     pub mineral_rates: Py<PyArray1<f64>>,
 }
 
 #[pymethods]
 impl RtStep {
     #[new]
-    pub fn new(
-        state: Py<PyArray1<f64>>,
-        total_moles: Py<PyArray1<f64>>,
-        conc_in: Py<PyArray1<f64>>,
-        mass_in: Py<PyArray1<f64>>,
-        lat_conc: Py<PyArray1<f64>>,
-        vert_conc: Py<PyArray1<f64>>,
-        lat_mass: Py<PyArray1<f64>>,
-        vert_mass: Py<PyArray1<f64>>,
-        mineral_rates: Py<PyArray1<f64>>,
-    ) -> Self {
+    pub fn new(state: Py<PyArray1<f64>>, mineral_rates: Py<PyArray1<f64>>) -> Self {
         Self {
             state,
-            total_moles,
-            conc_in,
-            mass_in,
-            lat_conc,
-            vert_conc,
-            lat_mass,
-            vert_mass,
             mineral_rates,
         }
     }
 
-    /// Print all nine result arrays of this step. The arrays are owned by
+    /// Print the two result arrays of this step. The arrays are owned by
     /// Python (`Py` wrappers), so a GIL token is required to read them.
     pub fn __repr__(&self, py: Python) -> String {
         let array_text = |a: &Py<PyArray1<f64>>| a.bind(py).to_owned_array().to_string();
         format!(
-            "RtStep(state={},total_moles={},conc_in={},mass_in={},lat_conc={},vert_conc={},lat_mass={},vert_mass={},mineral_rates={})",
+            "RtStep(state={},mineral_rates={})",
             array_text(&self.state),
-            array_text(&self.total_moles),
-            array_text(&self.conc_in),
-            array_text(&self.mass_in),
-            array_text(&self.lat_conc),
-            array_text(&self.vert_conc),
-            array_text(&self.lat_mass),
-            array_text(&self.vert_mass),
             array_text(&self.mineral_rates)
         )
     }
 
-    pub fn __getstate__(
-        &self,
-        py: Python<'_>,
-    ) -> (
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-    ) {
-        (
-            self.state.clone_ref(py),
-            self.total_moles.clone_ref(py),
-            self.conc_in.clone_ref(py),
-            self.mass_in.clone_ref(py),
-            self.lat_conc.clone_ref(py),
-            self.vert_conc.clone_ref(py),
-            self.lat_mass.clone_ref(py),
-            self.vert_mass.clone_ref(py),
-            self.mineral_rates.clone_ref(py),
-        )
+    pub fn __getstate__(&self, py: Python<'_>) -> (Py<PyArray1<f64>>, Py<PyArray1<f64>>) {
+        (self.state.clone_ref(py), self.mineral_rates.clone_ref(py))
     }
 
-    pub fn __setstate__(
-        &mut self,
-        state: (
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-            Py<PyArray1<f64>>,
-        ),
-    ) {
-        let (
-            state_val,
-            total_moles,
-            conc_in,
-            mass_in,
-            lat_conc,
-            vert_conc,
-            lat_mass,
-            vert_mass,
-            mineral_rates,
-        ) = state;
+    pub fn __setstate__(&mut self, state: (Py<PyArray1<f64>>, Py<PyArray1<f64>>)) {
+        let (state_val, mineral_rates) = state;
 
         self.state = state_val;
-        self.total_moles = total_moles;
-        self.conc_in = conc_in;
-        self.mass_in = mass_in;
-        self.lat_conc = lat_conc;
-        self.vert_conc = vert_conc;
-        self.lat_mass = lat_mass;
-        self.vert_mass = vert_mass;
         self.mineral_rates = mineral_rates;
     }
 
-    pub fn __getnewargs__(
-        &self,
-        py: Python<'_>,
-    ) -> (
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-        Py<PyArray1<f64>>,
-    ) {
+    pub fn __getnewargs__(&self, py: Python<'_>) -> (Py<PyArray1<f64>>, Py<PyArray1<f64>>) {
         self.__getstate__(py)
     }
 }

@@ -19,14 +19,12 @@ from .common_types import (
     RtCalibrationData,
     RtZoneConfiguration,
 )
+from .core import SubsurfaceZone, SubsurfaceZoneB
 from .objective_functions import DEFAULT_RT_OBJECTIVE_SPEC, evaluate_components
-from .utils import setup_logging
 
 if TYPE_CHECKING:
     from .reactive_transport.reaction_network import ReactionNetwork
     from .model import Model
-
-setup_logging(__file__)
 
 
 def _run_twice(f: Callable[[NDArray], float], x1: NDArray, x2: NDArray) -> tuple[float, float]:
@@ -71,19 +69,128 @@ def parallel_numerical_gradient(
 
     return (fx_up - fx_dn) / (2.0 * dxs)
 
+#: Mineral auxiliary-parameter fields, in the order used by
+#: :meth:`~potions.core.MineralParameters.from_array`.
 _MINERAL_FIELDS: tuple[str, str, str, str] = (
     "sw_threshold",
     "sw_exp",
     "q_10",
-    "reactivity",
+    "k_a",
 )
 
-_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
+#: Default (min, max) bounds for the mineral auxiliary parameters of zones
+#: whose reaction rate depends on soil moisture and temperature (surface
+#: zones; the river zone reuses these same free bounds).
+_SURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
     "sw_threshold": (0.0, 1.0),
     "sw_exp": (0.5, 2.5),
     "q_10": (1.0, 5.0),
-    "reactivity": (-16.0, -6.0),
+    "k_a": (-15.0, -5.0),
 }
+
+#: Degenerate bounds for subsurface zones: the soil-moisture and
+#: temperature dependencies are fixed (no dependence), so only ``k_a``
+#: varies.
+_SUBSURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
+    "sw_threshold": (0.0, 0.0),
+    "sw_exp": (0.0, 0.0),
+    "q_10": (1.0, 1.0),
+    "k_a": (-15.0, -5.0),
+}
+
+
+def _mineral_bounds_for_zone(
+    model_type: type["Model"],
+    zone_name: str,
+) -> dict[str, tuple[float, float]]:
+    """Return the default mineral auxiliary bounds that apply to ``zone_name``.
+
+    Zones whose class is a subclass of :class:`SubsurfaceZone` or
+    :class:`SubsurfaceZoneB` have no soil-moisture or temperature
+    dependence and receive the degenerate bounds from
+    :data:`_SUBSURFACE_MINERAL_BOUNDS`; every other zone class receives the
+    free bounds from :data:`_SURFACE_MINERAL_BOUNDS`.
+
+    Args:
+        model_type: The model class that declares the zone structure.
+        zone_name: Name of a *non-river* zone in the model structure
+            (the river zone is never classified this way).
+
+    Returns:
+        dict[str, tuple[float, float]]: The applicable per-field bounds.
+
+    Raises:
+        ValueError: Raised by :meth:`Model.get_zone_type` when the zone
+            name is not present in the model structure.
+    """
+    zone_class: type = model_type.get_zone_type(zone_name)
+    if issubclass(zone_class, (SubsurfaceZone, SubsurfaceZoneB)):
+        return _SUBSURFACE_MINERAL_BOUNDS
+    return _SURFACE_MINERAL_BOUNDS
+
+
+def default_rt_parameter_ranges(
+    model_type: type["Model"],
+    network: ReactionNetwork,
+    zone_configs: dict[str, RtZoneConfiguration],
+) -> dict[str, tuple[float, float]]:
+    """Build an ordered :class:`dict` of default bounds for the
+    reactive-transport parameters of ``model_type``.
+
+    For each non-river zone in ``zone_configs`` (in insertion order), the
+    bounds are ``max_water`` in ``(100, 1500)`` mm, a fixed
+    ``passive_water_storage`` of ``(0, 0)``, and -- when the zone performs
+    reactions -- one bound per mineral (counted from
+    ``network.num_minerals``) and per auxiliary field in
+    :data:`_MINERAL_FIELDS`. Subsurface zones (subclasses of
+    :class:`SubsurfaceZone` / :class:`SubsurfaceZoneB`) use degenerate
+    bounds that fix the soil-moisture and temperature dependencies, so
+    only ``k_a`` varies; all other zones use free bounds.
+
+    If ``zone_configs`` contains a "river" entry, its bounds (``bed_depth``
+    in ``(0.1, 5)`` mm, a fixed ``passive_water_storage``, and free
+    per-mineral bounds when it performs reactions) are appended last,
+    matching the parameter order used by :meth:`Model.from_array`.
+
+    Args:
+        model_type: The model class that declares the zone structure.
+        network: The reaction network (supplies ``num_minerals``).
+        zone_configs: One :class:`RtZoneConfiguration` per reactive zone,
+            keyed by zone name, with an optional ``"river"`` key.
+
+    Returns:
+        dict[str, tuple[float, float]]: Ordered ``(min, max)`` bounds for
+        every reactive-transport parameter.
+    """
+    bounds: dict[str, tuple[float, float]] = {}
+    num_minerals: int = network.num_minerals
+
+    for zone_name in (z for z in zone_configs if z != "river"):
+        cfg: RtZoneConfiguration = zone_configs[zone_name]
+        bounds[f"{zone_name}.max_water"] = (100.0, 1500.0)
+        bounds[f"{zone_name}.passive_water_storage"] = (0.0, 0.0)
+
+        if cfg.do_reactions:
+            field_bounds: dict[str, tuple[float, float]] = _mineral_bounds_for_zone(
+                model_type, zone_name
+            )
+            for mineral_id in range(num_minerals):
+                for field_name in _MINERAL_FIELDS:
+                    bounds[f"{zone_name}.{field_name}[{mineral_id}]"] = field_bounds[field_name]
+
+    # River zone (parameters go at end of array, per `from_array`)
+    river_cfg: Optional[RtZoneConfiguration] = zone_configs.get("river")
+    if river_cfg is not None:
+        bounds["river.bed_depth"] = (0.1, 5.0)
+        bounds["river.passive_water_storage"] = (0.0, 0.0)
+        if river_cfg.do_reactions:
+            for mineral_id in range(num_minerals):
+                for field_name in _MINERAL_FIELDS:
+                    bounds[f"river.{field_name}[{mineral_id}]"] = _SURFACE_MINERAL_BOUNDS[
+                        field_name
+                    ]
+
+    return bounds
 
 
 def build_rt_bounds(
@@ -97,42 +204,20 @@ def build_rt_bounds(
     parameters of ``model_type``.
 
     The ordering matches :meth:`Model.from_array`: hydro parameters first,
-    then per-zone (non-river) dimensions, then per-mineral reaction
-    parameters for each reactive non-river zone, finally river parameters
-    if a "river" key is present in ``zone_configs``.
+    then the reactive-transport bounds from
+    :func:`default_rt_parameter_ranges` (per-zone dimensions and per-mineral
+    reaction parameters for each reactive non-river zone, then river
+    parameters if a "river" key is present in ``zone_configs``).
     """
-    bounds: dict[str, tuple[float, float]] = {}
-
     if hydro_bounds is None:
         hydro_bounds = model_type.default_parameter_ranges()
 
+    bounds: dict[str, tuple[float, float]] = {}
     for name, bnd in hydro_bounds.items():
         bounds[name] = bnd
 
-    num_minerals: int = network.num_minerals
-
-    non_river_zones: list[str] = [z for z in zone_configs if z != "river"]
-    river_cfg: Optional[RtZoneConfiguration] = zone_configs.get("river")
-
-    # Non-river zone dimensions and mineral params
-    for zone_name in non_river_zones:
-        cfg: RtZoneConfiguration = zone_configs[zone_name]
-        bounds[f"{zone_name}.max_water"] = (100.0, 1500.0)
-        bounds[f"{zone_name}.passive_water_storage"] = (0.0, 0.0)
-
-        if cfg.do_reactions:
-            for mineral_id in range(num_minerals):
-                for field_name in _MINERAL_FIELDS:
-                    bounds[f"{zone_name}.{field_name}[{mineral_id}]"] = _MINERAL_BOUNDS[field_name]
-
-    # River zone (parameters go at end of array, per `from_array`)
-    if river_cfg is not None:
-        bounds["river.bed_depth"] = (0.1, 5.0)
-        bounds["river.passive_water_storage"] = (0.0, 0.0)
-        if river_cfg.do_reactions:
-            for mineral_id in range(num_minerals):
-                for field_name in _MINERAL_FIELDS:
-                    bounds[f"river.{field_name}[{mineral_id}]"] = _MINERAL_BOUNDS[field_name]
+    for name, bnd in default_rt_parameter_ranges(model_type, network, zone_configs).items():
+        bounds[name] = bnd
 
     return bounds
 

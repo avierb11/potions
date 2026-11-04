@@ -69,15 +69,12 @@ impl SpeciationCache {
 /// Plain (Python-free) output of one `RtZone` step. Kept separate from
 /// [`crate::common_types::RtStep`] so that the whole multi-zone / multi-step
 /// driver can run without ever touching the GIL or allocating per-element
-/// NumPy arrays: the driver accumulates these into large strided buffers and
-/// hands a handful of arrays back to Python at the end.
+/// NumPy arrays: `state` and `mineral_rates` become the returned [`RtStep`],
+/// while `lat_mass` / `vert_mass` are accumulated into the driver's strided
+/// coupling buffers for the downstream zones of the same step.
 #[derive(Debug, Clone, Default)]
 pub struct StepResultAll {
     pub state: Array1<f64>,
-    pub total_moles: Array1<f64>,
-    pub mass_in: Array1<f64>,
-    pub lat_conc: Array1<f64>,
-    pub vert_conc: Array1<f64>,
     pub lat_mass: Array1<f64>,
     pub vert_mass: Array1<f64>,
     pub mineral_rates: Array1<f64>,
@@ -142,12 +139,12 @@ impl RtZone {
         let monod_rate: Array1<molar_per_time> = self.monod.rate_rust(&chms);
         let tst_rate: Array1<molar_per_time> = self.tst.rate_rust(&chms);
         let aux_rate: Array1<f64>;
-        let reactivity: &Array1<f64>;
+        let k_a: &Array1<f64>;
         // let aux_rate: Array1<f64> = self.aux.unwrap().factor_rust(d);
 
         match &self.aux {
             Some(v) => {
-                reactivity = &v.reactivity;
+                k_a = &v.k_a;
                 aux_rate = v.factor_rust(d);
             }
             None => {
@@ -163,11 +160,11 @@ impl RtZone {
         let num_spec: usize = chms.len();
         let min_start_ind: usize = num_aq;
 
-        // Mineral reaction rate: the `86400 * reactivity` factor converts the
+        // Mineral reaction rate: the `86400 * k_a` factor converts the
         // per-second rate constant to a per-day one (with the dimensionless aux
         // factor) — a rate-parameter conversion, kept raw f64.
         let mineral_conc_rates: Array1<molar_per_time> =
-            86_400.0 * reactivity * aux_rate * (monod_rate + tst_rate);
+            86_400.0 * k_a * aux_rate * (monod_rate + tst_rate);
 
         // Convert the molar rate of production to the total amount per unit area by multiplying by the depth
         // Because 1 mm * m^2 = 1 L, so (moles/L/T) * (depth) = (moles/T) to get the total production rate
@@ -537,19 +534,6 @@ impl RtZone {
         }
 
         let num_spec: usize = self.network.num_species();
-        let c_in: &Array1<molar> = &d._conc_in;
-        let tot_mass_in: Array1<moles> = &d._conc_in * d.hydro_step.q_in; // Total mass entering the system
-        let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
-        let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
-        let tot_moles_ext: Array1<f64> = q_ext * c_in; // Total moles that just pass through the zone and do not interact with mass balance
-
-        let set_minerals_to_zero = |conc: Array1<f64>| {
-            let mut x = conc.clone();
-            for i in self.network.num_aqueous_species()..self.network.num_species() {
-                x[i] = 0.0
-            }
-            x
-        };
 
         // dbg!(&c_after_rt);
         if verbose {
@@ -639,55 +623,7 @@ impl RtZone {
             eprintln!("c_after_eq={}", &c_after_eq);
         }
 
-        let tot_moles_after_eq: Array1<moles> = self.get_tot_moles_rust(&c_after_eq, d);
-
-        let tot_moles_out_internal: Array1<moles> = set_minerals_to_zero(&c_after_eq * q_int); // Minerals are immobile
-
-        let tot_moles_out: Array1<moles> =
-            set_minerals_to_zero(&tot_moles_ext + tot_moles_out_internal);
-
-        let total_q_out_water: f64 = q_int + q_ext;
-        let frac_lat = d.hydro_step.lat_flux_ext / total_q_out_water;
-        let frac_vert = d.hydro_step.vert_flux_ext / total_q_out_water;
-
-        let lat_mass: Array1<moles>;
-        let vert_mass: Array1<moles>;
-        let lat_conc: Array1<molar>;
-        let vert_conc: Array1<molar>;
-        let (lat_mass, vert_mass, lat_conc, vert_conc) = match q_int + q_ext > 1e-6 {
-            true => {
-                let lat: Array1<moles> = &tot_moles_out * frac_lat;
-                let vert: Array1<moles> = &tot_moles_out * frac_vert;
-                let mut lc: Array1<molar> = lat.clone();
-                let mut vc: Array1<molar> = vert.clone();
-
-                let q_lat = d.hydro_step.lat_flux_ext;
-                let q_vert = d.hydro_step.vert_flux_ext;
-
-                for (i, (l_i, v_i)) in lat.iter().zip(&vert).enumerate() {
-                    if i < self.network.num_aqueous_species() {
-                        if q_lat.abs() <= 1e-6 {
-                            lc[i] = ZERO_CONC;
-                        } else {
-                            lc[i] = l_i / q_lat;
-                        }
-                        if q_vert.abs() <= 1e-6 {
-                            vc[i] = ZERO_CONC;
-                        } else {
-                            vc[i] = v_i / q_vert;
-                        }
-                    }
-                }
-
-                (lat, vert, lc, vc)
-            }
-            false => {
-                let num_species = c_0.len();
-                let z: Array1<f64> = Array1::from_elem(num_species, ZERO_CONC);
-
-                (z.clone(), z.clone(), z.clone(), z.clone())
-            }
-        };
+        let (lat_mass, vert_mass) = self.outgoing_mass_rust(&c_after_eq, d);
 
         let mineral_rates: Array1<f64> = match self.do_reactions {
             true => self.reaction_rate_rust(&c_after_eq, d, true),
@@ -696,14 +632,69 @@ impl RtZone {
 
         Ok(StepResultAll {
             state: c_after_eq,
-            total_moles: tot_moles_after_eq,
-            mass_in: tot_mass_in,
-            lat_conc,
-            vert_conc,
             lat_mass,
             vert_mass,
             mineral_rates,
         })
+    }
+
+    /// Compute the lateral / vertical outgoing mass of a zone's post-reaction
+    /// (post-speciation) state: the moles of each species the zone exports,
+    /// split between the two outgoing water routes.
+    ///
+    /// This is the pure bookkeeping the Gauss-Seidel coupling consumes:
+    /// downstream zones of the same step derive their incoming concentration
+    /// from these masses. The arithmetic is exactly the one a normal step
+    /// used to inline before returning the masses as part of its result:
+    ///
+    /// ```text
+    /// tot_moles_out = min_zero(c_after_eq * q_internal + q_external * c_in)
+    /// lat_mass      = tot_moles_out * lat_flux_ext / (q_internal + q_external)
+    /// vert_mass     = tot_moles_out * vert_flux_ext / (q_internal + q_external)
+    /// ```
+    ///
+    /// with `min_zero` zeroing the non-aqueous (mineral / exchange) entries,
+    /// since only the aqueous species are mobile. When the zone has no
+    /// outgoing water (`q_internal + q_external <= 1e-6`), both masses are
+    /// the `ZERO_CONC` sentinel instead.
+    fn outgoing_mass_rust(
+        &self,
+        c_after_eq: &Array1<molar>,
+        d: &RtForcing,
+    ) -> (Array1<moles>, Array1<moles>) {
+        let c_in: &Array1<molar> = &d._conc_in;
+        let q_int: f64 = d.hydro_step.q_internal(); // Water flux entering the zone
+        let q_ext: f64 = d.hydro_step.q_external(); // Water flux passing by the zone
+        let tot_moles_ext: Array1<f64> = q_ext * c_in; // Total moles that just pass through the zone and do not interact with mass balance
+
+        let set_minerals_to_zero = |conc: Array1<f64>| {
+            let mut x = conc.clone();
+            for i in self.network.num_aqueous_species()..self.network.num_species() {
+                x[i] = 0.0
+            }
+            x
+        };
+
+        let tot_moles_out_internal: Array1<moles> = set_minerals_to_zero(c_after_eq * q_int); // Minerals are immobile
+
+        let tot_moles_out: Array1<moles> =
+            set_minerals_to_zero(&tot_moles_ext + tot_moles_out_internal);
+
+        let total_q_out_water: f64 = q_int + q_ext;
+        let frac_lat = d.hydro_step.lat_flux_ext / total_q_out_water;
+        let frac_vert = d.hydro_step.vert_flux_ext / total_q_out_water;
+
+        match q_int + q_ext > 1e-6 {
+            true => {
+                let lat: Array1<moles> = &tot_moles_out * frac_lat;
+                let vert: Array1<moles> = &tot_moles_out * frac_vert;
+                (lat, vert)
+            }
+            false => {
+                let z: Array1<f64> = Array1::from_elem(c_after_eq.len(), ZERO_CONC);
+                (z.clone(), z)
+            }
+        }
     }
 }
 
@@ -915,7 +906,7 @@ impl RtZone {
         let c_0_arr: Array1<f64> = c_0.to_owned_array();
         let x_override: Option<Array1<f64>> = x_free_override.map(|a| a.to_owned_array());
         let r = self.step_internal(&c_0_arr, d, dt_days, verbose, x_override.as_ref())?;
-        Ok(make_rt_step(py, &r, &d._conc_in))
+        Ok(make_rt_step(py, &r))
     }
 
     /// Finalize a zone step from an externally computed post-reaction state.
@@ -944,7 +935,30 @@ impl RtZone {
         let c_0_arr: Array1<f64> = c_0.to_owned_array();
         let c_after_rt_arr: Array1<f64> = c_after_rt.to_owned_array();
         let r = self.finish_step_internal(&c_0_arr, &c_after_rt_arr, d, dt_days, verbose, None)?;
-        Ok(make_rt_step(py, &r, &d._conc_in))
+        Ok(make_rt_step(py, &r))
+    }
+
+    /// Compute this zone's lateral / vertical outgoing mass for a
+    /// post-reaction state, exactly as the internal Gauss-Seidel coupling
+    /// does (see [`Self::outgoing_mass_rust`]).
+    ///
+    /// Exposed to Python because the `RtStep` a rescue finalizes no longer
+    /// carries the outgoing masses, and `run_zone_steps` only reports them
+    /// for the zones it solved before a failure: the Python driver calls
+    /// this for a rescued zone to re-seed its coupling buffers so a resumed
+    /// sweep matches an uninterrupted one.
+    ///
+    /// `c_after_eq` must be the full post-speciation state (as in an
+    /// `RtStep.state`), and `d` the same forcing the step ran with.
+    #[pyo3(signature = (c_after_eq, d))]
+    pub fn outgoing_mass<'py>(
+        &self,
+        py: Python<'py>,
+        c_after_eq: PyReadonlyArray1<f64>,
+        d: &RtForcing,
+    ) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>) {
+        let (lat, vert) = self.outgoing_mass_rust(&c_after_eq.to_owned_array(), d);
+        (lat.to_pyarray(py), vert.to_pyarray(py))
     }
 
     pub fn monod_rate<'py>(
@@ -1128,7 +1142,7 @@ pub(crate) struct KineticReactionTerms {
     /// per-mineral kinetic rate with respect to the (renormalised) concentration
     /// vector. Rows of inactive minerals are zero.
     pub(crate) dm: Array2<f64>,
-    /// Per-mineral kinetic prefactor `A_i = 86400 · rc_i · reactivity_i · mm_i · aux_i`.
+    /// Per-mineral kinetic prefactor `A_i = 86400 · rc_i · k_a_i · mm_i · aux_i`.
     pub(crate) base: Array1<f64>,
     /// Per-mineral full kinetic rate `Mn_i + D_i·(1 − Q_i/K_i)`.
     pub(crate) r_full: Array1<f64>,
@@ -1201,10 +1215,10 @@ where
         .collect();
 
     let aux_present = aux.is_some();
-    let empty_reactivity = Array1::<f64>::zeros(0);
-    let reactivity: &Array1<f64> = match aux {
-        Some(a) => &a.reactivity,
-        None => &empty_reactivity,
+    let empty_k_a = Array1::<f64>::zeros(0);
+    let k_a: &Array1<f64> = match aux {
+        Some(a) => &a.k_a,
+        None => &empty_k_a,
     };
     let aux_factor: Array1<f64> = match aux {
         Some(a) => a.factor_rust(d),
@@ -1216,8 +1230,8 @@ where
     let mut r_full: Array1<f64> = Array1::zeros(num_min);
     for i in 0..num_min {
         r_full[i] = mn_vals[i] + d_vals[i] * (1.0 - q_vals[i] / k_min[i]);
-        if aux_present && reactivity[i].is_finite() {
-            base[i] = 86_400.0 * reactivity[i] * aux_factor[i];
+        if aux_present && k_a[i].is_finite() {
+            base[i] = 86_400.0 * k_a[i] * aux_factor[i];
         }
     }
 
@@ -1227,10 +1241,10 @@ where
     let rel_dsc: Array1<f64> = chms.map(|x| smoothed_rel_deriv(*x));
     let mut dm: Array2<f64> = Array2::zeros((num_min, num_spec));
     for i in 0..num_min {
-        if !mineral_active[i] || !aux_present || !reactivity[i].is_finite() {
+        if !mineral_active[i] || !aux_present || !k_a[i].is_finite() {
             continue; // this mineral contributes nothing to the ODE (or its aux is undefined)
         }
-        let a = 86_400.0 * reactivity[i] * aux_factor[i];
+        let a = 86_400.0 * k_a[i] * aux_factor[i];
         let r_full_i = r_full[i];
         let mn_i = mn_vals[i];
         let d_i = d_vals[i];
@@ -1474,16 +1488,9 @@ where
 
 /// Convert a pure-Rust [`StepResultAll`] into the Python-visible [`RtStep`],
 /// mirroring exactly what the single-zone `step` pymethod builds.
-fn make_rt_step<'py>(py: Python<'py>, r: &StepResultAll, conc_in: &Array1<molar>) -> RtStep {
+fn make_rt_step<'py>(py: Python<'py>, r: &StepResultAll) -> RtStep {
     RtStep {
         state: r.state.to_pyarray(py).unbind(),
-        total_moles: r.total_moles.to_pyarray(py).unbind(),
-        conc_in: conc_in.to_pyarray(py).unbind(),
-        mass_in: r.mass_in.to_pyarray(py).unbind(),
-        lat_conc: r.lat_conc.to_pyarray(py).unbind(),
-        vert_conc: r.vert_conc.to_pyarray(py).unbind(),
-        lat_mass: r.lat_mass.to_pyarray(py).unbind(),
-        vert_mass: r.vert_mass.to_pyarray(py).unbind(),
         mineral_rates: r.mineral_rates.to_pyarray(py).unbind(),
     }
 }
@@ -1505,7 +1512,9 @@ fn make_rt_step<'py>(py: Python<'py>, r: &StepResultAll, conc_in: &Array1<molar>
 /// On success, returns one [`RtStep`] per zone in the same order as the input
 /// `zones`; on failure, returns the steps computed so far together with
 /// `(failing zone index, the original exception, the incoming concentration
-/// that zone was about to step from)`.
+/// that zone was about to step from, and this driver's lat / vert coupling
+/// buffers as they stand — rows `start..i` filled, the failing row and later
+/// rows zero)`.
 ///
 /// `start` supports resuming a sweep the Python driver interrupted to rescue a
 /// failed zone: the sweep then runs from zone `start` instead of zone 0 and
@@ -1530,7 +1539,13 @@ pub fn run_zone_steps<'py>(
     vert_mass_init: Option<PyReadonlyArray2<f64>>,
 ) -> (
     Vec<RtStep>,
-    Option<(usize, PyErr, Bound<'py, PyArray1<molar>>)>,
+    Option<(
+        usize,
+        PyErr,
+        Bound<'py, PyArray1<molar>>,
+        Bound<'py, PyArray2<molar>>,
+        Bound<'py, PyArray2<molar>>,
+    )>,
 ) {
     let n_zones: usize = zones.len();
     // Get plain ndarray views upfront (cheaper than calling `.shape()` /
@@ -1538,6 +1553,7 @@ pub fn run_zone_steps<'py>(
     let states_arr: Array2<f64> = states.as_array().to_owned();
     let lat_mat_arr: Array2<f64> = lat_mat.as_array().to_owned();
     let vert_mat_arr: Array2<f64> = vert_mat.as_array().to_owned();
+    let n_spec: usize = states_arr.shape()[1];
 
     if states_arr.shape()[0] != n_zones {
         return (
@@ -1546,6 +1562,8 @@ pub fn run_zone_steps<'py>(
                 0,
                 PyValueError::new_err("`states` first dimension must equal the number of zones"),
                 Array1::<f64>::zeros(0).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
             )),
         );
     }
@@ -1556,13 +1574,14 @@ pub fn run_zone_steps<'py>(
                 0,
                 PyValueError::new_err("number of forcings must equal the number of zones"),
                 Array1::<f64>::zeros(0).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
             )),
         );
     }
     if n_zones == 0 {
         return (Vec::new(), None);
     }
-    let n_spec: usize = states_arr.shape()[1];
 
     // Set of surface zones (their incoming concentration is precipitation, not
     // the upstream mass flux, so the coupling step is skipped for them).
@@ -1587,6 +1606,8 @@ pub fn run_zone_steps<'py>(
                     "surface zone id {id} is out of range (num zones {n_zones})"
                 )),
                 Array1::<f64>::zeros(0).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
             )),
         );
     }
@@ -1608,6 +1629,8 @@ pub fn run_zone_steps<'py>(
                     "`start` index {start} exceeds the number of zones {n_zones}"
                 )),
                 Array1::<f64>::zeros(0).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
             )),
         );
     }
@@ -1636,7 +1659,13 @@ pub fn run_zone_steps<'py>(
         Err(e) => {
             return (
                 Vec::new(),
-                Some((0, e, Array1::<f64>::zeros(0).to_pyarray(py))),
+                Some((
+                    0,
+                    e,
+                    Array1::<f64>::zeros(0).to_pyarray(py),
+                    Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                    Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                )),
             );
         }
     };
@@ -1645,7 +1674,13 @@ pub fn run_zone_steps<'py>(
         Err(e) => {
             return (
                 Vec::new(),
-                Some((0, e, Array1::<f64>::zeros(0).to_pyarray(py))),
+                Some((
+                    0,
+                    e,
+                    Array1::<f64>::zeros(0).to_pyarray(py),
+                    Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                    Array2::<f64>::zeros((0, n_spec)).to_pyarray(py),
+                )),
             );
         }
     };
@@ -1694,15 +1729,28 @@ pub fn run_zone_steps<'py>(
                 // Record outgoing mass so downstream zones (k > i) can consume it.
                 lat_mass.row_mut(i).assign(&r.lat_mass);
                 vert_mass.row_mut(i).assign(&r.vert_mass);
-                out.push(make_rt_step(py, &r, &d._conc_in));
+                out.push(make_rt_step(py, &r));
             }
             Err(e) => {
                 // Hand back everything needed to reproduce the failure in
                 // Python: the failing zone index, the *original* exception
-                // (type preserved, e.g. OptimizationError), and the incoming
-                // concentration that zone was about to step from.
+                // (type preserved, e.g. OptimizationError), the incoming
+                // concentration that zone was about to step from, and the
+                // driver's lat / vert coupling buffers as they stand (rows
+                // `start..i` filled, the rest zero). The Python driver needs
+                // them to re-seed its own buffers after rescuing zone `i`,
+                // since the `RtStep`s no longer carry outgoing masses.
                 let conc_in = d._conc_in.to_pyarray(py);
-                return (out, Some((i, e, conc_in)));
+                return (
+                    out,
+                    Some((
+                        i,
+                        e,
+                        conc_in,
+                        lat_mass.to_pyarray(py),
+                        vert_mass.to_pyarray(py),
+                    )),
+                );
             }
         }
     }

@@ -19,7 +19,11 @@ model:
   called), the residual-bar and physical-validity arbiters (fsolve's
   convergence flag is diagnostic-only and never decides acceptance),
   fsolve rejections (non-finite solution, stalled above the residual
-  bar), and mis-dimensioned error payloads.
+  bar), and mis-dimensioned error payloads;
+* the ``SolverBackupWarning`` emitted when the backup gives up (a real
+  ``warnings`` warning, so batch and calibration scripts can silence it),
+  with the zone, the step index and the specific rejection reason in the
+  message.
 """
 
 from __future__ import annotations
@@ -45,7 +49,8 @@ from ..core import (
 )
 from ..reactive_transport.common_networks import get_carbon_network
 from ..reactive_transport_model import (
-    SPECIATION_BACKUP_RESIDUAL_MAX,
+    SPECIATION_ACCEPT_RESIDUAL_MAX,
+    SolverBackupWarning,
     _fsolve_backup_speciation,
 )
 
@@ -59,13 +64,6 @@ DT_DAYS: float = 1.0
 # Every field of an ``RtStep``, for whole-step comparisons.
 RT_STEP_FIELDS: tuple[str, ...] = (
     "state",
-    "conc_in",
-    "total_moles",
-    "mass_in",
-    "lat_conc",
-    "vert_conc",
-    "lat_mass",
-    "vert_mass",
     "mineral_rates",
 )
 
@@ -153,6 +151,28 @@ def _x_root_for(
         zone.eq.speciation_x_free_solve(c_after_rt, np.zeros(n_free))
     )
     return c_after_rt, x_root
+
+
+def _near_miss_x(zone: RtZone, d: RtForcing) -> NDArray[np.float64]:
+    """A free-variable vector whose residual sits strictly between the
+    internal solver's 1e-6 target bar and the acceptance bar: the true
+    root perturbed along a fixed direction until the residual norm lands
+    in that window. Such an iterate is what the 90 real-world failing
+    speciation cases end on (a stalled solve a little above the target
+    bar), so this stands in for their failed-solve best iterate."""
+    c_after_rt, x_root = _x_root_for(zone, d)
+    direction: NDArray[np.float64] = np.ones(len(x_root))
+    for scale in (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11):
+        x_try: NDArray[np.float64] = x_root + scale * direction
+        f_max: float = float(
+            np.max(np.abs(zone.eq.speciation_residual(c_after_rt, x_try)))
+        )
+        if 1e-6 < f_max <= SPECIATION_ACCEPT_RESIDUAL_MAX:
+            return x_try
+    raise AssertionError(
+        "could not place a near-miss iterate strictly between the 1e-6 "
+        "target bar and the acceptance bar"
+    )
 
 
 # ===================== subsystem tagging ===================== #
@@ -248,8 +268,8 @@ def test_backup_preaccepts_candidate_root_without_fsolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A candidate (the failed solver's best iterate) that already
-    satisfies the backup bar (residual at most
-    ``SPECIATION_BACKUP_RESIDUAL_MAX``, physically valid) is accepted
+    satisfies the acceptance bar (residual at most
+    ``SPECIATION_ACCEPT_RESIDUAL_MAX``, physically valid) is accepted
     directly: fsolve is never spent on it (a raising stand-in proves
     this), and the finalized step matches a fresh zone's internal
     solve."""
@@ -277,6 +297,65 @@ def test_backup_preaccepts_candidate_root_without_fsolve(
         )
 
 
+def test_backup_preaccepts_near_miss_without_fsolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed solve whose best iterate sits strictly above the internal
+    solver's 1e-6 target bar but at or under the acceptance bar
+    (``SPECIATION_ACCEPT_RESIDUAL_MAX``, 1e-3), and is physically valid,
+    is accepted directly: fsolve is never spent on it (a raising stand-in
+    proves this) and the step is finalized from the best iterate through
+    the ``x_free_override`` path. This is the relaxed-acceptance behavior
+    that turns a stalled-but-close speciation into an accepted model step
+    instead of a run failure; under the former 1e-6 bar this exact
+    iterate would have been rejected and the run stopped."""
+    zone = _make_zone()
+    d = _forcing(np.zeros(len(C0)))
+    x_near = _near_miss_x(zone, d)
+
+    def _fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("fsolve must not be called for a pre-accepted candidate")
+
+    monkeypatch.setattr(reactive_transport_model, "fsolve", _fsolve_must_not_run)
+
+    err = _fake_optimization_error(best_x=list(x_near))
+    rescued = _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
+
+    assert rescued is not None
+    # The adopted state is the near-miss iterate itself, not a re-solved
+    # root: its residual sits strictly above the 1e-6 target bar (and at
+    # or under the acceptance bar).
+    c_after_rt, _x_root = _x_root_for(zone, d)
+    f_max: float = float(
+        np.max(np.abs(zone.eq.speciation_residual(c_after_rt, x_near)))
+    )
+    assert 1e-6 < f_max <= SPECIATION_ACCEPT_RESIDUAL_MAX
+    # The step's bookkeeping is the normal post-solve path applied to the
+    # adopted vector: the outgoing masses computed from the rescued state
+    # match those of a reference step run with the same override.
+    reference = _make_zone().step(C0, d, DT_DAYS, x_free_override=x_near)
+    resc_lat: NDArray[np.float64]
+    resc_vert: NDArray[np.float64]
+    resc_lat, resc_vert = zone.outgoing_mass(np.asarray(rescued.state), d)
+    ref_lat: NDArray[np.float64]
+    ref_vert: NDArray[np.float64]
+    ref_lat, ref_vert = zone.outgoing_mass(np.asarray(reference.state), d)
+    np.testing.assert_allclose(
+        resc_lat,
+        ref_lat,
+        rtol=1e-9,
+        atol=0.0,
+        err_msg="RtStep field 'lat_mass' differs",
+    )
+    np.testing.assert_allclose(
+        resc_vert,
+        ref_vert,
+        rtol=1e-9,
+        atol=0.0,
+        err_msg="RtStep field 'vert_mass' differs",
+    )
+
+
 def test_backup_rejects_failed_fsolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,7 +381,7 @@ def test_backup_rejects_failed_fsolve(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         stalled: NDArray[np.float64] = (
-            SPECIATION_BACKUP_RESIDUAL_MAX * 10.0 * np.ones(n_free)
+            SPECIATION_ACCEPT_RESIDUAL_MAX * 10.0 * np.ones(n_free)
         )
         return np.full(n_free, 7.0), {"fvec": stalled}, 1, "stalled above the bar"
 
@@ -314,14 +393,12 @@ def test_backup_accepts_under_bar_root_regardless_of_ier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The acceptance decision never consults fsolve's convergence flag:
-    a result at or under the backup bar with a physically valid root is
-    accepted whatever ``ier`` fsolve reported. This mirrors the internal
-    solver, whose acceptance is the residual norm alone at its 1e-6
-    tolerance, and covers the real-world case where hybrd reports
-    ``ier=5`` ("xtol too small" at a stationary point) for an iterate
-    already at or under the bar. The root returned here is the zone's
-    true free-variable root, so the finalized step matches a fresh
-    zone's internal solve."""
+    a result at or under the acceptance bar with a physically valid root
+    is accepted whatever ``ier`` fsolve reported, covering the
+    real-world case where hybrd reports ``ier=5`` ("xtol too small" at a
+    stationary point) for an iterate already at or under the bar. The
+    root returned here is the zone's true free-variable root, so the
+    finalized step matches a fresh zone's internal solve."""
     zone = _make_zone()
     d = _forcing(np.zeros(len(C0)))
     _c_after_rt, x_root = _x_root_for(zone, d)
@@ -404,3 +481,72 @@ def test_backup_rejects_misdimensioned_error_payload(
     monkeypatch.setattr(reactive_transport_model, "fsolve", _fsolve_must_not_run)
 
     assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+
+
+# ===================== warning emission ===================== #
+def test_rejection_emits_solver_backup_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no candidate satisfies the acceptance bar, the backup emits a
+    single ``SolverBackupWarning`` naming the zone and the step index — a
+    real ``warnings`` warning, not plain ``print`` output — so a run
+    stopped by the backup is self-describing on screen and batch and
+    calibration scripts can silence it with
+    ``warnings.filterwarnings("ignore",
+    category=potions.SolverBackupWarning)``."""
+    zone = _make_zone()
+    n_free: int = zone.eq.get_stoich_null_space().shape[1]
+    d = _forcing(np.zeros(len(C0)))
+    err = _fake_optimization_error(best_x=[7.0] * n_free)
+
+    def _nan_solution(
+        _func: object, x0: NDArray[np.float64], **_kwargs: object
+    ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
+        return np.full(n_free, np.nan), {"fvec": np.zeros(n_free)}, 1, "converged"
+
+    monkeypatch.setattr(reactive_transport_model, "fsolve", _nan_solution)
+
+    with pytest.warns(SolverBackupWarning) as record:
+        assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 37, False) is None
+    assert len(record) == 1
+    message: str = str(record[0].message)
+    assert "zone 'speciation_backup_zone'" in message
+    assert "step 37" in message
+
+
+def test_rejection_warning_carries_rejection_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``SolverBackupWarning`` message carries *why* the final
+    candidate was rejected, not merely that the backup failed: here
+    fsolve reaches a point at or under the residual bar, so the deciding
+    check is the physical-validity gate, and the reason in the message
+    names that gate (with the residual the candidate reached)."""
+    zone = _make_zone()
+    d = _forcing(np.zeros(len(C0)))
+    _c_after_rt, x_root = _x_root_for(zone, d)
+    n_free: int = len(x_root)
+    err = _fake_optimization_error(best_x=list(x_root))
+
+    def _conc_always_invalid(
+        _eq: EquilibriumParameters, _x: NDArray[np.float64]
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        reactive_transport_model, "_speciation_conc_valid", _conc_always_invalid
+    )
+
+    def _converged(
+        _func: object, x0: NDArray[np.float64], **_kwargs: object
+    ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
+        return x0.copy(), {"fvec": np.zeros(n_free)}, 1, "converged"
+
+    monkeypatch.setattr(reactive_transport_model, "fsolve", _converged)
+
+    with pytest.warns(SolverBackupWarning) as record:
+        assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+    assert len(record) == 1
+    message: str = str(record[0].message)
+    assert "no acceptable solution" in message
+    assert "physically invalid" in message

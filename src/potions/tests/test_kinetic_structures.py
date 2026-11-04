@@ -59,7 +59,7 @@ def test_mineral_parameters_to_array_layout() -> None:
         sw_threshold=np.array([0.1, 0.2]),
         sw_exp=np.array([2.0, 2.0]),
         q_10=np.array([1.5, 1.5]),
-        reactivity=np.array([10.0, 20.0]),
+        k_a=np.array([10.0, 20.0]),
     )
     arr = mp.to_array()
     assert arr.size == 4 * 2
@@ -77,14 +77,14 @@ def test_mineral_parameters_from_array_default_natural_scales() -> None:
     assert np.allclose(mp.sw_threshold, [0.1])
     assert np.allclose(mp.sw_exp, [2.0])
     assert np.allclose(mp.q_10, [1.5])
-    assert np.allclose(mp.reactivity, [10.0 ** 1.0])
+    assert np.allclose(mp.k_a, [10.0 ** 1.0])
 
 
 def test_mineral_parameters_from_array_linear_scale() -> None:
     mp = MineralParameters.from_array(
         np.array([0.1, 2.0, 1.5, 10.0]), natural_scales=False
     )
-    assert np.allclose(mp.reactivity, [10.0])
+    assert np.allclose(mp.k_a, [10.0])
 
 
 def test_mineral_parameters_from_mineral_parameters() -> None:
@@ -96,7 +96,7 @@ def test_mineral_parameters_from_mineral_parameters() -> None:
     )
     assert np.allclose(agg.sw_threshold, [0.1, 0.2])
     assert np.allclose(agg.q_10, [1.5, 2.0])
-    assert np.allclose(agg.reactivity, [10.0, 20.0])
+    assert np.allclose(agg.k_a, [10.0, 20.0])
 
 
 def test_mineral_parameters_equality_and_inequality() -> None:
@@ -120,7 +120,7 @@ def test_soil_water_factor_above_threshold() -> None:
         sw_threshold=np.array([0.3]),
         sw_exp=np.array([2.0]),
         q_10=np.array([1.5]),
-        reactivity=np.array([10.0]),
+        k_a=np.array([10.0]),
     )
     forc = _make_rt_forcing(s_w=0.5, temp=30.0)
     # s_w >= threshold: ((1-s_w)/(1-thr))^exp = (0.5/0.7)^2
@@ -132,7 +132,7 @@ def test_soil_water_factor_below_threshold() -> None:
         sw_threshold=np.array([0.3]),
         sw_exp=np.array([2.0]),
         q_10=np.array([1.5]),
-        reactivity=np.array([10.0]),
+        k_a=np.array([10.0]),
     )
     forc = _make_rt_forcing(s_w=0.1, temp=20.0)
     # s_w < threshold: (s_w/thr)^exp = (0.1/0.3)^2
@@ -144,7 +144,7 @@ def test_temperature_factor() -> None:
         sw_threshold=np.array([0.3]),
         sw_exp=np.array([2.0]),
         q_10=np.array([1.5]),
-        reactivity=np.array([10.0]),
+        k_a=np.array([10.0]),
     )
     # At 20C the factor is exactly 1 (the reference temperature).
     assert mp.temperature_factor(_make_rt_forcing(0.5, 20.0))[0] == pytest.approx(1.0)
@@ -157,7 +157,7 @@ def test_combined_factor_is_product_of_components() -> None:
         sw_threshold=np.array([0.3]),
         sw_exp=np.array([2.0]),
         q_10=np.array([1.5]),
-        reactivity=np.array([10.0]),
+        k_a=np.array([10.0]),
     )
     forc = _make_rt_forcing(s_w=0.5, temp=30.0)
     expected = (

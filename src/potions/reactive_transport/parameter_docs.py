@@ -51,7 +51,7 @@ PARAMETER_DOCS: dict[str, dict[str, str]] = {
         "unit": "1/degC",
         "description": "Arrhenius-style sensitivity of the rate to a 10 degC change.",
     },
-    "reactivity": {
+    "k_a": {
         "unit": "1/m3/day",
         "description": (
             "Mineral dissolution rate constant (stored value is log-scaled "
@@ -67,7 +67,7 @@ _DIMENSION_ORDER = {
     "river": ("bed_depth", "passive_water_storage"),
 }
 
-_MINERAL_FIELDS = ("sw_threshold", "sw_exp", "q_10", "reactivity")
+_MINERAL_FIELDS = ("sw_threshold", "sw_exp", "q_10", "k_a")
 
 
 def _fmt(value: object) -> str:
@@ -87,7 +87,7 @@ def _mineral_arrays(mineral_params) -> dict[str, list]:
             ("sw_threshold", "get_sw_threshold"),
             ("sw_exp", "get_sw_exp"),
             ("q_10", "get_q_10"),
-            ("reactivity", "get_reactivity"),
+            ("k_a", "get_k_a"),
         )
     }
 
@@ -121,7 +121,7 @@ def rt_zone_rows(zone) -> list[dict]:
         mineral_params = zone.parameters.mineral_params
         if mineral_params is not None:
             arrays = _mineral_arrays(mineral_params)
-            num_minerals = len(arrays["reactivity"])
+            num_minerals = len(arrays["k_a"])
             species_names = list(zone.mineral_species)
             for i in range(num_minerals):
                 label = species_names[i] if i < len(species_names) else f"Mineral {i}"
@@ -145,7 +145,7 @@ def river_zone_rows(zone) -> list[dict]:
         mineral_params = zone.parameters.mineral_params
         if mineral_params is not None:
             arrays = _mineral_arrays(mineral_params)
-            num_minerals = len(arrays["reactivity"])
+            num_minerals = len(arrays["k_a"])
             species_names = list(zone.mineral_species)
             for i in range(num_minerals):
                 label = species_names[i] if i < len(species_names) else f"Mineral {i}"

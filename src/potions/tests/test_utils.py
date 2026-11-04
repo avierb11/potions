@@ -11,7 +11,6 @@ from ..utils import (
     find_root,
     log_prior,
     rt_minerals_to_array,
-    setup_logging,
 )
 
 
@@ -126,12 +125,3 @@ def test_rt_numerical_error_stores_attributes() -> None:
     assert err.error_type == "iteration"
     assert err.zone is zone
     assert err.math_err is math_err
-
-
-def test_setup_logging_noop_when_disabled(monkeypatch) -> None:
-    monkeypatch.delenv("POTIONSLOGGING", raising=False)
-    import potions.utils as u
-
-    monkeypatch.setattr(u, "DO_LOGGING", False)
-    # With logging disabled, setup_logging returns without touching the logger.
-    assert u.setup_logging("test_module.py") is None

@@ -16,12 +16,12 @@ import pytest
 
 from ..common_types import ForcingData
 from ..core import (
-    GroundZone,
-    GroundZoneB,
     MineralParameters,
     RtParameters,
     RtZone,
     SnowZone,
+    SubsurfaceZone,
+    SubsurfaceZoneB,
     SurfaceZone,
     ZoneDimensions,
 )
@@ -48,7 +48,7 @@ class ValidModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
 
 
@@ -57,7 +57,7 @@ class TwoSurfaceModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="a"), SurfaceZone(name="b")],
-        [GroundZoneB(name="ga"), GroundZoneB(name="gb")],
+        [SubsurfaceZoneB(name="ga"), SubsurfaceZoneB(name="gb")],
     ]
 
 
@@ -66,7 +66,7 @@ class BottomNotLastLayerModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="s1")],
-        [GroundZoneB(name="b")],
+        [SubsurfaceZoneB(name="b")],
         [SurfaceZone(name="s2")],
     ]
 
@@ -144,7 +144,7 @@ def test_override_declared_bottom_with_non_bottom_raises() -> None:
     with pytest.raises(ModelStructureError, match="is not a bottom zone"):
         ValidModel(
             zones={
-                "ground": GroundZone(
+                "ground": SubsurfaceZone(
                     k=0.1, alpha=0.5, perc=0.1
                 )
             },
@@ -185,7 +185,7 @@ def test_invalid_layer_type_raises() -> None:
 
 # ===================== Bottom-zone registry ===================== #
 def test_is_bottom_zone_recognizes_registered_classes() -> None:
-    assert is_bottom_zone(GroundZoneB())
+    assert is_bottom_zone(SubsurfaceZoneB())
     assert not is_bottom_zone(SurfaceZone(name="s"))
     assert not is_bottom_zone(SnowZone(name="s"))
 
@@ -318,7 +318,9 @@ def test_meas_streamflow_nan_allowed(
     stream = pd.Series(np.linspace(0.1, 1.0, len(dates)), index=dates)
     stream.iloc[1] = float("nan")
 
-    res = model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+    res = model.run_hydro_model(
+        _make_forcing(dates), meas_streamflow=stream, save_results=False
+    )
 
     # NaN marks a missing measurement: the run completes, the series is carried
     # through to the results as given, and it is scored as given (the default
@@ -380,7 +382,9 @@ def test_init_state_nan_raises(
 # ===================== Happy paths ===================== #
 def test_run_happy_path(model: ValidModel, dates: pd.DatetimeIndex) -> None:
     stream = pd.Series(np.linspace(0.0, 0.5, len(dates)), index=dates)
-    res = model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+    res = model.run_hydro_model(
+        _make_forcing(dates), meas_streamflow=stream, save_results=False
+    )
     numeric = res.simulation.select_dtypes("number")
     assert np.isfinite(numeric.to_numpy(dtype=float)).all()
 
@@ -389,7 +393,7 @@ def test_check_water_balance_happy_path(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
     # The conservative model passes its own water-balance check (opt-in).
-    model.run_hydro_model(_make_forcing(dates), check_water_balance=True)
+    model.run_hydro_model(_make_forcing(dates), check_water_balance=True, save_results=False)
 
 
 def test_negative_temperatures_are_allowed(
@@ -397,7 +401,7 @@ def test_negative_temperatures_are_allowed(
 ) -> None:
     # Temperature legitimately goes below zero: only finiteness is checked.
     fd = _make_forcing(dates, temp=pd.Series(-5.0, index=dates))
-    model.run_hydro_model(fd)
+    model.run_hydro_model(fd, save_results=False)
 
 
 # ===================== Reactive-transport input validation ===================== #
@@ -405,7 +409,7 @@ class RtValidationModel(ReactiveTransportModel):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
 
 
@@ -430,7 +434,7 @@ def rt_model() -> RtValidationModel:
         zones={
             "snow": SnowZone(name="snow"),
             "surface": SurfaceZone(name="surface"),
-            "ground": GroundZoneB(name="ground"),
+            "ground": SubsurfaceZoneB(name="ground"),
         },
         scales=[1.0],
         network=network,

@@ -1,7 +1,3 @@
-import logging
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
-import os
 from typing import Callable, Final, Iterable, Literal, Optional, TypeVar
 import numpy as np
 from numpy import float64 as f64
@@ -18,38 +14,6 @@ from potions.core import (
 
 
 from .common_types import ForcingData, HydroModelResults
-
-# ==== Logger ==== #
-DO_LOGGING = os.environ.get("POTIONSLOGGING") is not None
-NOW: Final[datetime] = datetime.now()
-NOW_TS: Final[str] = NOW.strftime("%Y%m%d_%H%M%S")
-LOGGING_DIR: Final[str] = "./.potions_logs"
-LOG_FILE_PATH: Final[str] = os.path.join(LOGGING_DIR, f"{NOW_TS}.log")
-
-
-def setup_logging(file_path) -> None:
-    if DO_LOGGING:
-        if not os.path.exists(LOGGING_DIR):
-            os.makedirs(LOGGING_DIR)
-            with open(LOG_FILE_PATH, "w+"):
-                pass
-        handler = RotatingFileHandler(
-            filename=LOG_FILE_PATH,
-            maxBytes=10 * 1024 * 1024,
-        )
-
-        logging.basicConfig(
-            filename=LOG_FILE_PATH,
-            level=logging.INFO,
-            format=f"{os.path.basename(file_path)}: %(message)s",
-        )
-
-        logging.getLogger().addHandler(handler)
-    else:
-        return
-
-
-# ================ #
 
 # ==== Types ==== #
 

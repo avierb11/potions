@@ -218,7 +218,7 @@ def test_mineral_kinetic_data_repr(db: ChemicalDatabase) -> None:
 # ===================== Kinetic structures ===================== #
 def test_mineral_aux_params_repr() -> None:
     aux = MineralAuxParams(1.0, 2.0, 1.5, 10.0)
-    assert repr(aux) == "MineralAuxParams(sw_threshold=1,sw_exp=2,q_10=1.5,reactivity=10)"
+    assert repr(aux) == "MineralAuxParams(sw_threshold=1,sw_exp=2,q_10=1.5,k_a=10)"
 
 
 def test_zone_dimensions_repr() -> None:
@@ -342,9 +342,5 @@ def test_misc_data_repr(rt_zone: RtZone, river_zone: RiverZone) -> None:
 def test_rt_step_repr() -> None:
     a = np.array([1.0, 2.0, 3.0])
     b = np.array([4.0, 5.0, 6.0])
-    step = RtStep(a, b, a, b, a, b, a, b, np.array([0.5]))
-    assert repr(step) == (
-        "RtStep(state=[1, 2, 3],total_moles=[4, 5, 6],conc_in=[1, 2, 3],"
-        "mass_in=[4, 5, 6],lat_conc=[1, 2, 3],vert_conc=[4, 5, 6],"
-        "lat_mass=[1, 2, 3],vert_mass=[4, 5, 6],mineral_rates=[0.5])"
-    )
+    step = RtStep(a, b)
+    assert repr(step) == "RtStep(state=[1, 2, 3],mineral_rates=[4, 5, 6])"

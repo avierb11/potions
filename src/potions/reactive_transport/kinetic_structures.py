@@ -1,6 +1,5 @@
 from __future__ import annotations
 from functools import partial
-import logging
 from typing import Final, Callable, Iterable
 from dataclasses import dataclass
 from pandas import DataFrame, Series
@@ -11,9 +10,6 @@ from scipy.optimize import fsolve
 
 from potions.core import RtForcing
 from ..math import find_root_multi
-from ..utils import DO_LOGGING, setup_logging
-
-setup_logging("kinetic_structures.py")
 
 # ==== Constants ==== #
 PARAMETERS_PER_MINERAL: Final[int] = 4
@@ -469,19 +465,8 @@ class EquilibriumParameters:
 
         try:
             sol: np.ndarray = find_root_multi(f_to_solve, initial_guess)
-        except Exception as _e:
-            if DO_LOGGING:
-                logging.warning(
-                    f"Equilibrium speciation error (find_root_multi): {','.join(chms.astype(str))}"
-                )
-            try:
-                sol = fsolve(f_to_solve, initial_guess)
-            except Exception as e2:
-                if DO_LOGGING:
-                    logging.warning(
-                        f"Equilibrium speciation error (fsolve): {','.join(chms.astype(str))}"
-                    )
-                raise e2
+        except Exception:
+            sol = fsolve(f_to_solve, initial_guess)
 
         new_conc: np.ndarray = self.conc_func(sol)
 
@@ -544,12 +529,30 @@ class EquilibriumParameters:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class MineralAuxParams:
     sw_threshold: float
     sw_exp: float
     q_10: float
-    reactivity: float  # Kinetic reactivity prefactor (K * MM * ssa * min_conc)
+    k_a: float  # Kinetic rate prefactor (K * MM * ssa * min_conc)
+
+    def __init__(
+        self,
+        sw_threshold: float,
+        sw_exp: float,
+        q_10: float,
+        k_a: float,
+    ) -> None:
+        object.__setattr__(self, "sw_threshold", sw_threshold)
+        object.__setattr__(self, "sw_exp", sw_exp)
+        object.__setattr__(self, "q_10", q_10)
+        object.__setattr__(self, "k_a", k_a)
+
+    def __repr__(self) -> str:
+        return (
+            f"MineralAuxParams(sw_threshold={self.sw_threshold},"
+            f"sw_exp={self.sw_exp},q_10={self.q_10},k_a={self.k_a})"
+        )
 
     def to_array(self) -> NDArray:
         return np.array(
@@ -557,7 +560,7 @@ class MineralAuxParams:
                 self.sw_threshold,
                 self.sw_exp,
                 self.q_10,
-                self.reactivity,
+                self.k_a,
             ]
         )
 
@@ -567,7 +570,7 @@ class MineralAuxParams:
             sw_threshold=arr[0],
             sw_exp=arr[1],
             q_10=arr[2],
-            reactivity=arr[3],
+            k_a=arr[3],
         )
 
 
@@ -598,29 +601,29 @@ class MineralParameters:
     sw_threshold: NDArray  # The soil water threshold
     sw_exp: NDArray  # The soil water exponent
     q_10: NDArray  # The temperature factor range
-    reactivity: NDArray  # Kinetic reactivity prefactor (K * MM * ssa * min_conc)
+    k_a: NDArray  # Kinetic rate prefactor (K * MM * ssa * min_conc)
 
     sw_threshold_cy: np.ndarray
     sw_exp_cy: np.ndarray
     q_10_cy: np.ndarray
-    reactivity_cy: np.ndarray
+    k_a_cy: np.ndarray
 
     def __init__(
         self,
         sw_threshold: np.ndarray,
         sw_exp: np.ndarray,
         q_10: np.ndarray,
-        reactivity: np.ndarray,
+        k_a: np.ndarray,
     ):
         self.sw_threshold = sw_threshold
         self.sw_exp = sw_exp
         self.q_10 = q_10
-        self.reactivity = reactivity
+        self.k_a = k_a
 
         self.sw_threshold_cy = sw_threshold  # type: ignore
         self.sw_exp_cy = sw_exp  # type: ignore
         self.q_10_cy = q_10  # type: ignore
-        self.reactivity_cy = reactivity  # type: ignore
+        self.k_a_cy = k_a  # type: ignore
 
     def to_array(self) -> NDArray:
         combined_arr = np.vstack(
@@ -628,7 +631,7 @@ class MineralParameters:
                 self.sw_threshold,
                 self.sw_exp,
                 self.q_10,
-                self.reactivity,
+                self.k_a,
             ]
         )
 
@@ -646,7 +649,7 @@ class MineralParameters:
 
         param_arr = arr.reshape((num_minerals, PARAMETERS_PER_MINERAL)).T
 
-        reactivity = (
+        k_a = (
             np.power(10.0, param_arr[3]) if natural_scales else param_arr[3]
         )
 
@@ -654,7 +657,7 @@ class MineralParameters:
             sw_threshold=param_arr[0],
             sw_exp=param_arr[1],
             q_10=param_arr[2],
-            reactivity=reactivity,
+            k_a=k_a,
         )
 
     def soil_water_factor(self, forc: RtForcing) -> np.ndarray:
@@ -732,18 +735,18 @@ class MineralParameters:
         sw_thrs: list[float] = []
         sw_exps: list[float] = []
         q_10s: list[float] = []
-        reactivities: list[float] = []
+        k_as: list[float] = []
 
         for m in minerals:
             sw_thrs.append(m.sw_threshold)
             sw_exps.append(m.sw_exp)
             q_10s.append(m.q_10)
-            reactivities.append(m.reactivity)
+            k_as.append(m.k_a)
         return MineralParameters(
             sw_threshold=np.array(sw_thrs, dtype=np.float64),
             sw_exp=np.array(sw_exps, dtype=np.float64),
             q_10=np.array(q_10s, dtype=np.float64),
-            reactivity=np.array(reactivities, dtype=np.float64),
+            k_a=np.array(k_as, dtype=np.float64),
         )
 
     def __eq__(self, other: object) -> bool:
@@ -754,7 +757,7 @@ class MineralParameters:
                 np.allclose(self.sw_threshold, other.sw_threshold),
                 np.allclose(self.sw_exp, other.sw_exp),
                 np.allclose(self.q_10, other.q_10),
-                np.allclose(self.reactivity, other.reactivity),
+                np.allclose(self.k_a, other.k_a),
             ]
             return all(vals)
 

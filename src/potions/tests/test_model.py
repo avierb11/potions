@@ -9,11 +9,11 @@ from pandas import DataFrame, Series
 from numpy import float64 as f64
 
 from ..core import (
-    GroundZone,
-    GroundZoneB,
     HydroForcing,
     HydrologicZone,
     SnowZone,
+    SubsurfaceZone,
+    SubsurfaceZoneB,
     SurfaceZone,
 )
 from ..common_models import HbvModel
@@ -28,7 +28,7 @@ def test_Model_connection_matrices_simple_3_box() -> None:
         structure: list[list[HydrologicZone]] = [
             [SnowZone(name="z0")],
             [SurfaceZone(name="z1")],
-            [GroundZoneB(name="z2")],
+            [SubsurfaceZoneB(name="z2")],
         ]
 
     scales = [1.0]
@@ -52,15 +52,15 @@ def test_Model_connection_matrices_simple_3_box() -> None:
 
 
 def test_Model_connection_matrix_mixed_sizes() -> None:
-    zone: GroundZone = GroundZone(0.0, 0.0, 0.0)
+    zone: SubsurfaceZone = SubsurfaceZone(0.0, 0.0, 0.0)
 
     scales = [[0.6, 0.4]]
 
     class TestModel(Model):
         structure: list[list[HydrologicZone]] = [
-            [GroundZone(name="z0"), GroundZone(name="z1")],
-            [GroundZone(name="z2"), GroundZone(name="z3")],
-            [GroundZoneB(name="z4")],
+            [SubsurfaceZone(name="z0"), SubsurfaceZone(name="z1")],
+            [SubsurfaceZone(name="z2"), SubsurfaceZone(name="z3")],
+            [SubsurfaceZoneB(name="z4")],
         ]
 
     model = TestModel(scales=scales[0])
@@ -108,14 +108,14 @@ def test_Model_connection_matrix_mixed_sizes() -> None:
 
 
 def test_Model_connection_matrices_3_by_2() -> None:
-    zone: GroundZone = GroundZone(0.0, 0.0, 0.0)
+    zone: SubsurfaceZone = SubsurfaceZone(0.0, 0.0, 0.0)
     layer: Layer = Layer([zone, zone])
 
     class TestModel(Model):
         structure: list[list[HydrologicZone]] = [
-            [GroundZone(name="z0"), GroundZone(name="z1")],
-            [GroundZone(name="z2"), GroundZone(name="z3")],
-            [GroundZoneB(name="z4"), GroundZoneB(name="z5")],
+            [SubsurfaceZone(name="z0"), SubsurfaceZone(name="z1")],
+            [SubsurfaceZone(name="z2"), SubsurfaceZone(name="z3")],
+            [SubsurfaceZoneB(name="z4"), SubsurfaceZoneB(name="z5")],
         ]
 
     scales = [0.6, 0.4]
@@ -222,7 +222,10 @@ def test_3_box_simple_model_steady_state_v2() -> None:
 
     start_time = time.time()
     results = model.run_hydro_model(
-        forc=forc_arg, init_state=init_state, meas_streamflow=None
+        forc=forc_arg,
+        init_state=init_state,
+        meas_streamflow=None,
+        save_results=False,
     )
     end_time = time.time()
     dur = end_time - start_time

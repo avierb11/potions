@@ -4,9 +4,6 @@ import numpy as np
 from pandas import Series
 
 from .common_types import ObjectiveComponent, ObjectiveSpec
-from .utils import setup_logging
-
-setup_logging(__file__)
 
 
 def kge(y_obs: Series, y_pred: Series) -> float:

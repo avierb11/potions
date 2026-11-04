@@ -13,14 +13,11 @@ the model that produced them, into a fresh timestamped directory::
 `run_both_models` writes both parts into one run directory, under `hydro/`
 and `rt/` subdirectories.
 
-The behavior is controlled in three ways, in order of precedence:
+The behavior is controlled in two ways, in order of precedence:
 
 1. The per-call `save_results` / `results_dir` arguments (pass `None` to
    fall through to the next level).
-2. The environment variables `POTIONS_SAVE_RESULTS` (any of `0`, `false`,
-   `no`, `off` disables saving) and `POTIONS_RESULTS_DIR` (base output
-   directory).
-3. The built-in defaults: saving is ON, and the base directory is `results`
+2. The built-in defaults: saving is ON, and the base directory is `results`
    (relative to the current working directory).
 
 The module can also be used directly to persist results objects that were
@@ -47,12 +44,6 @@ from .common_types import HydroModelResults, RtModelResults
 #: Base directory for run outputs (relative to the working directory).
 DEFAULT_RESULTS_DIR: Final[str] = "results"
 
-#: Environment variables used for global configuration.
-SAVE_RESULTS_ENV: Final[str] = "POTIONS_SAVE_RESULTS"
-RESULTS_DIR_ENV: Final[str] = "POTIONS_RESULTS_DIR"
-
-_OFF_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
-
 
 # ==== Configuration ==== #
 
@@ -60,16 +51,10 @@ _OFF_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 def is_save_enabled(save_results: bool | None = None) -> bool:
     """Decide whether a run should be saved to disk.
 
-    An explicit `save_results` argument always wins. Otherwise the
-    `POTIONS_SAVE_RESULTS` environment variable is consulted, and if that is
-    unset, saving is enabled (the default).
+    An explicit `save_results` argument always wins; when it is `None`,
+    saving is enabled (the built-in default).
     """
-    if save_results is not None:
-        return bool(save_results)
-    raw: str | None = os.environ.get(SAVE_RESULTS_ENV)
-    if raw is not None:
-        return raw.strip().lower() not in _OFF_VALUES
-    return True
+    return True if save_results is None else bool(save_results)
 
 
 def resolve_results_dir(
@@ -77,16 +62,10 @@ def resolve_results_dir(
 ) -> Path:
     """Resolve the base results directory to use for a run.
 
-    An explicit `results_dir` argument wins over the `POTIONS_RESULTS_DIR`
-    environment variable, which in turn wins over the built-in default
+    An explicit `results_dir` argument wins over the built-in default
     (`"results"`).
     """
-    if results_dir is not None:
-        return Path(results_dir)
-    env_dir: str | None = os.environ.get(RESULTS_DIR_ENV)
-    if env_dir is not None and env_dir.strip():
-        return Path(env_dir)
-    return Path(DEFAULT_RESULTS_DIR)
+    return Path(results_dir) if results_dir is not None else Path(DEFAULT_RESULTS_DIR)
 
 
 def make_run_dir(

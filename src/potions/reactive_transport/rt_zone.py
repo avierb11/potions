@@ -6,14 +6,11 @@ import numpy as np
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 
-from ..utils import HydrologyError, setup_logging
+from ..utils import HydrologyError
 
 # from ..common_types_compiled import HydroStep
 
 from potions.core import HydroStep, RtZone
-
-
-setup_logging("rt_zone.py")
 
 
 class WaterVolumeError(HydrologyError):
@@ -52,14 +49,8 @@ class MiscData:
 class RtStep:
     """Holds the results of a single time step for a ReactiveTransportZone."""
 
-    state: NDArray
-    conc_in: NDArray
-    mass_in: NDArray
-    lat_conc: NDArray
-    vert_conc: NDArray
-    lat_mass: NDArray
-    vert_mass: NDArray
-    mineral_rates: NDArray  # Rate of mineral reactions
+    state: NDArray[np.float64]  # Final concentration of each species after the step
+    mineral_rates: NDArray[np.float64]  # Rate of mineral reactions
 
 
 # ==== Functions ==== #

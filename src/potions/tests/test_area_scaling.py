@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 
 from ..common_types import ForcingData
-from ..core import GroundZoneB, SurfaceZone
+from ..core import SubsurfaceZoneB, SurfaceZone
 from ..hydro_model import HydrologicalModel
 
 
@@ -33,7 +33,7 @@ class TwoColumnModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="a"), SurfaceZone(name="b")],
-        [GroundZoneB(name="g1"), GroundZoneB(name="g2")],
+        [SubsurfaceZoneB(name="g1"), SubsurfaceZoneB(name="g2")],
     ]
 
 
@@ -42,7 +42,7 @@ class AggregatingModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="a"), SurfaceZone(name="b")],
-        [GroundZoneB(name="g")],
+        [SubsurfaceZoneB(name="g")],
     ]
 
 

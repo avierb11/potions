@@ -1,9 +1,9 @@
 """Tests for the default run-result saving behavior.
 
-These tests opt in to saving explicitly (the test suite conftest sets
-``POTIONS_SAVE_RESULTS=0`` globally, so the default-on behavior would
-otherwise clutter the working directory) and always write under pytest's
-``tmp_path``.
+Saving is on by default, so these tests opt in explicitly (``save_results=``
+/ ``write_time_series_results=``) and always write under pytest's
+``tmp_path``; the rest of the suite passes ``save_results=False`` to keep
+the working directory clean.
 """
 
 import datetime
@@ -22,8 +22,6 @@ from ..common_types import ForcingData, RtModelResults
 from ..hydro_model import HydrologicalModel
 from ..result_saving import (
     DEFAULT_RESULTS_DIR,
-    RESULTS_DIR_ENV,
-    SAVE_RESULTS_ENV,
     is_save_enabled,
     make_run_dir,
     resolve_results_dir,
@@ -61,32 +59,15 @@ def _make_rt_results(sim_df: DataFrame) -> RtModelResults:
 # ==== Configuration helpers ==== #
 
 
-def test_is_save_enabled_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(SAVE_RESULTS_ENV, raising=False)
+def test_is_save_enabled_precedence() -> None:
     assert is_save_enabled(None) is True  # built-in default: on
     assert is_save_enabled(True) is True
     assert is_save_enabled(False) is False
 
-    monkeypatch.setenv(SAVE_RESULTS_ENV, "0")
-    assert is_save_enabled(None) is False
-    assert is_save_enabled(False) is False
-    assert is_save_enabled(True) is True  # an explicit argument always wins
 
-    monkeypatch.setenv(SAVE_RESULTS_ENV, "1")
-    assert is_save_enabled(None) is True
-    assert is_save_enabled(False) is False
-
-
-def test_resolve_results_dir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv(RESULTS_DIR_ENV, raising=False)
+def test_resolve_results_dir() -> None:
     assert resolve_results_dir() == Path(DEFAULT_RESULTS_DIR)
     assert resolve_results_dir("mydir") == Path("mydir")
-
-    monkeypatch.setenv(RESULTS_DIR_ENV, str(tmp_path))
-    assert resolve_results_dir() == tmp_path
-    assert resolve_results_dir("explicit") == Path("explicit")
 
 
 def test_make_run_dir_collision(tmp_path: Path) -> None:
@@ -103,10 +84,7 @@ def test_make_run_dir_collision(tmp_path: Path) -> None:
 # ==== Hydro model runs ==== #
 
 
-def test_run_hydro_model_saves(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(SAVE_RESULTS_ENV, "1")
+def test_run_hydro_model_saves(tmp_path: Path) -> None:
     model = HbvModel()
     res = model.run_hydro_model(
         forc=_make_forcing(),
@@ -172,29 +150,6 @@ def test_run_hydro_model_save_explicit_off(tmp_path: Path) -> None:
     )
     assert res.saved_dir is None
     assert not any(tmp_path.iterdir())
-
-
-def test_env_can_disable_saving(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(SAVE_RESULTS_ENV, "0")
-    model = HbvModel()
-    res = model.run_hydro_model(
-        forc=_make_forcing(), results_dir=str(tmp_path)
-    )
-    assert res.saved_dir is None
-    assert not any(tmp_path.iterdir())
-
-
-def test_explicit_save_wins_over_off_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(SAVE_RESULTS_ENV, "0")
-    model = HbvModel()
-    res = model.run_hydro_model(
-        forc=_make_forcing(), save_results=True, results_dir=str(tmp_path)
-    )
-    assert res.saved_dir is not None
 
 
 # ==== RT results ==== #

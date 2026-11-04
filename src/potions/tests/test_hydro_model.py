@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from networkx import DiGraph
 
-from ..core import GroundZoneB, SnowZone, SurfaceZone
+from ..core import SnowZone, SubsurfaceZoneB, SurfaceZone
 from ..hydro_model import HydrologicalModel
 
 
@@ -12,7 +12,7 @@ class ColumnModel(HydrologicalModel):
     structure = [
         [SnowZone(name="snow")],
         [SurfaceZone(name="surface")],
-        [GroundZoneB(name="ground")],
+        [SubsurfaceZoneB(name="ground")],
     ]
 
 
@@ -21,7 +21,7 @@ class TwoColumnModel(HydrologicalModel):
 
     structure = [
         [SurfaceZone(name="a"), SurfaceZone(name="b")],
-        [GroundZoneB(name="g1"), GroundZoneB(name="g2")],
+        [SubsurfaceZoneB(name="g1"), SubsurfaceZoneB(name="g2")],
     ]
 
 
@@ -201,7 +201,7 @@ def test_zones_override() -> None:
     class OverrideModel(HydrologicalModel):
         structure = [
             [SurfaceZone(name="surface")],
-            [GroundZoneB(name="deep")],  # bottom layer must be bottom zones
+            [SubsurfaceZoneB(name="deep")],  # bottom layer must be bottom zones
         ]
 
     om = OverrideModel(zones={"surface": custom})
