@@ -14,10 +14,18 @@ A parameter whose bounds are identical is pinned and shown as a
 read-only cell; double-clicking the cell opens a dialog that gives
 it a range, converting it into a free cell.
 
-The last group, "Plots", carries the checkboxes that select the
-species, zones, and minerals drawn in the zone and reaction-rate
-figures, and emits `selection_changed` whenever one of them is
-toggled.
+The "Plots" group carries the checkboxes that select the series
+drawn in each of the three figures (the time-series figure's
+streamflow and river concentrations first, then the species, zones,
+and minerals of the zone and reaction-rate figures), and emits
+`selection_changed` whenever one of them is toggled.
+
+The final group, "History", lists the previous runs in a dropdown
+(the saved run directories and the session's in-memory runs, newest
+first); the *Overlay previous results* checkbox asks the window to
+draw the selected run's results faintly on the current figures, and
+the *Use these parameters* button asks it to restore that run's
+parameters to the panel without a re-run.
 """
 
 from typing import Final
@@ -26,6 +34,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -49,6 +58,7 @@ from potions.gui.common import (
     RT_THEME,
     SNOW_ZONES,
     SPECIATION_ZONES,
+    TIME_SERIES_OPTIONS,
     Theme,
     ZONE_COLORS,
     ZONE_LABELS,
@@ -75,9 +85,11 @@ _BOUND_RANGE_MIN: Final[float] = -1e6
 _BOUND_RANGE_MAX: Final[float] = 1e6
 _BOUND_DECIMALS: Final[int] = 6
 
-# The number of columns in the parameter groups' cell grids: the
-# symbol and the spin box of each cell, two cells per row.
-_GRID_COLUMNS: Final[int] = 4
+# The number of columns in the parameter groups' cell grids: each
+# parameter cell takes one column (a row holds five, the most any
+# zone carries), and a full-width header (a zone or mineral name)
+# spans all of them.
+_GRID_COLUMNS: Final[int] = 5
 # =================== #
 
 
@@ -132,15 +144,15 @@ class _FreeCell(QWidget):
         self._value: float = value
 
         layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(2)
 
         self._symbol: QLabel = QLabel(symbol)
         self._symbol.setToolTip(label)
         self._symbol.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self._symbol.setMinimumWidth(70)
+        self._symbol.setMinimumWidth(40)
         if theme is not None:
             self._symbol.setStyleSheet(f"color: {theme.accent};")
         layout.addWidget(self._symbol, 1)
@@ -236,16 +248,35 @@ class _FreeCell(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+def _compact_value(value: float) -> str:
+    """
+    A compact rendering of a pinned value: four decimals (the
+    saved ``parameters.csv`` precision) with the trailing zeros
+    stripped, so that a pinned value reads as "0", "1", or "5000"
+    rather than "0.0000", "1.0000", or "5000.0000".
+
+    Args:
+        value: The pinned value.
+
+    Returns:
+        The compact text to show for the value.
+    """
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
 class _PinnedCell(QWidget):
     """
     A read-only cell for a pinned parameter, whose bounds are
     identical so there is nothing to adjust.
 
-    The value is shown in a disabled (grayed) spin box, and the
-    symbol carries the parameter's full label as its tooltip.
-    Double-clicking the cell emits `unlock_requested`, which the
-    panel answers by opening the range dialog and converting the
-    cell into a free cell.
+    The value is shown in a compact, disabled (grayed) label
+    rather than a spin box: a disabled spin box's frame and
+    buttons take up most of a narrow grid cell and would clip the
+    symbol, so the fixed value is plain text (see
+    `_compact_value`).  The symbol carries the parameter's full
+    label as its tooltip.  Double-clicking the cell emits
+    `unlock_requested`, which the panel answers by opening the
+    range dialog and converting the cell into a free cell.
 
     Args:
         key: The parameter's bounds key.
@@ -270,21 +301,29 @@ class _PinnedCell(QWidget):
         self._key: str = key
 
         layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(2)
 
         self._symbol: QLabel = QLabel(symbol)
         self._symbol.setToolTip(label)
         self._symbol.setStyleSheet("color: gray;")
-        self._symbol.setMinimumWidth(70)
+        self._symbol.setMinimumWidth(40)
         layout.addWidget(self._symbol, 1)
 
-        self._spin: QDoubleSpinBox = QDoubleSpinBox()
-        self._spin.setRange(_BOUND_RANGE_MIN, _BOUND_RANGE_MAX)
-        self._spin.setDecimals(bound_decimals(value, value))
-        self._spin.setValue(value)
-        self._spin.setEnabled(False)
-        layout.addWidget(self._spin, 1)
+        # A disabled label, not a spin box (see the class
+        # docstring).  It is disabled so that a double-click on
+        # the value is forwarded to this cell, as Qt does for
+        # disabled children.
+        self._value: QLabel = QLabel(_compact_value(value))
+        self._value.setStyleSheet("color: gray;")
+        self._value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._value.setEnabled(False)
+        # No stretch: the label keeps its natural width and the
+        # symbol takes all of the slack, so the value sits at the
+        # cell's right edge, as in a free cell.
+        layout.addWidget(self._value)
 
         self.setToolTip(
             "Pinned to a single value. Double-click to give this "
@@ -294,8 +333,8 @@ class _PinnedCell(QWidget):
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """
         Emit `unlock_requested` for this cell, then forward the
-        event (a double-click on the disabled spin box is forwarded
-        here by Qt).
+        event (a double-click on the disabled value label is
+        forwarded here by Qt).
         """
         self.unlock_requested.emit(self._key)
         super().mouseDoubleClickEvent(event)
@@ -316,12 +355,12 @@ class _BoldHeader(QLabel):
     def __init__(
         self,
         text: str,
-        top_margin: int = 4,
+        top_margin: int = 2,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setText(f"<b>{text}</b>")
-        self.setContentsMargins(8, top_margin, 8, 0)
+        self.setContentsMargins(4, top_margin, 4, 0)
 
 
 class _ZoneHeader(QLabel):
@@ -341,7 +380,7 @@ class _ZoneHeader(QLabel):
             f'<span style="color: {ZONE_COLORS[zone]};">{_ZONE_CHIP}</span> '
             f"<b>{ZONE_LABELS[zone]}</b>"
         )
-        self.setContentsMargins(0, 8, 0, 0)
+        self.setContentsMargins(4, 4, 0, 0)
 
 
 class _BoundsDialog(QDialog):
@@ -476,7 +515,7 @@ class ThemedGroup(QWidget):
         self._grid_positions: dict[int, tuple[int, int, int]] = {}
 
         layout: QVBoxLayout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(2)
 
         self._toggle: QToolButton = QToolButton(self)
@@ -489,15 +528,15 @@ class ThemedGroup(QWidget):
         self._content: QWidget = QWidget(self)
         if grid_columns is not None:
             grid: QGridLayout = QGridLayout(self._content)
-            grid.setContentsMargins(8, 2, 8, 8)
-            grid.setSpacing(4)
+            grid.setContentsMargins(4, 0, 4, 4)
+            grid.setSpacing(2)
             for column_index in range(grid_columns):
                 grid.setColumnStretch(column_index, 1)
             grid.setRowStretch(0, 1)
             self._content_layout: QGridLayout | QVBoxLayout = grid
         else:
             column: QVBoxLayout = QVBoxLayout(self._content)
-            column.setContentsMargins(8, 2, 8, 8)
+            column.setContentsMargins(4, 0, 4, 4)
             column.addStretch()
             self._content_layout = column
 
@@ -680,13 +719,30 @@ class ParamPanel(QScrollArea):
     (the single area-fraction parameter), *Reactive transport*
     (red-themed; per-zone storage parameters and per-mineral kinetic
     parameters in every non-snow zone), *Initial state* (red-themed;
-    the calibrated exchange-site state per zone), and *Plots*
-    (the species / zone / mineral checkboxes for the zone and
-    reaction-rate figures).
+    the calibrated exchange-site state per zone), *Plots* (the
+    time-series checkboxes for the streamflow and river-concentration
+    figure, and the species / zone / mineral checkboxes for the zone
+    and reaction-rate figures), and *History* (the previous-runs
+    dropdown, the *Overlay previous results* checkbox, and the *Use
+    these parameters* button).  The history group keeps no parameter
+    cells, so a bounds reset leaves it in place, and the window
+    fills its dropdown and answers its two controls.
 
-    The four parameter groups lay their cells out in a four-column
-    grid: a cell's symbol and spin box take one column each, so a
-    row holds two cells.  Free parameters (distinct bounds) are
+    In hydrology-only mode (the main window's *Hydrology only*
+    checkbox), the *Reactive transport* and *Initial state* groups
+    and the species / zone / mineral checkboxes of the *Plots*
+    group are hidden by `set_hydro_only`; the streamflow checkbox
+    stays visible.  The hidden checkboxes keep their checked state,
+    so `selection()` still reports it (the window needs it when the
+    user switches back to full mode).
+
+    The four parameter groups lay their cells out in a five-column
+    grid: each cell (the symbol and spin box of one parameter) takes
+    one column, so a row holds five, the most parameters any zone
+    carries, and a zone or mineral header spans all of them.  Five
+    is the densest grid that still fits the widest symbol and spin
+    box at the panel's normal width; the *Plots* group's checkboxes
+    take two per row.  Free parameters (distinct bounds) are
     editable spin-box cells; degenerate parameters (identical
     bounds) are pinned and shown as read-only cells that unlock on
     double-click.  A free cell's range can be re-edited by
@@ -701,6 +757,13 @@ class ParamPanel(QScrollArea):
             parameter is unlocked.
         selection_changed: Emitted with the current `PlotSelection`
             whenever a plot checkbox is toggled.
+        history_changed: Emitted (with no payload) whenever the
+            history dropdown's selection or the overlay checkbox
+            changes; the window then rebuilds the figures from the
+            last results, re-applying or dropping the overlay.
+        history_restore_requested: Emitted when the *Use these
+            parameters* button is clicked; the window restores the
+            selected run's parameters without a re-run.
 
     Args:
         input_data: The loaded calibration inputs (parameter bounds
@@ -712,6 +775,8 @@ class ParamPanel(QScrollArea):
     value_changed = Signal(str)
     bounds_changed = Signal(str, float, float)
     selection_changed = Signal(PlotSelection)
+    history_changed = Signal()
+    history_restore_requested = Signal()
 
     def __init__(
         self,
@@ -731,6 +796,9 @@ class ParamPanel(QScrollArea):
         }
         self._rows: dict[str, _FreeCell | _PinnedCell] = {}
         self._groups: dict[str, ThemedGroup] = {}
+        # Hydrology-only mode: the reactive-transport groups and
+        # checkboxes are hidden (`set_hydro_only`).
+        self._hydro_only: bool = False
 
         container: QWidget = QWidget()
         self._container_layout: QVBoxLayout = QVBoxLayout(container)
@@ -741,6 +809,8 @@ class ParamPanel(QScrollArea):
         self._build_param_groups(first_build=True)
         self._plots_group: ThemedGroup = self._build_plots_group(selection)
         self._container_layout.addWidget(self._plots_group)
+        self._history_group: ThemedGroup = self._build_history_group()
+        self._container_layout.addWidget(self._history_group)
         self._container_layout.addStretch()
 
     def param_values(self) -> dict[str, float]:
@@ -772,8 +842,8 @@ class ParamPanel(QScrollArea):
         The current figure selection, as held by the checkbox state.
 
         Returns:
-            The `PlotSelection` of the checked species, zones, and
-            minerals, in the network's option order.
+            The `PlotSelection` of the checked time-series series,
+            species, zones, and minerals, each in its option order.
         """
         return PlotSelection(
             species=[
@@ -791,6 +861,11 @@ class ParamPanel(QScrollArea):
                 for name in self._input_data.network.mineral_names
                 if self._mineral_boxes[name].isChecked()
             ],
+            time_series=[
+                name
+                for name in TIME_SERIES_OPTIONS
+                if self._time_series_boxes[name].isChecked()
+            ],
         )
 
     def set_selection(self, selection: PlotSelection) -> None:
@@ -799,7 +874,8 @@ class ParamPanel(QScrollArea):
 
         The checkboxes' signals are blocked while this runs, so the
         panel does not re-emit `selection_changed`.  Names not in the
-        options (a selection saved against a different network) are
+        panel's checkboxes (a selection saved against a different
+        network, or series names that have since been removed) are
         ignored.
 
         Args:
@@ -817,6 +893,42 @@ class ParamPanel(QScrollArea):
             box.blockSignals(True)
             box.setChecked(name in selection.minerals)
             box.blockSignals(False)
+        for name, box in self._time_series_boxes.items():
+            box.blockSignals(True)
+            box.setChecked(name in selection.time_series)
+            box.blockSignals(False)
+
+    def set_hydro_only(self, enabled: bool) -> None:
+        """
+        Hide (or show) the reactive-transport parts of the panel.
+
+        In hydrology-only mode the *Reactive transport* and
+        *Initial state* groups and the species, zone, and mineral
+        checkboxes of the *Plots* group are hidden; the streamflow
+        checkbox stays visible.  The hidden checkboxes keep their
+        checked state, so `selection()` still reports it (the window
+        needs it when the user switches back to full mode).
+
+        Args:
+            enabled: True for hydrology-only mode.
+        """
+        self._hydro_only = enabled
+        for name in ("reactive", "initial"):
+            self._groups[name].setVisible(not enabled)
+        for header in (
+            self._species_header,
+            self._zone_header,
+            self._mineral_header,
+        ):
+            header.setVisible(not enabled)
+        for box in self._species_boxes.values():
+            box.setVisible(not enabled)
+        for box in self._zone_boxes.values():
+            box.setVisible(not enabled)
+        for box in self._mineral_boxes.values():
+            box.setVisible(not enabled)
+        for name, box in self._time_series_boxes.items():
+            box.setVisible(not enabled or name == "Streamflow")
 
     def reset_bounds(self) -> dict[str, float]:
         """
@@ -884,6 +996,9 @@ class ParamPanel(QScrollArea):
         Build (or rebuild, after `reset_bounds`) the four parameter
         groups from the current bounds.
 
+        A rebuild creates fresh (visible) groups, so the
+        hydrology-only mode's visibility is re-applied at the end.
+
         Args:
             first_build: True for the initial build (the groups are
                 appended to an empty container); False for a rebuild
@@ -906,6 +1021,9 @@ class ParamPanel(QScrollArea):
         }
         for offset, group in enumerate(self._groups.values()):
             self._container_layout.insertWidget(insert_at + offset, group)
+        if self._hydro_only:
+            for name in ("reactive", "initial"):
+                self._groups[name].setVisible(False)
 
     def _populate_hydrology(self) -> ThemedGroup:
         """The blue-themed hydrology group: one cell per zone parameter."""
@@ -930,6 +1048,7 @@ class ParamPanel(QScrollArea):
         )
         caption.setWordWrap(True)
         caption.setStyleSheet("color: gray;")
+        caption.setContentsMargins(4, 2, 4, 0)
         group.add_header(caption)
         return group
 
@@ -949,7 +1068,7 @@ class ParamPanel(QScrollArea):
                 self._add_param_cell(group, f"{zone}.{param}")
             if zone not in SNOW_ZONES:
                 for mineral_id, mineral_name in enumerate(mineral_names):
-                    group.add_header(_BoldHeader(mineral_name, top_margin=6))
+                    group.add_header(_BoldHeader(mineral_name, top_margin=4))
                     for field in MINERAL_PARAMS:
                         self._add_param_cell(
                             group, f"{zone}.{field}[{mineral_id}]"
@@ -993,23 +1112,39 @@ class ParamPanel(QScrollArea):
 
     def _build_plots_group(self, selection: PlotSelection) -> ThemedGroup:
         """
-        The neutral "Plots" group: the species / zone / mineral
-        checkboxes of the zone and reaction-rate figures.
+        The neutral "Plots" group: the checkboxes of the three
+        figures (two per row), in figure order: the time-series
+        figure's streamflow and river concentrations, the zone
+        figure's species and zones, and the reaction-rate figure's
+        minerals.
 
         Args:
             selection: The checkbox state to start from.
         """
-        group: ThemedGroup = ThemedGroup("Plots", None)
+        group: ThemedGroup = ThemedGroup("Plots", None, grid_columns=2)
 
-        group.add_widget(_BoldHeader("Species (zone figure)"))
+        group.add_header(_BoldHeader("Series (time-series figure)"))
+        self._time_series_boxes: dict[str, QCheckBox] = {}
+        for name in TIME_SERIES_OPTIONS:
+            box: QCheckBox = QCheckBox(name)
+            box.toggled.connect(self._on_selection_changed)
+            self._time_series_boxes[name] = box
+            group.add_widget(box)
+
+        # The three headers below (unlike the time-series one) are
+        # hidden together with their checkboxes in hydrology-only
+        # mode, so they are kept for `set_hydro_only`.
+        self._species_header: QWidget = _BoldHeader("Species (zone figure)")
+        group.add_header(self._species_header)
         self._species_boxes: dict[str, QCheckBox] = {}
         for name in self._input_data.network.species_names:
-            box: QCheckBox = QCheckBox(name)
+            box = QCheckBox(name)
             box.toggled.connect(self._on_selection_changed)
             self._species_boxes[name] = box
             group.add_widget(box)
 
-        group.add_widget(_BoldHeader("Zones (zone figure)"))
+        self._zone_header: QWidget = _BoldHeader("Zones (zone figure)")
+        group.add_header(self._zone_header)
         self._zone_boxes: dict[str, QCheckBox] = {}
         for zone in ZONE_ORDER:
             box = QCheckBox(ZONE_LABELS[zone])
@@ -1017,7 +1152,8 @@ class ParamPanel(QScrollArea):
             self._zone_boxes[zone] = box
             group.add_widget(box)
 
-        group.add_widget(_BoldHeader("Minerals (rate figure)"))
+        self._mineral_header: QWidget = _BoldHeader("Minerals (rate figure)")
+        group.add_header(self._mineral_header)
         self._mineral_boxes: dict[str, QCheckBox] = {}
         for name in self._input_data.network.mineral_names:
             box = QCheckBox(name)
@@ -1027,6 +1163,86 @@ class ParamPanel(QScrollArea):
 
         self.set_selection(selection)
         return group
+
+    def _build_history_group(self) -> ThemedGroup:
+        """
+        The neutral "History" group: the previous-runs dropdown, the
+        *Overlay previous results* checkbox, and the *Use these
+        parameters* button.
+
+        The group keeps no parameter cells, so it stays out of
+        `self._groups` and a bounds reset leaves it in place; the
+        window fills the dropdown (with the saved run directories
+        and the session's runs, newest first) and answers the two
+        controls.
+        """
+        group: ThemedGroup = ThemedGroup("History", None)
+
+        self._history_combo: QComboBox = QComboBox()
+        self._history_combo.setToolTip(
+            "The previous runs: the saved run directories and this "
+            "session's runs, newest first."
+        )
+        self._history_combo.currentIndexChanged.connect(
+            self._on_history_changed
+        )
+        group.add_widget(self._history_combo)
+
+        self._history_overlay_checkbox: QCheckBox = QCheckBox(
+            "Overlay previous results"
+        )
+        self._history_overlay_checkbox.setToolTip(
+            "Draw the selected previous run's results faintly (half "
+            "transparent) on the current figures."
+        )
+        self._history_overlay_checkbox.toggled.connect(
+            self._on_history_changed
+        )
+        group.add_widget(self._history_overlay_checkbox)
+
+        restore_button: QPushButton = QPushButton("Use these parameters")
+        restore_button.setToolTip(
+            "Restore the selected previous run's parameters to the "
+            "panel, without a re-run."
+        )
+        restore_button.clicked.connect(self._on_history_restore)
+        group.add_widget(restore_button)
+
+        return group
+
+    def set_history_items(self, labels: list[str]) -> None:
+        """
+        Replace the history dropdown's items.
+
+        The dropdown's signals are blocked while the items are
+        replaced, so the change does not re-emit
+        `history_changed`; the previous selection is kept when its
+        label is still present.
+
+        Args:
+            labels: The labels of the previous runs, newest first.
+        """
+        previous: str = self._history_combo.currentText()
+        self._history_combo.blockSignals(True)
+        self._history_combo.clear()
+        self._history_combo.addItems(labels)
+        index: int = self._history_combo.findText(previous)
+        if index >= 0:
+            self._history_combo.setCurrentIndex(index)
+        self._history_combo.blockSignals(False)
+
+    def history_selected_index(self) -> int:
+        """
+        The index of the dropdown's selected previous run.
+
+        Returns:
+            The index, or -1 when the dropdown is empty.
+        """
+        return self._history_combo.currentIndex()
+
+    def history_overlay_enabled(self) -> bool:
+        """Whether the *Overlay previous results* checkbox is on."""
+        return self._history_overlay_checkbox.isChecked()
 
     def _on_value_changed(self, key: str) -> None:
         """Record a free cell's new value and re-emit it to the window."""
@@ -1105,6 +1321,14 @@ class ParamPanel(QScrollArea):
     def _on_selection_changed(self, _checked: bool) -> None:
         """Recompute the selection in option order and emit it."""
         self.selection_changed.emit(self.selection())
+
+    def _on_history_changed(self) -> None:
+        """Re-emit a change of the history dropdown or the overlay checkbox."""
+        self.history_changed.emit()
+
+    def _on_history_restore(self) -> None:
+        """Re-emit the *Use these parameters* button's click."""
+        self.history_restore_requested.emit()
 
     def _group_of(self, key: str) -> ThemedGroup:
         """

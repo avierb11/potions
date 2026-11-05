@@ -6,8 +6,8 @@ A run saved from the GUI (the *Save run* button) carries, besides the
 standard run outputs of `potions.result_saving`, a ``gui_state.json``
 file in the run directory with the full state of the GUI at save time:
 the series CSV path, the value and bounds of every parameter (including
-bounds the user has edited), the plot selections, and the window
-geometry.  At startup the GUI looks for the most recent saved run
+bounds the user has edited), the plot selections, the run mode, and the
+window geometry.  At startup the GUI looks for the most recent saved run
 directory under the ``results`` directory of the current working
 directory and restores from it:
 
@@ -19,6 +19,18 @@ directory and restores from it:
   4-decimal in the CSV, so the restore is slightly lossy, and the
   initial-state parameters are absent from the CSV, so they fall back
   to their defaults); the figures still come from the saved CSVs.
+
+The parameter panel's *History* group lists every run directory
+`list_run_dirs` finds (newest first) beside the session's own runs,
+so any saved run can be restored without a re-run, not only the
+most recent one.
+
+Besides the per-run state, the GUI keeps an abbreviated session
+history: with the *Save run history* checkbox on, every finished run
+appends one JSON object to a ``gui_run_history.jsonl`` file in the
+results directory, holding the timestamp, the run mode, the
+parameter values, and the objective values (see
+`append_run_history`).
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -33,13 +46,30 @@ from typing import Final
 import pandas as pd
 import potions as pt
 
-from potions.gui.data import GuiInputData, PlotSelection, default_plot_selection
+from potions.gui.common import TIME_SERIES_OPTIONS
+from potions.gui.data import (
+    GuiInputData,
+    GuiRunResults,
+    PlotSelection,
+    default_plot_selection,
+)
 
 # ==== Constants ==== #
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # The version of the gui_state.json format written and accepted here.
 GUI_STATE_VERSION: Final[int] = 1
+# The name of the session's abbreviated run-history file, kept in
+# the results directory: one JSON object per finished run (see
+# `append_run_history`).
+RUN_HISTORY_FILENAME: Final[str] = "gui_run_history.jsonl"
+# The two run modes: "full" runs the hydrology and
+# reactive-transport models together; "hydro" runs only the
+# hydrology model (the GUI's hydrology-only mode).
+MODE_FULL: Final[str] = "full"
+MODE_HYDRO: Final[str] = "hydro"
+# The set of the valid run modes.
+_VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
 # same second, a counter suffix.
@@ -66,9 +96,20 @@ class GuiState:
         window_geometry: The window position and size, as a mapping
             with ``x`` / ``y`` / ``width`` / ``height`` keys; None when
             the state predates geometry persistence.
-        splitter_sizes: The sizes of the main window's three
-            splitter sections, in order; None when the state predates
-            splitter persistence.
+        splitter_sizes: The sizes of the window's two splitters, in
+            order: the figure and the lower (table-and-parameters)
+            row of the main vertical splitter, then the objective-
+            table and parameter-panel widths of the inner horizontal
+            splitter; None when the state predates splitter
+            persistence.
+        save_history: Whether the *Save run history* checkbox was
+            on in the session; an absent field in a state file
+            means a state saved before the toggle existed, which
+            restores it off.
+        mode: The run mode of the session (`MODE_FULL` or
+            `MODE_HYDRO`); an absent field in a state file means a
+            state saved before the mode existed, which restores
+            full mode.
     """
 
     csv_path: str | None
@@ -77,6 +118,8 @@ class GuiState:
     selection: PlotSelection
     window_geometry: dict[str, int] | None
     splitter_sizes: list[int] | None
+    save_history: bool = False
+    mode: str = MODE_FULL
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -100,6 +143,7 @@ class GuiState:
                 "species": list(self.selection.species),
                 "zones": list(self.selection.zones),
                 "minerals": list(self.selection.minerals),
+                "time_series": list(self.selection.time_series),
             },
             "window_geometry": (
                 dict(self.window_geometry)
@@ -111,6 +155,8 @@ class GuiState:
                 if self.splitter_sizes is not None
                 else None
             ),
+            "save_history": self.save_history,
+            "mode": self.mode,
         }
 
     @classmethod
@@ -150,7 +196,62 @@ class GuiState:
             selection=_require_selection(data),
             window_geometry=_optional_geometry(data),
             splitter_sizes=_optional_splitter_sizes(data),
+            save_history=_optional_save_history(data),
+            mode=_optional_mode(data),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RunHistoryEntry:
+    """
+    One finished run, in the abbreviated form the session's
+    run history stores.
+
+    The history is the ``gui_run_history.jsonl`` file in the results
+    directory, one JSON object per line (see `append_run_history`),
+    kept so the GUI can list previously used parameter sets and the
+    objective values they produced.
+
+    Attributes:
+        timestamp: When the run finished, as an ISO 8601 UTC
+            timestamp with second precision.
+        mode: The run's mode, which models it ran: `MODE_FULL`
+            runs the hydrology and reactive-transport models
+            together, `MODE_HYDRO` the hydrology model alone.
+        param_values: The parameter values the run used, keyed by
+            bounds key in the bounds' key order.
+        objectives: The objective-function values the run reported:
+            one mapping per measured target (the streamflow and the
+            river species), each mapping metric name to value.
+    """
+
+    timestamp: str
+    mode: str
+    param_values: dict[str, float]
+    objectives: dict[str, dict[str, float]]
+
+    def to_dict(self) -> dict[str, object]:
+        """
+        The JSON-serializable form of the entry.
+
+        Returns:
+            A plain dict (JSON-ready) with the entry's fields.
+        """
+        return {
+            "timestamp": self.timestamp,
+            "mode": self.mode,
+            "param_values": {
+                name: float(value)
+                for name, value in self.param_values.items()
+            },
+            "objectives": {
+                target: {
+                    metric: float(value)
+                    for metric, value in metrics.items()
+                }
+                for target, metrics in self.objectives.items()
+            },
+        }
 # =============== #
 
 
@@ -228,14 +329,23 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
 
     Raises:
         ValueError: Raised when the field is missing or one of the
-            three selection lists is not a list of strings.
+            selection lists (the time-series list is optional; an
+            absent one keeps every series on) is not a list of
+            strings.
     """
     raw: object = data.get("selection")
     if not isinstance(raw, dict):
         raise ValueError("gui_state.json is missing the 'selection' mapping.")
 
-    def _strings(key: str) -> list[str]:
+    def _strings(
+        key: str, optional_default: Sequence[str] | None = None
+    ) -> list[str]:
         entry: object = raw.get(key)
+        # An absent optional field falls back to its default: the
+        # time-series list of a state saved before the time-series
+        # checkboxes existed means every series stays on.
+        if entry is None and optional_default is not None:
+            return list(optional_default)
         if not isinstance(entry, list) or not all(
             isinstance(item, str) for item in entry
         ):
@@ -249,6 +359,9 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
         species=_strings("species"),
         zones=_strings("zones"),
         minerals=_strings("minerals"),
+        time_series=_strings(
+            "time_series", optional_default=TIME_SERIES_OPTIONS
+        ),
     )
 
 
@@ -283,15 +396,24 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
     """
     The optional ``splitter_sizes`` field of a gui_state.json mapping.
 
+    The current layout writes four sizes (the two sections of the
+    main vertical splitter, then the two of the inner horizontal
+    one).  A state saved by the single-splitter layout writes three
+    (figure, objective table, parameters stacked vertically) and is
+    mapped onto the current layout: the figure keeps its height, and
+    the table and the parameters move side by side into the lower
+    row.
+
     Args:
         data: The parsed JSON mapping.
 
     Returns:
-        The list of splitter section sizes or None.
+        The list of splitter sizes in the current four-size layout,
+        or None.
 
     Raises:
         ValueError: Raised when the field is present but is not a
-            list of integers.
+            list of three or four integers.
     """
     raw: object = data.get("splitter_sizes")
     if raw is None:
@@ -302,7 +424,69 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
         raise ValueError(
             "gui_state.json 'splitter_sizes' must be a list of integers."
         )
-    return [int(item) for item in raw]
+    values: list[int] = [int(item) for item in raw]
+    if len(values) == 3:
+        figure, objective, parameters = values
+        return [figure, objective + parameters, objective, parameters]
+    if len(values) == 4:
+        return values
+    raise ValueError(
+        f"gui_state.json 'splitter_sizes' must hold three or four "
+        f"sizes, got {len(values)}."
+    )
+
+
+def _optional_save_history(data: dict[str, object]) -> bool:
+    """
+    The optional ``save_history`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's boolean value, or False when it is absent (a
+        state saved before the toggle existed restores the checkbox
+        off).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            boolean.
+    """
+    raw: object = data.get("save_history")
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError(
+            f"gui_state.json 'save_history' must be a boolean, "
+            f"got {type(raw).__name__}."
+        )
+    return raw
+
+
+def _optional_mode(data: dict[str, object]) -> str:
+    """
+    The optional ``mode`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's run mode, or `MODE_FULL` when it is absent (a
+        state saved before the mode existed restores full mode).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            valid mode string.
+    """
+    raw: object = data.get("mode")
+    if raw is None:
+        return MODE_FULL
+    if not isinstance(raw, str) or raw not in _VALID_MODES:
+        raise ValueError(
+            f"gui_state.json 'mode' must be 'full' or 'hydro', "
+            f"got {raw!r}."
+        )
+    return raw
 
 
 def _not_number(value: object) -> bool:
@@ -365,6 +549,44 @@ def read_gui_state(run_dir: Path) -> GuiState | None:
         return None
 
 
+def list_run_dirs(results_dir: str | Path = "results") -> list[Path]:
+    """
+    The saved run directories under the results directory, newest
+    first.
+
+    Runs are the ``run_<YYYYMMDD_HHMMSS>[_<counter>]`` directories
+    created by `potions.result_saving`; the list is sorted by the
+    timestamp (ties broken by the counter), newest first.
+
+    Args:
+        results_dir: The results directory to scan; defaults to
+            ``results`` relative to the current working directory, the
+            run saver's built-in default.
+
+    Returns:
+        The run directory paths in newest-first order; empty when
+        the directory does not exist or contains no run directories.
+    """
+    base: Path = Path(results_dir)
+    if not base.is_dir():
+        return []
+
+    candidates: list[tuple[str, int, Path]] = []
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        match: re.Match[str] | None = _RUN_DIR_NAME.match(entry.name)
+        if match is None:
+            continue
+        stamp: str = f"{match.group(1)}{match.group(2)}"
+        counter_part: str | None = match.group(3)
+        counter: int = int(counter_part) if counter_part is not None else 0
+        candidates.append((stamp, counter, entry))
+
+    candidates.sort()
+    return [path for _, _, path in reversed(candidates)]
+
+
 def find_latest_run_dir(results_dir: str | Path = "results") -> Path | None:
     """
     The most recent saved run directory under the results directory.
@@ -382,26 +604,93 @@ def find_latest_run_dir(results_dir: str | Path = "results") -> Path | None:
         The path of the most recent run directory, or None when the
         directory does not exist or contains no run directories.
     """
-    base: Path = Path(results_dir)
-    if not base.is_dir():
-        return None
+    runs: list[Path] = list_run_dirs(results_dir)
+    return runs[0] if runs else None
 
-    candidates: list[tuple[str, int, Path]] = []
-    for entry in base.iterdir():
-        if not entry.is_dir():
-            continue
-        match: re.Match[str] | None = _RUN_DIR_NAME.match(entry.name)
-        if match is None:
-            continue
-        stamp: str = f"{match.group(1)}{match.group(2)}"
-        counter_part: str | None = match.group(3)
-        counter: int = int(counter_part) if counter_part is not None else 0
-        candidates.append((stamp, counter, entry))
 
-    if not candidates:
-        return None
-    candidates.sort()
-    return candidates[-1][2]
+# ==== Run history ==== #
+def append_run_history(
+    results_dir: str | Path, entry: RunHistoryEntry
+) -> Path:
+    """
+    Append one finished run to the session's run-history file.
+
+    The history is the ``gui_run_history.jsonl`` file in the results
+    directory (created on first use): each finished run appends one
+    JSON object with the entry's fields, so the file grows by one
+    line per run.  A failure to create or write the file is
+    reported on the standard error and does not raise, so a bad
+    history can never disturb a finished run.
+
+    Args:
+        results_dir: The results directory the history file lives
+            in; defaults to ``results`` relative to the current
+            working directory, the run saver's built-in default.
+        entry: The finished run's abbreviated record.
+
+    Returns:
+        The path of the history file.
+    """
+    path: Path = Path(results_dir) / RUN_HISTORY_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry.to_dict()) + "\n")
+    except OSError as error:
+        print(
+            f"Could not append to the run history: {error}",
+            file=sys.stderr,
+        )
+    return path
+
+
+def objectives_from_results(
+    results: pt.ModelResults | GuiRunResults,
+) -> dict[str, dict[str, float]]:
+    """
+    The objective values of a finished run, keyed by measured target.
+
+    This is the source of a run-history entry's ``objectives`` field
+    (see `append_run_history`): the streamflow objectives when the
+    run was scored against measured streamflow, and one mapping per
+    measured river species when the reactive transport model
+    reported any.  A target with no reported objectives is omitted,
+    as the on-screen table omits its column.  The hydrology-only
+    mode's `GuiRunResults` carries no reactive-transport results, so
+    its entry holds the streamflow objectives alone.
+
+    Args:
+        results: The finished run's results (a `pt.ModelResults` for
+            a full-mode run, a `GuiRunResults` for a hydrology-only
+            run).
+
+    Returns:
+        The mapping of target name to (metric name to value).
+    """
+    if isinstance(results, GuiRunResults):
+        hydro_results: pt.HydroModelResults = results.hydro
+        rt_results: pt.RtModelResults | None = results.rt
+    else:
+        hydro_results = results.hydro
+        rt_results = results.reactive_transport
+
+    objectives: dict[str, dict[str, float]] = {}
+    hydro_objectives: pd.Series = hydro_results.objective_functions
+    if len(hydro_objectives) > 0:
+        objectives["Streamflow"] = {
+            str(name): float(value)
+            for name, value in hydro_objectives.items()
+        }
+    rt_objectives: pd.DataFrame | None = (
+        rt_results.objective_functions if rt_results is not None else None
+    )
+    if rt_objectives is not None and len(rt_objectives) > 0:
+        for species in rt_objectives.index:
+            objectives[str(species)] = {
+                str(metric): float(rt_objectives.loc[species, metric])
+                for metric in rt_objectives.columns
+            }
+    return objectives
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,19 +709,28 @@ class SavedRun:
         window_geometry: The window position and size to restore, as
             a mapping with ``x`` / ``y`` / ``width`` / ``height`` keys;
             None when the state did not carry them.
-        splitter_sizes: The sizes of the main window's three
-            splitter sections to restore, in order; None when the
-            state did not carry them.
+        splitter_sizes: The sizes of the window's two splitters to
+            restore (the main vertical pair, then the inner
+            horizontal pair); None when the state did not carry them.
+        save_history: Whether the session's *Save run history*
+            checkbox was on when the run was saved; False for a run
+            saved before the toggle existed.
+        mode: The run mode the saved run used (`MODE_FULL` or
+            `MODE_HYDRO`); for a run saved before the mode existed,
+            inferred from the saved outputs (hydrology-only when the
+            run carried no reactive-transport results).
         restore_note: A note for the status bar explaining how the
             state was restored; None for a full gui_state.json restore.
     """
 
-    results: pt.ModelResults
+    results: GuiRunResults
     param_values: dict[str, float]
     param_bounds: dict[str, tuple[float, float]]
     selection: PlotSelection
     window_geometry: dict[str, int] | None
     splitter_sizes: list[int] | None
+    save_history: bool
+    mode: str
     restore_note: str | None
 # =============== #
 
@@ -443,8 +741,9 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
     Restore the GUI state and the model results from a saved run.
 
     When the run carries a ``gui_state.json`` (a run saved by this
-    GUI), the parameter values, the user-edited bounds, and the plot
-    selections are restored exactly.  Otherwise (a run saved by an
+    GUI), the parameter values, the user-edited bounds, the plot
+    selections, the run mode, and the save-history toggle are
+    restored exactly.  Otherwise (a run saved by an
     older version of the GUI or by the command-line tools) the
     parameter values are recovered best-effort from the saved
     ``parameters.csv`` files: the values in that CSV are 4-decimal, so
@@ -468,7 +767,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             parameter value it cannot parse.
     """
     state: GuiState | None = read_gui_state(run_dir)
-    results: pt.ModelResults = _reconstruct_results(run_dir, input_data)
+    results: GuiRunResults = _reconstruct_results(run_dir, input_data)
 
     if state is not None:
         return SavedRun(
@@ -482,6 +781,8 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             splitter_sizes=list(state.splitter_sizes)
             if state.splitter_sizes is not None
             else None,
+            save_history=state.save_history,
+            mode=state.mode,
             restore_note=None,
         )
 
@@ -497,6 +798,11 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         selection=default_plot_selection(),
         window_geometry=None,
         splitter_sizes=None,
+        save_history=False,
+        # A stateless run's mode is inferred from its saved outputs:
+        # a run with no reactive-transport results is a hydrology-
+        # only run.
+        mode=MODE_HYDRO if results.rt is None else MODE_FULL,
         restore_note=note,
     )
 
@@ -565,9 +871,17 @@ def _read_rt_objectives(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path, index_col=0)
 
 
-def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> pt.ModelResults:
+def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResults:
     """
     Rebuild the model results from a run's saved simulation CSVs.
+
+    Two layouts are recognized: a full-mode run carries its
+    simulation CSVs in the run's ``hydro`` and ``rt`` subdirectories
+    (the layout of `potions.result_saving.save_model_run`), and a
+    hydrology-only run carries a single ``simulation.csv`` (and
+    ``objective_functions.csv``) directly in the run directory (the
+    layout of `potions.result_saving.save_hydro_run`), with no
+    reactive-transport results.
 
     The hydrology results carry the session's forcing (the one the
     saved run was made with; the record is part of the package) and
@@ -580,22 +894,33 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> pt.ModelRes
         input_data: The assembled GUI inputs (for the forcing).
 
     Returns:
-        The reconstructed results.
+        The reconstructed results, with no reactive-transport
+        results for a hydrology-only run.
 
     Raises:
-        ValueError: Raised when either simulation CSV is missing or an
+        ValueError: Raised when a simulation CSV is missing or an
             objective-functions CSV is unparseable.
     """
-    hydro_sim: pd.DataFrame = _read_simulation_csv(
-        run_dir / "hydro" / "simulation.csv"
-    )
-    rt_sim: pd.DataFrame = _read_simulation_csv(run_dir / "rt" / "simulation.csv")
-    hydro_objectives: pd.Series = _read_hydro_objectives(
-        run_dir / "hydro" / "objective_functions.csv"
-    )
-    rt_objectives: pd.DataFrame | None = _read_rt_objectives(
-        run_dir / "rt" / "objective_functions.csv"
-    )
+    hydro_sim: pd.DataFrame
+    rt_sim: pd.DataFrame | None
+    hydro_objectives: pd.Series
+    rt_objectives: pd.DataFrame | None
+    if (run_dir / "hydro" / "simulation.csv").is_file():
+        hydro_sim = _read_simulation_csv(run_dir / "hydro" / "simulation.csv")
+        rt_sim = _read_simulation_csv(run_dir / "rt" / "simulation.csv")
+        hydro_objectives = _read_hydro_objectives(
+            run_dir / "hydro" / "objective_functions.csv"
+        )
+        rt_objectives = _read_rt_objectives(
+            run_dir / "rt" / "objective_functions.csv"
+        )
+    else:
+        hydro_sim = _read_simulation_csv(run_dir / "simulation.csv")
+        rt_sim = None
+        hydro_objectives = _read_hydro_objectives(
+            run_dir / "objective_functions.csv"
+        )
+        rt_objectives = None
 
     hydro_results: pt.HydroModelResults = pt.HydroModelResults(
         forcing=input_data.forc,
@@ -603,12 +928,15 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> pt.ModelRes
         objective_functions=hydro_objectives,
         saved_dir=str(run_dir),
     )
-    rt_results: pt.RtModelResults = pt.RtModelResults(
-        simulation=rt_sim,
-        objective_functions=rt_objectives,
-        saved_dir=str(run_dir),
-    )
-    return pt.ModelResults(hydro=hydro_results, reactive_transport=rt_results)
+    if rt_sim is not None:
+        rt_results: pt.RtModelResults | None = pt.RtModelResults(
+            simulation=rt_sim,
+            objective_functions=rt_objectives,
+            saved_dir=str(run_dir),
+        )
+    else:
+        rt_results = None
+    return GuiRunResults(hydro=hydro_results, rt=rt_results)
 
 
 def _parse_saved_parameters(
@@ -631,9 +959,9 @@ def _parse_saved_parameters(
     fall back to the default (midpoint) values.
 
     Args:
-        run_dir: The run directory to parse (the ``hydro``
-            ``parameters.csv`` is used, with the ``rt`` copy as a
-            fallback).
+        run_dir: The run directory to parse (a ``parameters.csv`` at
+            the run's top level, as a hydrology-only run saves it,
+            is used first, then the ``hydro`` and ``rt`` copies).
         input_data: The assembled GUI inputs (the bounds and the
             network, for the mineral-label mapping).
 
@@ -642,20 +970,23 @@ def _parse_saved_parameters(
         for the status bar describing the lossy restore.
 
     Raises:
-        ValueError: Raised when neither ``hydro/parameters.csv`` nor
-            ``rt/parameters.csv`` exists, or a kept row carries a
-            value that cannot be parsed as a number.
+        ValueError: Raised when no ``parameters.csv`` exists (at the
+            run's top level, in ``hydro/``, or in ``rt/``), or a kept
+            row carries a value that cannot be parsed as a number.
     """
-    params_path: Path | None = None
-    for sub in ("hydro", "rt"):
-        candidate: Path = run_dir / sub / "parameters.csv"
-        if candidate.is_file():
-            params_path = candidate
-            break
+    candidates: list[Path] = [
+        run_dir / "parameters.csv",
+        run_dir / "hydro" / "parameters.csv",
+        run_dir / "rt" / "parameters.csv",
+    ]
+    params_path: Path | None = next(
+        (candidate for candidate in candidates if candidate.is_file()),
+        None,
+    )
     if params_path is None:
         raise ValueError(
             f"Saved run is incomplete: no parameters.csv in {run_dir} "
-            f"(looked in hydro/ and rt/)."
+            f"(looked in the run's top level, hydro/, and rt/)."
         )
 
     df: pd.DataFrame = pd.read_csv(params_path)
@@ -691,11 +1022,22 @@ def _parse_saved_parameters(
         else:
             values[name] = float(lo + hi) / 2.0 if lo != hi else float(lo)
 
-    note: str = (
-        f"Restored parameters from the saved run's parameters.csv "
-        f"({found} values, 4-decimal; initial-state parameters at "
-        f"their defaults)."
-    )
+    # A hydrology-only run's top-level parameters.csv carries no
+    # hydro-zone rows that map onto bounds keys (they are layer-
+    # named), so those parameters fall back to their defaults along
+    # with the initial-state ones.
+    if params_path.parent == run_dir:
+        note: str = (
+            f"Restored parameters from the saved run's parameters.csv "
+            f"({found} values, 4-decimal; hydro-zone and initial-"
+            f"state parameters at their defaults)."
+        )
+    else:
+        note = (
+            f"Restored parameters from the saved run's parameters.csv "
+            f"({found} values, 4-decimal; initial-state parameters at "
+            f"their defaults)."
+        )
     return values, note
 
 

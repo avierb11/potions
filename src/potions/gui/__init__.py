@@ -4,10 +4,10 @@ Interactive GUI for `potions`.
 The package provides one GUI: the East River lateral-model
 calibration workbench (`potions.gui.window`).  It is a PySide6
 desktop app: the model's three figures in a single panel (flipped
-by arrow buttons or the Left / Right keys), an always visible
-per-run objective-function table, and every calibrated parameter
-in a panel below the figure, grouped by zone (hydrology in blue,
-reactive transport in red).  Parameter changes re-run the models on
+by arrow buttons or the Left / Right keys) over a row that holds
+the per-run objective-function table on the left and every
+calibrated parameter on the right, grouped by zone (hydrology in
+blue, reactive transport in red).  Parameter changes re-run the models on
 a background thread; a *Save run* click stores the run's model
 output together with the session state, which the app restores on
 its next start.

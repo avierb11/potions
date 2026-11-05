@@ -193,6 +193,14 @@ RIVER_SPECIES_MEAS_COLORS: Final[dict[str, str]] = {
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
 MEAS_Q_COLOR: Final[str] = "black"
 
+# The series selectable in the time-series figure, in checkbox order:
+# the streamflow first, then the river species in the right axis's
+# color-map order.
+TIME_SERIES_OPTIONS: Final[tuple[str, ...]] = (
+    "Streamflow",
+    *RIVER_SPECIES_SIM_COLORS,
+)
+
 # ==== Types ==== #
 @dataclass(frozen=True, slots=True)
 class Theme:

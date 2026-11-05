@@ -20,17 +20,20 @@ record to that window.  The record is a single continuous run: the
 loader prepends a two-year spin-up (the first two years of the
 record, shifted back in time with their measurements set to NaN).
 
-The run functions (`arr_to_model` and `arr_to_results`) interpret a
-flat parameter array in the bounds' key order: the hydro parameters,
-the per-zone reactive-transport parameters, and the trailing
-per-speciation-zone log10 total exchange-site concentrations.  They
-construct the model and run it, the same way the showcase's
-calibration pipeline did, so the GUI can re-run both models on every
-parameter change.
+The run functions (`arr_to_model`, `arr_to_results`, and
+`arr_to_hydro_results`) interpret a flat parameter array in the
+bounds' key order: the hydro parameters, the per-zone
+reactive-transport parameters, and the trailing per-speciation-zone
+log10 total exchange-site concentrations.  They construct the model
+and run it, the same way the showcase's calibration pipeline did, so
+the GUI can re-run the models on every parameter change:
+`arr_to_results` runs both models together, and
+`arr_to_hydro_results` runs only the hydrology model (the GUI's
+hydrology-only mode).
 """
 
 import gc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Final
@@ -39,7 +42,8 @@ import numpy as np
 import pandas as pd
 import potions as pt
 from potions.calibration import build_rt_bounds
-from potions.gui.common import SNOW_ZONES, ZONE_ORDER
+from potions.gui.common import SNOW_ZONES, TIME_SERIES_OPTIONS, ZONE_ORDER
+from potions.hydro_model import HydrologicalModel
 from potions.reactive_transport.common_networks import get_soc_calcite_network
 from scipy.optimize import root_scalar
 
@@ -125,11 +129,17 @@ class PlotSelection:
         species: The network species to plot in the zone figure.
         zones: The zones to plot in the zone figure.
         minerals: The minerals to plot in the rate figure.
+        time_series: The series to draw in the time-series figure
+            (the streamflow and the river concentrations); by
+            default every selectable series.
     """
 
     species: list[str]
     zones: list[str]
     minerals: list[str]
+    time_series: list[str] = field(
+        default_factory=lambda: list(TIME_SERIES_OPTIONS)
+    )
 
 
 @dataclass(frozen=True)
@@ -166,6 +176,25 @@ class GuiInputData:
     precip_conc: np.ndarray
     q_meas: pd.Series
     conc_df: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class GuiRunResults:
+    """
+    The results of one finished GUI run.
+
+    The hydrology results are always present; the reactive-transport
+    results are None when the run was done in hydrology-only mode
+    (`arr_to_hydro_results`).
+
+    Attributes:
+        hydro: The hydrology model's results.
+        rt: The reactive-transport model's results, or None when the
+            run was hydrology-only.
+    """
+
+    hydro: pt.HydroModelResults
+    rt: pt.RtModelResults | None
 # =============== #
 
 
@@ -462,7 +491,7 @@ def arr_to_results(
     input_data: GuiInputData,
     init_aq_conc: float = 1e-3,
     verbose: bool = False,
-) -> pt.ModelResults:
+) -> GuiRunResults:
     """
     Run the hydrology and reactive transport models for a parameter
     array.
@@ -483,8 +512,8 @@ def arr_to_results(
             models.
 
     Returns:
-        The full ModelResults including the reactive transport
-        simulation.
+        The run's `GuiRunResults`, with the reactive-transport
+        results present.
     """
     model: pt.Model
     init_state_params: np.ndarray
@@ -555,13 +584,57 @@ def arr_to_results(
     )
     gc.collect()
 
-    return model_res
+    return GuiRunResults(
+        hydro=model_res.hydro, rt=model_res.reactive_transport
+    )
+
+
+def arr_to_hydro_results(
+    arr: np.ndarray,
+    input_data: GuiInputData,
+    verbose: bool = False,
+) -> GuiRunResults:
+    """
+    Run the hydrology model alone for a parameter array.
+
+    The hydrology-only counterpart of `arr_to_results`: builds the
+    hydrology model from the array's leading hydro parameters and
+    runs it over the full (spin-up-inclusive) record, scoring it
+    against the measured streamflow.  The reactive-transport model
+    is not run; the returned `GuiRunResults` carries None for its
+    reactive-transport results.
+
+    Args:
+        arr: The flat parameter array; only the leading hydro
+            parameters are used.
+        input_data: The assembled GUI inputs.
+        verbose: Whether to print verbose output while running the
+            model.
+
+    Returns:
+        The run's `GuiRunResults`, with no reactive-transport
+        results.
+    """
+    num_hydro: int = pt.LateralThreeLayerModel.get_num_hydro_parameters()
+    hydro_model: HydrologicalModel = (
+        pt.LateralThreeLayerModel.hydro_from_array(
+            arr[:num_hydro], natural_scales=True
+        )
+    )
+    hydro: pt.HydroModelResults = hydro_model.run_hydro_model(
+        input_data.forc,
+        meas_streamflow=input_data.q_meas,
+        verbose=verbose,
+        save_results=False,
+    )
+
+    return GuiRunResults(hydro=hydro, rt=None)
 
 
 def default_plot_selection() -> PlotSelection:
     """
-    The default figure selections: DOC, every non-snow zone, and the
-    dominant SOC mineral.
+    The default figure selections: every time-series series, DOC,
+    every non-snow zone, and the dominant SOC mineral.
 
     Returns:
         The default `PlotSelection`.

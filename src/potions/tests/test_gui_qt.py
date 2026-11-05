@@ -4,26 +4,29 @@ Qt (PySide6) tests for the East River lateral-model calibration GUI.
 These are the interactive-layer counterparts to `test_gui`, which
 covers the data layer and the pure functions.  Here the actual
 widgets are driven offscreen: the main window (startup, restoring a
-saved run, background runs, saving, and closing with a run in
-flight), the figure panel, the objective table model, and the
-parameter panel (spin-box cells, pinned cells, their dialogs, and the
-plot selection).
+saved run, background runs, saving, the history dropdown's restore
+and overlay, and closing with a run in flight), the figure panel,
+the objective table model, and the parameter panel (spin-box cells,
+pinned cells, their dialogs, and the plot selection).
 
 The offscreen Qt platform is requested before the first PySide6
 import, and the model itself is never run: the window's
-`arr_to_results` call is patched with a fake that returns the
-synthetic results from `test_gui` (a real run takes about five
-minutes and is covered by that file's own slow test).
+`arr_to_results` and `arr_to_hydro_results` calls are patched
+with fakes that return the synthetic results from `test_gui`
+(a real run takes about five minutes and is covered by that
+file's own slow test).
 """
 
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import json
 import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -35,11 +38,11 @@ from PySide6.QtGui import QAction, QCloseEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QGridLayout,
-    QVBoxLayout,
     QWidget,
 )
 
 import potions as pt
+from potions.hydro_model import HydrologicalModel
 
 from ..gui import data as gui_data
 from ..gui import figure_panel as gui_figure_panel
@@ -48,13 +51,22 @@ from ..gui import window as gui_window
 from ..gui.common import (
     HYDRO_THEME,
     METRIC_LABELS,
+    METRIC_NAMES,
     SPECIATION_ZONES,
+    TIME_SERIES_OPTIONS,
     param_label,
 )
 from ..gui.data import PlotSelection
-from ..gui.state import read_gui_state
+from ..gui.state import (
+    MODE_FULL,
+    MODE_HYDRO,
+    RUN_HISTORY_FILENAME,
+    read_gui_state,
+)
 from .test_gui import (
+    _alpha,
     _full_state,
+    _lines,
     _midpoint_vector,
     _synthetic_results,
     _write_saved_run,
@@ -110,17 +122,26 @@ def _pump(iterations: int = 50) -> None:
 def _fake_results_factory(
     calls: list[np.ndarray],
     input_data: gui_data.GuiInputData,
-) -> Callable[[np.ndarray, gui_data.GuiInputData], pt.ModelResults]:
+    hydro_only: bool = False,
+) -> Callable[
+    [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
+]:
     """
-    A stand-in for `arr_to_results` that records each parameter
-    vector it is called with and returns the synthetic results.
+    A stand-in for `arr_to_results` (or `arr_to_hydro_results`)
+    that records each parameter vector it is called with and
+    returns the synthetic results wrapped in a `GuiRunResults`.
+    With `hydro_only` the reactive-transport result is None, as in
+    a hydrology-only run.
     """
 
     def fake(
         x: np.ndarray, _input_data: gui_data.GuiInputData
-    ) -> pt.ModelResults:
+    ) -> gui_data.GuiRunResults:
         calls.append(np.array(x))
-        return pt.ModelResults(*_synthetic_results(input_data))
+        hydro, rt = _synthetic_results(input_data)
+        if hydro_only:
+            return gui_data.GuiRunResults(hydro, None)
+        return gui_data.GuiRunResults(hydro, rt)
 
     return fake
 
@@ -129,7 +150,7 @@ def _make_window(
     input_data: gui_data.GuiInputData,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    fake: Callable[[np.ndarray, gui_data.GuiInputData], pt.ModelResults],
+    fake: Callable[[np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults],
 ) -> gui_window.MainWindow:
     """
     Build a main window in an empty `tmp_path` (no saved run to
@@ -155,7 +176,7 @@ def _assert_restored_dir(win: gui_window.MainWindow, expected: Path) -> None:
     missing directory fail the assertion: both call sites restore a
     run that must have recorded its directory.
     """
-    results: pt.ModelResults | None = win._results
+    results: gui_data.GuiRunResults | None = win._results
     assert results is not None, "Expected restored results to be set."
     saved_dir: str | None = results.hydro.saved_dir
     assert saved_dir is not None, "Expected the results to record a saved_dir."
@@ -270,6 +291,11 @@ class TestMainWindowStartup:
                 r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
             )
             assert win._save_button.isEnabled()
+            # The run-history toggle starts off.
+            assert not win._save_history_checkbox.isChecked()
+            # The results on screen correspond to the current
+            # parameters, so a manual run would do nothing.
+            assert not win._run_button.isEnabled()
             assert win._progress_bar.isHidden()
             assert win._elapsed_label.isHidden()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
@@ -280,8 +306,10 @@ class TestMainWindowStartup:
                 "Zone concentrations and storage",
                 "Mineral reaction rates",
             ]
-            assert win._objective_model.rowCount() == 4
-            assert win._objective_model.columnCount() == 7
+            # The table is transposed: one row per metric, one column
+            # per measured target (the streamflow and the species).
+            assert win._objective_model.rowCount() == 7
+            assert win._objective_model.columnCount() == 4
             assert win.windowTitle() == gui_window._TITLE
         finally:
             _close_window(win)
@@ -295,7 +323,9 @@ class TestMainWindowStartup:
     ) -> None:
         """A complete gui_state restores everything without a re-run."""
         run_dir: Path = _write_saved_run(
-            tmp_path, input_data, _full_state(input_data)
+            tmp_path,
+            input_data,
+            _full_state(input_data, save_history=True),
         )
         calls: list[np.ndarray] = []
         monkeypatch.chdir(tmp_path)
@@ -317,10 +347,14 @@ class TestMainWindowStartup:
                 "built from its saved output."
             )
             assert win._save_button.isEnabled()
+            # The restored results match the restored parameters.
+            assert not win._run_button.isEnabled()
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
             assert panel.current_bounds() == dict(input_data.bounds)
             assert panel.selection() == gui_data.default_plot_selection()
+            # The save-history toggle is part of the saved state.
+            assert win._save_history_checkbox.isChecked()
             assert win.x() == 10
             assert win.y() == 20
             assert win.width() == 1100
@@ -337,15 +371,24 @@ class TestMainWindowStartup:
             # geometry.
             win.resize(1100, 800)
             _pump()
-            # The requested sizes are scaled to the splitter's actual
-            # height, with each section clamped to its child's minimum
-            # size hint: the proportions survive up to that clamping,
-            # so a loose tolerance is the right assertion.
+            # The requested sizes are scaled to each splitter's
+            # actual size, with each section clamped to its child's
+            # minimum size hint: the proportions survive up to that
+            # clamping, so a loose tolerance is the right assertion.
             sizes: list[float] = [float(s) for s in win._splitter.sizes()]
             total: float = sum(sizes)
             assert total > 0
-            for size, target in zip(sizes, (300, 200, 400)):
+            for size, target in zip(sizes, (300, 600)):
                 assert size / total == pytest.approx(target / 900, abs=0.05)
+            bottom_sizes: list[float] = [
+                float(s) for s in win._bottom_splitter.sizes()
+            ]
+            bottom_total: float = sum(bottom_sizes)
+            assert bottom_total > 0
+            for size, target in zip(bottom_sizes, (200, 400)):
+                assert size / bottom_total == pytest.approx(
+                    target / 600, abs=0.05
+                )
             assert win._figure_panel.page_count() == 3
         finally:
             _close_window(win)
@@ -385,6 +428,67 @@ class TestMainWindowStartup:
             assert win.width() == 1200
             assert win.height() == 900
             assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            # No saved state carried the toggle: it restores off.
+            assert not win._save_history_checkbox.isChecked()
+            _assert_restored_dir(win, run_dir)
+        finally:
+            _close_window(win)
+
+    def test_restores_hydro_only(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A hydrology-only saved run restores its mode, no re-run."""
+        state = _full_state(input_data, mode=MODE_HYDRO)
+        run_dir: Path = _write_saved_run(
+            tmp_path, input_data, state, hydro_only=True
+        )
+        calls: list[np.ndarray] = []
+        hydro_calls: list[np.ndarray] = []
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_results",
+            _fake_results_factory(calls, input_data),
+        )
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_hydro_results",
+            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+        )
+        win = gui_window.MainWindow(input_data)
+        try:
+            # The restore applies the saved results and mode without
+            # running either model.
+            assert calls == []
+            assert hydro_calls == []
+            assert win._mode_checkbox.isChecked()
+            panel: gui_param_panel.ParamPanel = win._param_panel
+            assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
+            win.show()
+            _pump()
+            # The reactive-transport parts of the panel are hidden.
+            assert panel._groups["reactive"].isHidden()
+            assert panel._groups["initial"].isHidden()
+            assert not panel._groups["hydrology"].isHidden()
+            # One streamflow figure and one target column.
+            figure: gui_figure_panel.FigurePanel = win._figure_panel
+            assert figure.page_count() == 1
+            assert figure._title_label.text() == "Streamflow"
+            assert figure._page_label.text() == "1 / 1"
+            assert win._objective_model.columnCount() == 1
+            assert win._results is not None
+            assert win._results.rt is None
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._status_label.text() == (
+                "Restored the most recent saved run; the figures were "
+                "built from its saved output."
+            )
             _assert_restored_dir(win, run_dir)
         finally:
             _close_window(win)
@@ -433,6 +537,82 @@ class TestMainWindowRuns:
                 r"Run 2 finished in \d+\.\d s\.", win._status_label.text()
             )
             assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+        finally:
+            _close_window(win)
+
+    def test_run_history_toggle(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The run-history toggle gates the abbreviated history file."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            history_file: Path = (
+                tmp_path / "results" / RUN_HISTORY_FILENAME
+            )
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            # The startup run finished with the toggle off: no
+            # history file.
+            assert not history_file.is_file()
+
+            win._save_history_checkbox.setChecked(True)
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            _pump(50)
+            assert history_file.is_file()
+            lines: list[str] = history_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            assert len(lines) == 1
+            record: dict[str, object] = json.loads(lines[0])
+            assert record["mode"] == MODE_FULL
+            assert record["param_values"] == win._param_panel.param_values()
+            param_values: object = record["param_values"]
+            assert isinstance(param_values, dict)
+            assert param_values["proportion.1"] == pytest.approx(0.775)
+            # Every measured target comes back, with the synthetic
+            # objective values.
+            expected_objectives: dict[str, dict[str, float]] = {
+                "Streamflow": {
+                    name: 0.9 * (i + 1)
+                    for i, name in enumerate(METRIC_NAMES)
+                }
+            }
+            for species in ("DOC", "DIC", "Ca++"):
+                expected_objectives[species] = {
+                    name: 0.5 + 0.1 * i
+                    for i, name in enumerate(METRIC_NAMES)
+                }
+            assert record["objectives"] == expected_objectives
+            assert datetime.fromisoformat(
+                str(record["timestamp"])
+            ).tzinfo is not None
+
+            # With the toggle off again the history stays put.
+            win._save_history_checkbox.setChecked(False)
+            row._spin.setValue(0.825)
+            _wait_until(
+                lambda: win._run_generation == 3 and win._worker is None
+            )
+            _pump(50)
+            lines = history_file.read_text(encoding="utf-8").splitlines()
+            assert len(lines) == 1
         finally:
             _close_window(win)
 
@@ -447,7 +627,7 @@ class TestMainWindowRuns:
 
         def fake(
             x: np.ndarray, _input_data: gui_data.GuiInputData
-        ) -> pt.ModelResults:
+        ) -> gui_data.GuiRunResults:
             raise ValueError("boom")
 
         monkeypatch.chdir(tmp_path)
@@ -461,8 +641,13 @@ class TestMainWindowRuns:
             assert win._results is None
             assert win._last_run_x is None
             assert not win._save_button.isEnabled()
+            # No valid results on screen: a manual run can retry.
+            assert win._run_button.isEnabled()
             assert win._figure_panel.page_count() == 0
-            assert win._objective_model.rowCount() == 0
+            # No objectives were reported: the table keeps its metric
+            # rows but carries no target columns.
+            assert win._objective_model.rowCount() == 7
+            assert win._objective_model.columnCount() == 0
             win._on_save_run()
             assert win._status_label.text() == (
                 "Nothing to save yet: the model has not run."
@@ -498,7 +683,7 @@ class TestMainWindowRuns:
                 rt: pt.RtModelResults,
                 results_dir: Path | None = None,
             ) -> Path:
-                run_dir.mkdir(parents=True)
+                run_dir.mkdir(parents=True, exist_ok=True)
                 saves.append(
                     {
                         "model": model,
@@ -542,15 +727,42 @@ class TestMainWindowRuns:
                 "width": 1200,
                 "height": 900,
             }
+            # The saved list holds the two splitters' laid-out sizes
+            # in order: the main vertical pair, then the inner
+            # horizontal pair.  Each pair is scaled to its splitter's
+            # actual size, with sections clamped to their children's
+            # minimum size hints, so compare each pair's proportions
+            # against its initial split with a loose tolerance.
             assert saved.splitter_sizes is not None
             sizes: list[float] = [float(s) for s in saved.splitter_sizes]
-            total: float = sum(sizes)
-            assert total > 0
-            initial_total: int = sum(gui_window._INITIAL_SPLIT_SIZES)
-            for size, target in zip(sizes, gui_window._INITIAL_SPLIT_SIZES):
-                assert size / total == pytest.approx(
-                    target / initial_total, abs=0.02
-                )
+            initial: list[tuple[int, int]] = [
+                (
+                    gui_window._INITIAL_SPLIT_SIZES[0],
+                    gui_window._INITIAL_SPLIT_SIZES[1],
+                ),
+                (
+                    gui_window._INITIAL_SPLIT_SIZES[2],
+                    gui_window._INITIAL_SPLIT_SIZES[3],
+                ),
+            ]
+            for pair, target_pair in zip((sizes[:2], sizes[2:]), initial):
+                total: float = sum(pair)
+                assert total > 0
+                target_total: float = float(sum(target_pair))
+                for size, target in zip(pair, target_pair):
+                    assert size / total == pytest.approx(
+                        target / target_total, abs=0.05
+                    )
+
+            # The run-history toggle is part of the saved state:
+            # off here by default, and the second save records it on.
+            assert saved.save_history is False
+            win._save_history_checkbox.setChecked(True)
+            win._on_save_run()
+            assert len(saves) == 2
+            saved_on = read_gui_state(run_dir)
+            assert saved_on is not None
+            assert saved_on.save_history is True
 
             # A parameter change after the run blocks the save (the
             # results on screen would be stale).
@@ -563,7 +775,7 @@ class TestMainWindowRuns:
                 "The model is still catching up; let the current run "
                 "finish before saving."
             )
-            assert len(saves) == 1
+            assert len(saves) == 2
         finally:
             _close_window(win)
 
@@ -579,11 +791,11 @@ class TestMainWindowRuns:
 
         def blocking_fake(
             x: np.ndarray, _input_data: gui_data.GuiInputData
-        ) -> pt.ModelResults:
+        ) -> gui_data.GuiRunResults:
             release: threading.Event = threading.Event()
             releases.append(release)
             release.wait()
-            return pt.ModelResults(*_synthetic_results(_input_data))
+            return gui_data.GuiRunResults(*_synthetic_results(_input_data))
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", blocking_fake)
@@ -667,6 +879,583 @@ class TestMainWindowRuns:
             actions["Previous figure"].triggered.emit()
             assert panel.current_page() == 2
             assert panel._page_label.text() == "3 / 3"
+        finally:
+            _close_window(win)
+
+    def test_hydro_only_mode(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Toggling the mode re-runs in the other mode and re-lays out."""
+        full_calls: list[np.ndarray] = []
+        hydro_calls: list[np.ndarray] = []
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_results",
+            _fake_results_factory(full_calls, input_data),
+        )
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_hydro_results",
+            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+        )
+        win = gui_window.MainWindow(input_data)
+        try:
+            # The startup run is in full mode (the checkbox is off).
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            assert len(full_calls) == 1
+            assert hydro_calls == []
+            win.show()
+            _pump()
+            panel: gui_param_panel.ParamPanel = win._param_panel
+            assert not panel._groups["reactive"].isHidden()
+            assert not panel._groups["initial"].isHidden()
+            assert win._figure_panel.page_count() == 3
+            assert win._objective_model.columnCount() == 4
+
+            # Switching to hydrology-only re-runs in that mode and
+            # hides the reactive-transport parts of the panel.
+            win._mode_checkbox.setChecked(True)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            _pump(50)
+            assert len(hydro_calls) == 1
+            assert len(full_calls) == 1
+            assert np.array_equal(
+                hydro_calls[0], _midpoint_vector(input_data)
+            )
+            assert panel._groups["reactive"].isHidden()
+            assert panel._groups["initial"].isHidden()
+            # The hidden checkboxes keep their state, so the plot
+            # selection is unchanged.
+            assert panel.selection() == gui_data.default_plot_selection()
+            assert win._figure_panel.page_count() == 1
+            assert win._objective_model.columnCount() == 1
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+
+            # A parameter change in hydro mode records the mode in
+            # the run history (Streamflow is the only target).
+            win._save_history_checkbox.setChecked(True)
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
+            _wait_until(
+                lambda: win._run_generation == 3 and win._worker is None
+            )
+            _pump(50)
+            assert len(hydro_calls) == 2
+            history_file: Path = (
+                tmp_path / "results" / RUN_HISTORY_FILENAME
+            )
+            lines: list[str] = history_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            assert len(lines) == 1
+            record: dict[str, object] = json.loads(lines[0])
+            assert record["mode"] == MODE_HYDRO
+            param_values: object = record["param_values"]
+            assert isinstance(param_values, dict)
+            assert param_values["proportion.1"] == pytest.approx(0.775)
+            objectives: object = record["objectives"]
+            assert isinstance(objectives, dict)
+            assert set(objectives) == {"Streamflow"}
+
+            # Saving a hydrology-only run writes the flat bundle and
+            # records the mode in the state file.
+            run_dir: Path = tmp_path / "results" / "run_fake"
+            saves: list[dict[str, object]] = []
+
+            def fake_hydro_save(
+                model: HydrologicalModel,
+                hydro: pt.HydroModelResults,
+                results_dir: Path | None = None,
+            ) -> Path:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                saves.append(
+                    {
+                        "model": model,
+                        "hydro": hydro,
+                        "results_dir": results_dir,
+                    }
+                )
+                return run_dir
+
+            monkeypatch.setattr(
+                gui_window, "save_hydro_run", fake_hydro_save
+            )
+            win._on_save_run()
+            assert len(saves) == 1
+            assert saves[0]["results_dir"] is None
+            assert win._status_label.text() == f"Saved run to {run_dir}."
+            saved = read_gui_state(run_dir)
+            assert saved is not None
+            assert saved.mode == MODE_HYDRO
+
+            # Switching back to full mode re-runs with the edited
+            # value and restores the full layout.
+            win._mode_checkbox.setChecked(False)
+            _wait_until(
+                lambda: win._run_generation == 4 and win._worker is None
+            )
+            _pump(50)
+            assert len(full_calls) == 2
+            index: int = list(input_data.bounds).index("proportion.1")
+            assert full_calls[1][index] == pytest.approx(0.775)
+            assert not panel._groups["reactive"].isHidden()
+            assert not panel._groups["initial"].isHidden()
+            assert win._figure_panel.page_count() == 3
+            assert win._objective_model.columnCount() == 4
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# MainWindow: auto-run toggle
+# ------------------------------------------------------------------ #
+
+
+class TestAutoRunToggle:
+    """The auto-run checkbox and the manual run model button."""
+
+    def test_run_button_manual_run_with_auto_run_off(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With auto-run off, edits wait for a click on the run button."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            assert win._auto_run_checkbox.isChecked()
+            assert not win._run_button.isEnabled()
+            win._auto_run_checkbox.setChecked(False)
+            index: int = list(input_data.bounds).index("proportion.1")
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
+            # The results on screen are stale, so the run button is
+            # enabled; no auto-run is armed, so nothing else happens.
+            assert win._run_button.isEnabled()
+            _pump(200)
+            assert len(calls) == 1
+            assert win._run_button.isEnabled()
+            win._run_button.click()
+            # The run started synchronously; whether or not it has
+            # already finished, the button stays disabled (a run is
+            # in flight, and a finished run matches the current
+            # values).
+            assert win._run_generation == 2
+            assert not win._run_button.isEnabled()
+            _wait_until(
+                lambda: win._worker is None and win._run_generation == 2
+            )
+            assert len(calls) == 2
+            assert calls[1][index] == pytest.approx(0.775)
+            assert not win._run_button.isEnabled()
+        finally:
+            _close_window(win)
+
+    def test_auto_run_off_suppresses_debounced_rerun(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Turning auto-run off before a debounce fires stops the run."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            index: int = list(input_data.bounds).index("proportion.1")
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            # Auto-run is on, so the edit arms the debounce; turning
+            # the checkbox off before it fires must still stop the
+            # run (the gate is checked when the timer fires).
+            row._spin.setValue(0.775)
+            win._auto_run_checkbox.setChecked(False)
+            _wait_until(lambda: not win._debounce_timer.isActive())
+            assert len(calls) == 1
+            # Re-checking auto-run and editing again starts the run
+            # with the latest value as usual.
+            win._auto_run_checkbox.setChecked(True)
+            row._spin.setValue(0.78)
+            _wait_until(
+                lambda: win._worker is None and win._run_generation == 2
+            )
+            assert len(calls) == 2
+            assert calls[1][index] == pytest.approx(0.78)
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# MainWindow: history
+# ------------------------------------------------------------------ #
+
+
+class TestHistory:
+    """The *History* dropdown: restoring and overlaying without a re-run."""
+
+    def test_records_each_run(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each finished run becomes the newest dropdown entry."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            combo = win._param_panel._history_combo
+            # No saved run on disk: the dropdown stays empty until
+            # the startup run has finished.
+            assert combo.count() == 0
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            assert combo.count() == 1
+            assert re.fullmatch(
+                r"Run 1 \u2014 \d{2}:\d{2}:\d{2} \(full\)",
+                combo.itemText(0),
+            )
+
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            assert combo.count() == 2
+            assert re.fullmatch(
+                r"Run 2 \u2014 \d{2}:\d{2}:\d{2} \(full\)",
+                combo.itemText(0),
+            )
+            assert re.fullmatch(
+                r"Run 1 \u2014 \d{2}:\d{2}:\d{2} \(full\)",
+                combo.itemText(1),
+            )
+        finally:
+            _close_window(win)
+
+    def test_restore_does_not_rerun(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Restoring a session run replaces values and results, without a re-run."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            index: int = list(input_data.bounds).index("proportion.1")
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            row._spin.setValue(0.775)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            assert len(calls) == 2
+
+            # The newer run is on screen; restore the first one.
+            combo = win._param_panel._history_combo
+            assert combo.itemText(0).startswith("Run 2")
+            combo.setCurrentIndex(1)
+            win._on_history_restore()
+
+            # The restore rebuilds the panel's cells; the fresh one
+            # for this parameter carries the restored value.
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            assert row.value() == pytest.approx(0.6)
+            assert len(calls) == 2
+            assert win._run_generation == 2
+            last_x: np.ndarray | None = win._last_run_x
+            assert last_x is not None
+            assert np.array_equal(last_x, _midpoint_vector(input_data))
+            assert last_x[index] == pytest.approx(0.6)
+            assert win._last_run_mode == MODE_FULL
+            results: gui_data.GuiRunResults | None = win._results
+            assert results is not None
+            assert results.rt is not None
+            assert not win._run_button.isEnabled()
+            assert win._status_label.text() == (
+                f"Restored the previous run {combo.itemText(1)}."
+            )
+        finally:
+            _close_window(win)
+
+    def test_restore_switches_mode(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Restoring a run of the other mode re-lays-out the window, without a re-run."""
+        full_calls: list[np.ndarray] = []
+        hydro_calls: list[np.ndarray] = []
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_results",
+            _fake_results_factory(full_calls, input_data),
+        )
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_hydro_results",
+            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+        )
+        win = gui_window.MainWindow(input_data)
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            assert len(full_calls) == 1
+
+            win._mode_checkbox.setChecked(True)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            _pump(50)
+            assert len(hydro_calls) == 1
+
+            # Restore the first (full) run.
+            combo = win._param_panel._history_combo
+            combo.setCurrentIndex(1)
+            win._on_history_restore()
+            win.show()
+            _pump()
+            assert not win._mode_checkbox.isChecked()
+            assert win._last_run_mode == MODE_FULL
+            results: gui_data.GuiRunResults | None = win._results
+            assert results is not None
+            assert results.rt is not None
+            assert not win._param_panel._groups["reactive"].isHidden()
+            assert not win._param_panel._groups["initial"].isHidden()
+            assert win._figure_panel.page_count() == 3
+            assert win._objective_model.columnCount() == 4
+            assert len(full_calls) == 1
+            assert len(hydro_calls) == 1
+
+            # Restore the second (hydrology-only) run.
+            combo.setCurrentIndex(0)
+            win._on_history_restore()
+            _pump()
+            assert win._mode_checkbox.isChecked()
+            assert win._last_run_mode == MODE_HYDRO
+            results = win._results
+            assert results is not None
+            assert results.rt is None
+            assert win._param_panel._groups["reactive"].isHidden()
+            assert win._param_panel._groups["initial"].isHidden()
+            assert win._figure_panel.page_count() == 1
+            assert win._objective_model.columnCount() == 1
+            assert len(full_calls) == 1
+            assert len(hydro_calls) == 1
+        finally:
+            _close_window(win)
+
+    def test_overlay_no_rerun(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The overlay checkbox redraws the figures from the selected run, without a re-run."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            assert len(calls) == 1
+
+            panel = win._param_panel
+            combo = panel._history_combo
+            assert combo.count() == 1
+            assert combo.currentIndex() == 0
+
+            assert not panel._history_overlay_checkbox.isChecked()
+            panel._history_overlay_checkbox.setChecked(True)
+            _pump()
+
+            # Page 0 is the streamflow figure: the previous run's
+            # line sits behind the current one, half transparent.
+            figure: Figure = win._figure_panel._canvases[0].figure
+            hydro_lines = _lines(figure.axes[0])
+            assert len(hydro_lines) == 2
+            assert hydro_lines[0].get_alpha() == 0.5
+            assert _alpha(hydro_lines[1]) == 1.0
+            assert hydro_lines[1].get_label() == "Streamflow (sim)"
+            # The legend still lists only the current run's series.
+            assert len(figure.legends[0].get_texts()) == 8
+
+            # Unchecking the overlay removes the previous run's lines.
+            panel._history_overlay_checkbox.setChecked(False)
+            _pump()
+            figure = win._figure_panel._canvases[0].figure
+            assert len(_lines(figure.axes[0])) == 1
+            assert len(calls) == 1
+        finally:
+            _close_window(win)
+
+    def test_restore_empty_history(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A restore with an empty dropdown reports that there is nothing to restore."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            # The startup run is still in flight: no history yet, and
+            # a restore says exactly that.
+            assert win._param_panel._history_combo.count() == 0
+            win._on_history_restore()
+            assert win._status_label.text() == (
+                "No previous run selected: the history is empty."
+            )
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            assert win._param_panel._history_combo.count() == 1
+        finally:
+            _close_window(win)
+
+    def test_saved_dir_restore(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A saved run directory joins the dropdown and restores from disk, without a re-run."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            index: int = list(input_data.bounds).index("proportion.1")
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            row._spin.setValue(0.775)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            assert len(calls) == 2
+
+            # Save the current run for real: the new directory joins
+            # the dropdown below the session's runs.
+            win._on_save_run()
+            status: str = win._status_label.text()
+            match: re.Match[str] | None = re.fullmatch(
+                r"Saved run to (?P<dir>.+)\.", status
+            )
+            assert match is not None
+            run_dir: Path = Path(match.group("dir"))
+            assert run_dir.is_dir()
+            assert read_gui_state(run_dir) is not None
+
+            combo = win._param_panel._history_combo
+            assert combo.count() == 3
+            saved_index: int = combo.findText(run_dir.name)
+            assert saved_index == 2
+
+            # A third run, then restore the saved directory from disk.
+            row._spin.setValue(0.825)
+            _wait_until(
+                lambda: win._run_generation == 3 and win._worker is None
+            )
+            saved_index = combo.findText(run_dir.name)
+            assert saved_index == 3
+            combo.setCurrentIndex(saved_index)
+            win._on_history_restore()
+
+            # The restore rebuilds the panel's cells; the fresh one
+            # for this parameter carries the restored value.
+            row = win._param_panel._rows["proportion.1"]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            assert row.value() == pytest.approx(0.775)
+            last_x: np.ndarray | None = win._last_run_x
+            assert last_x is not None
+            assert last_x[index] == pytest.approx(0.775)
+            assert win._last_run_mode == MODE_FULL
+            results: gui_data.GuiRunResults | None = win._results
+            assert results is not None
+            assert results.rt is not None
+            assert results.hydro.saved_dir == str(run_dir)
+            assert len(calls) == 3
+            assert not win._run_button.isEnabled()
+            assert win._status_label.text() == (
+                f"Restored the previous run {run_dir.name}."
+            )
         finally:
             _close_window(win)
 
@@ -766,29 +1555,26 @@ class TestFigurePanel:
 
 
 def _objective_table() -> pd.DataFrame:
-    """A two-row objective table with NaNs in the second row."""
+    """A two-column objective table with NaNs in the second column."""
     values: dict[str, list[float]] = {
-        "kge": [0.9, float("nan")],
-        "log_kge": [0.5, float("nan")],
-        "nse": [0.8, float("nan")],
-        "log_nse": [0.4, float("nan")],
-        "bias": [0.01, float("nan")],
-        "spearman_rho": [0.7, float("nan")],
-        "r_squared": [0.6, float("nan")],
+        "Streamflow": [0.9, 0.5, 0.8, 0.4, 0.01, 0.7, 0.6],
+        "DOC": [float("nan")] * 7,
     }
-    return pd.DataFrame(values, index=["Streamflow", "DOC"])
+    return pd.DataFrame(values, index=list(METRIC_LABELS.values()))
 
 
 class TestObjectiveTableModel:
-    """The model behind the table strip under the figure."""
+    """The model behind the table panel left of the parameter panel."""
 
     def test_empty_model(self, qapp: QApplication) -> None:
         model = gui_window._ObjectiveTableModel()
         try:
-            assert model.rowCount() == 0
-            assert model.columnCount() == 7
+            # With no objectives yet the table keeps its metric rows
+            # but carries no target columns.
+            assert model.rowCount() == 7
+            assert model.columnCount() == 0
             headers = [
-                model.headerData(i, Qt.Orientation.Horizontal)
+                model.headerData(i, Qt.Orientation.Vertical)
                 for i in range(7)
             ]
             assert headers == list(METRIC_LABELS.values())
@@ -800,13 +1586,20 @@ class TestObjectiveTableModel:
         model = gui_window._ObjectiveTableModel()
         try:
             model.set_table(_objective_table())
-            assert model.rowCount() == 2
-            row_headers = [
-                model.headerData(i, Qt.Orientation.Vertical) for i in range(2)
+            assert model.rowCount() == 7
+            assert model.columnCount() == 2
+            column_headers = [
+                model.headerData(i, Qt.Orientation.Horizontal)
+                for i in range(2)
             ]
-            assert row_headers == ["Streamflow", "DOC"]
-            assert model.data(model.index(0, 0)) == "0.9000"
-            assert model.data(model.index(1, 0)) == "–"
+            assert column_headers == ["Streamflow", "DOC"]
+            row_headers = [
+                model.headerData(i, Qt.Orientation.Vertical)
+                for i in range(7)
+            ]
+            assert row_headers == list(METRIC_LABELS.values())
+            assert model.data(model.index(0, 0)) == "0.900"
+            assert model.data(model.index(0, 1)) == "–"
             # Invalid indices and foreign roles yield None.
             assert model.data(model.index(9, 0)) is None
             assert (
@@ -899,7 +1692,7 @@ class TestParamPanel:
                 lambda k, lo, hi: bounds.append((k, lo, hi))
             )
             panel.value_changed.connect(values.append)
-            qapp.sendEvent(row._spin, _double_click_event())
+            qapp.sendEvent(row._value, _double_click_event())
             assert len(records) == 1
             label: str = param_label(key, input_data.network.mineral_names)
             assert records[0]["title"] == f"Edit range — {label}"
@@ -1017,6 +1810,7 @@ class TestParamPanel:
             assert selection.species == ["DOC", "HCO3-"]
             assert selection.zones == SPECIATION_ZONES
             assert selection.minerals == ["SOC(s)"]
+            assert selection.time_series == list(TIME_SERIES_OPTIONS)
 
             # set_selection updates the boxes without emitting and
             # ignores names the network does not know.
@@ -1025,10 +1819,35 @@ class TestParamPanel:
                     species=["DOC", "Bogus"],
                     zones=SPECIATION_ZONES,
                     minerals=["SOC(s)"],
+                    time_series=["Streamflow", "DIC"],
                 )
             )
             assert len(selections) == 1
             assert panel.selection().species == ["DOC"]
+            assert panel.selection().time_series == ["Streamflow", "DIC"]
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_time_series_boxes(
+        self, qapp: QApplication, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Toggling the time-series boxes re-emits in option order."""
+        panel = self._make_panel(input_data)
+        try:
+            selections: list[PlotSelection] = []
+            panel.selection_changed.connect(selections.append)
+            assert [
+                box.isChecked() for box in panel._time_series_boxes.values()
+            ] == [True, True, True, True]
+
+            panel._time_series_boxes["DIC"].setChecked(False)
+            assert len(selections) == 1
+            assert selections[0].time_series == ["Streamflow", "DOC", "Ca++"]
+
+            panel._time_series_boxes["Streamflow"].setChecked(False)
+            assert len(selections) == 2
+            assert selections[1].time_series == ["DOC", "Ca++"]
         finally:
             panel.deleteLater()
             _pump()
@@ -1073,7 +1892,14 @@ class TestParamPanel:
                 assert isinstance(
                     panel._groups[name]._content_layout, QGridLayout
                 )
-            assert isinstance(panel._plots_group._content_layout, QVBoxLayout)
+                assert (
+                    panel._groups[name]._grid_columns
+                    == gui_param_panel._GRID_COLUMNS
+                )
+            assert isinstance(
+                panel._plots_group._content_layout, QGridLayout
+            )
+            assert panel._plots_group._grid_columns == 2
 
             group: gui_param_panel.ThemedGroup = panel._groups["hydrology"]
             assert group._toggle.text().startswith("▾")
@@ -1091,3 +1917,303 @@ class TestParamPanel:
         finally:
             panel.deleteLater()
             _pump()
+
+
+# ------------------------------------------------------------------ #
+# The header's *Gradients* button: the finite-difference jobs
+# ------------------------------------------------------------------ #
+
+
+def _free_keys(input_data: gui_data.GuiInputData) -> list[str]:
+    """The keys of the parameters whose loaded range has a width."""
+    return [
+        key for key, (low, high) in input_data.bounds.items() if high > low
+    ]
+
+
+def _gradient_fake_factory(
+    calls: list[np.ndarray],
+    input_data: gui_data.GuiInputData,
+    hydro_term_key: str,
+    rt_term_key: str,
+) -> tuple[
+    Callable[[np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults],
+    Callable[[np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults],
+]:
+    """
+    Stand-ins for `arr_to_results` and `arr_to_hydro_results` that
+    record every parameter vector and shift the synthetic
+    objectives by ``2 * x[hydro_term_key]`` (the streamflow
+    objectives, in both modes) and, in full mode, by ``2 *
+    x[rt_term_key]`` (the river species' objectives).  The
+    gradient job's central differences then come out exactly: the
+    derivative with respect to the two chosen parameters is 2.0
+    (in the blocks each shift touches) and 0.0 for every other
+    free parameter.
+    """
+    keys: list[str] = list(input_data.bounds)
+    hydro_index: int = keys.index(hydro_term_key)
+    rt_index: int = keys.index(rt_term_key)
+
+    def make(
+        x: np.ndarray,
+        _input_data: gui_data.GuiInputData,
+        hydro_only: bool,
+    ) -> gui_data.GuiRunResults:
+        calls.append(np.array(x))
+        hydro, rt = _synthetic_results(input_data)
+        hydro.objective_functions = (
+            hydro.objective_functions
+            + 2.0 * float(x[hydro_index])
+        )
+        if hydro_only:
+            return gui_data.GuiRunResults(hydro, None)
+        rt_objectives: pd.DataFrame | None = rt.objective_functions
+        assert rt_objectives is not None
+        rt.objective_functions = (
+            rt_objectives + 2.0 * float(x[rt_index])
+        )
+        return gui_data.GuiRunResults(hydro, rt)
+
+    def full_fake(
+        x: np.ndarray, _input_data: gui_data.GuiInputData
+    ) -> gui_data.GuiRunResults:
+        return make(x, _input_data, False)
+
+    def hydro_fake(
+        x: np.ndarray, _input_data: gui_data.GuiInputData
+    ) -> gui_data.GuiRunResults:
+        return make(x, _input_data, True)
+
+    return full_fake, hydro_fake
+
+
+def _gradient_window(
+    input_data: gui_data.GuiInputData,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    full_fake: Callable[
+        [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
+    ],
+    hydro_fake: Callable[
+        [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
+    ],
+) -> gui_window.MainWindow:
+    """
+    Build a main window in an empty `tmp_path` with `full_fake` and
+    `hydro_fake` patched in for `arr_to_results` and
+    `arr_to_hydro_results` (the gradient job's worker calls both).
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
+    monkeypatch.setattr(gui_window, "arr_to_hydro_results", hydro_fake)
+    return gui_window.MainWindow(input_data)
+
+
+def _only_csv(tmp_path: Path) -> Path:
+    """The single ``gradients_*.csv`` in `tmp_path`'s results directory."""
+    csvs: list[Path] = list((tmp_path / "results").glob("gradients_*.csv"))
+    assert len(csvs) == 1
+    return csvs[0]
+
+
+class TestGradients:
+    """The header's *Gradients* button: the finite-difference jobs."""
+
+    def test_full_mode_job(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            win._on_gradients_clicked()
+            _wait_until(
+                lambda: win._gradient_state is not None
+                and win._worker is None
+            )
+            _pump()
+            assert len(calls) == 1 + 2 * len(free)
+
+            loaded: pd.DataFrame = pd.read_csv(
+                _only_csv(tmp_path), index_col="objective"
+            )
+            assert loaded.shape == (4 * len(METRIC_NAMES), len(free))
+            assert list(loaded.columns) == free
+            for i in range(len(METRIC_NAMES)):
+                # The streamflow block only feels the hydro shift.
+                assert loaded.iloc[i, 0] == pytest.approx(2.0)
+                assert loaded.iloc[i, 1] == pytest.approx(0.0)
+            for i in range(
+                len(METRIC_NAMES), 4 * len(METRIC_NAMES)
+            ):
+                # The species blocks only feel the rt shift.
+                assert loaded.iloc[i, 0] == pytest.approx(0.0)
+                assert loaded.iloc[i, 1] == pytest.approx(2.0)
+            for i in range(4 * len(METRIC_NAMES)):
+                for j in range(2, len(free)):
+                    assert loaded.iloc[i, j] == pytest.approx(0.0)
+
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Gradients (full)"
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+        finally:
+            _close_window(win)
+
+    def test_hydro_mode_job(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._mode_checkbox.setChecked(True)
+            _wait_until(
+                lambda: win._worker is None
+                and win._last_run_mode == MODE_HYDRO
+                and win._results_are_up_to_date()
+            )
+            _pump()
+            assert len(calls) == 2
+
+            win._on_gradients_clicked()
+            _wait_until(
+                lambda: win._gradient_state is not None
+                and win._worker is None
+            )
+            _pump()
+            assert len(calls) == 2 + 2 * len(free)
+
+            loaded: pd.DataFrame = pd.read_csv(
+                _only_csv(tmp_path), index_col="objective"
+            )
+            assert loaded.shape == (len(METRIC_NAMES), len(free))
+            assert list(loaded.columns) == free
+            for i in range(len(METRIC_NAMES)):
+                assert loaded.iloc[i, 0] == pytest.approx(2.0)
+                assert loaded.iloc[i, 1] == pytest.approx(0.0)
+                for j in range(2, len(free)):
+                    assert loaded.iloc[i, j] == pytest.approx(0.0)
+
+            assert win._figure_panel.page_count() == 2
+            assert win._figure_panel._titles[-1] == "Gradients (hydro)"
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+        finally:
+            _close_window(win)
+
+    def test_failed_job(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[np.ndarray] = []
+
+        def flaky(
+            x: np.ndarray, _input_data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            calls.append(np.array(x))
+            if len(calls) > 1:
+                raise RuntimeError("boom")
+            hydro, rt = _synthetic_results(input_data)
+            return gui_data.GuiRunResults(hydro, rt)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gui_window, "arr_to_results", flaky)
+        win = gui_window.MainWindow(input_data)
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+
+            win._on_gradients_clicked()
+            _wait_until(
+                lambda: win._worker is None
+                and win._status_label.text().startswith("Gradients failed")
+            )
+            _pump()
+            assert (
+                win._status_label.text() == "Gradients failed: "
+                "RuntimeError: boom"
+            )
+            assert win._gradient_state is None
+            assert win._figure_panel.page_count() == 3
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+            assert len(calls) == 2
+            assert list((tmp_path / "results").glob("gradients_*.csv")) == []
+        finally:
+            _close_window(win)
+
+    def test_no_free_parameters(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+
+            def no_free() -> dict[str, tuple[float, float]]:
+                return {
+                    key: (value, value)
+                    for key, value in win._param_panel.param_values().items()
+                }
+
+            monkeypatch.setattr(win._param_panel, "current_bounds", no_free)
+            win._on_gradients_clicked()
+            _pump()
+            assert (
+                win._status_label.text()
+                == "No free parameters to differentiate."
+            )
+            assert win._worker is None
+            assert len(calls) == 1
+            assert win._gradients_button.isEnabled()
+        finally:
+            _close_window(win)
