@@ -320,10 +320,22 @@ class TestMainWindowStartup:
             assert win.y() == 20
             assert win.width() == 1100
             assert win.height() == 800
-            # The requested sizes are normalized to the splitter's
-            # current height, with each section clamped to its child's
-            # minimum size hint: the proportions survive up to that
-            # clamping, so a loose tolerance is the right assertion.
+            # Show the window first: an unshown window would normalize
+            # the requested sizes against the window's size hint
+            # instead of its restored geometry (where the figure
+            # panel's minimum height would dominate the split).
+            win.show()
+            _pump()
+            # Showing the window can shift it (the offscreen plugin
+            # offsets it by its fake frame); re-assert the restored
+            # size so the splitter lays out against the intended
+            # geometry.
+            win.resize(1100, 800)
+            _pump()
+            # The requested sizes are scaled to the splitter's actual
+            # height, with each section clamped to its child's minimum
+            # size hint: the proportions survive up to that clamping,
+            # so a loose tolerance is the right assertion.
             sizes: list[float] = [float(s) for s in win._splitter.sizes()]
             total: float = sum(sizes)
             assert total > 0
@@ -492,6 +504,16 @@ class TestMainWindowRuns:
                 )
                 return run_dir
 
+            # Show the window first: the save records the splitter's
+            # laid-out sizes, which only exist once Qt has arranged
+            # the sections against the window's actual geometry.
+            win.show()
+            _pump()
+            # Showing an offscreen window moves it off the origin;
+            # restore the intended client geometry so the saved state
+            # is exactly the default the constructor set.
+            win.setGeometry(0, 0, *gui_window._INITIAL_SIZE)
+            _pump()
             monkeypatch.setattr(gui_window, "save_model_run", fake_save)
             win._on_save_run()
             assert len(saves) == 1
@@ -504,15 +526,26 @@ class TestMainWindowRuns:
             assert saved.param_values == win._param_panel.param_values()
             assert saved.param_bounds == win._param_panel.current_bounds()
             assert saved.selection == gui_data.default_plot_selection()
-            # The window was never shown: default origin and size, and
-            # the splitter has no sizes before its first layout.
+            # The window was shown and restored to the default origin
+            # and size, so it saves exactly that client geometry; the
+            # splitter saves its laid-out sizes, i.e. the initial
+            # distribution scaled to the window's height.  Compare
+            # proportions rather than raw pixels.
             assert saved.window_geometry == {
                 "x": 0,
                 "y": 0,
                 "width": 1200,
                 "height": 900,
             }
-            assert saved.splitter_sizes == [0, 0, 0]
+            assert saved.splitter_sizes is not None
+            sizes: list[float] = [float(s) for s in saved.splitter_sizes]
+            total: float = sum(sizes)
+            assert total > 0
+            initial_total: int = sum(gui_window._INITIAL_SPLIT_SIZES)
+            for size, target in zip(sizes, gui_window._INITIAL_SPLIT_SIZES):
+                assert size / total == pytest.approx(
+                    target / initial_total, abs=0.02
+                )
 
             # A parameter change after the run blocks the save (the
             # results on screen would be stale).

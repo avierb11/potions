@@ -47,6 +47,7 @@ from PySide6.QtCore import (
     QObject,
     QModelIndex,
     QPersistentModelIndex,
+    QRect,
     QThread,
     Qt,
     QTimer,
@@ -110,6 +111,16 @@ _PROGRESS_WIDTH: Final[int] = 120
 # The initial window size (px); a restored window geometry replaces
 # it before the window is shown.
 _INITIAL_SIZE: Final[tuple[int, int]] = (1200, 900)
+
+# The initial sizes (px) of the main splitter's three sections, in
+# order: figure, objective table, parameters.  Qt scales them
+# proportionally to the splitter's height on the first layout, and a
+# restored session state replaces them with its own.
+_INITIAL_SPLIT_SIZES: Final[tuple[int, int, int]] = (350, 220, 310)
+
+# The figure panel's minimum height (px): even a restored state or a
+# manual drag can then never squash the plot into a sliver.
+_FIGURE_MIN_HEIGHT: Final[int] = 240
 
 # The placeholder for an objective cell whose value is missing or
 # NaN.
@@ -417,6 +428,12 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(param_panel)
         for section in range(self._splitter.count()):
             self._splitter.setCollapsible(section, False)
+        # Without an explicit distribution Qt lays the sections out
+        # from their size hints, which squashes the figure (the
+        # canvases report a small hint) into a sliver while the table
+        # and the parameter panel (large hints) take the rest.
+        self._splitter.setSizes(list(_INITIAL_SPLIT_SIZES))
+        self._figure_panel.setMinimumHeight(_FIGURE_MIN_HEIGHT)
 
         layout: QVBoxLayout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -791,16 +808,20 @@ class MainWindow(QMainWindow):
             results_dir=None,
         )
 
+        # The client geometry (rather than the frame's): the restore
+        # path applies these values with setGeometry, so saving the
+        # frame size would grow the window on every save and restore.
+        geom: QRect = self.geometry()
         state: GuiState = GuiState(
             csv_path=self._csv_path,
             param_values=self._param_panel.param_values(),
             param_bounds=self._param_panel.current_bounds(),
             selection=self._param_panel.selection(),
             window_geometry={
-                "x": self.x(),
-                "y": self.y(),
-                "width": self.frameGeometry().width(),
-                "height": self.frameGeometry().height(),
+                "x": geom.x(),
+                "y": geom.y(),
+                "width": geom.width(),
+                "height": geom.height(),
             },
             splitter_sizes=[int(size) for size in self._splitter.sizes()],
         )
