@@ -26,7 +26,7 @@ the per-zone reactive-transport parameters, and the trailing
 per-speciation-zone log10 total exchange-site concentrations.  They
 construct the model and run it, the same way the showcase's
 calibration pipeline did, so the GUI can re-run both models on every
-sidebar change.
+parameter change.
 """
 
 import gc
@@ -38,8 +38,8 @@ from typing import Final
 import numpy as np
 import pandas as pd
 import potions as pt
-import streamlit as st
 from potions.calibration import build_rt_bounds
+from potions.gui.common import SNOW_ZONES, ZONE_ORDER
 from potions.reactive_transport.common_networks import get_soc_calcite_network
 from scipy.optimize import root_scalar
 
@@ -116,6 +116,22 @@ MINERAL_CONCENTRATION: Final[float] = 1.0
 
 
 # ==== Types ==== #
+@dataclass(frozen=True)
+class PlotSelection:
+    """
+    The user's choices of which series to draw.
+
+    Attributes:
+        species: The network species to plot in the zone figure.
+        zones: The zones to plot in the zone figure.
+        minerals: The minerals to plot in the rate figure.
+    """
+
+    species: list[str]
+    zones: list[str]
+    minerals: list[str]
+
+
 @dataclass(frozen=True)
 class GuiInputData:
     """
@@ -295,15 +311,13 @@ def _with_spinup(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([spinup, df])
 
 
-@st.cache_data
 def load_input_data(csv_path: Path = DEFAULT_CSV_PATH) -> GuiInputData:
     """
     Load and assemble the GUI inputs from the East River series CSV.
 
     Builds the reaction network and the East River bounds, reads the
     CSV, prepends the two-year spin-up, and creates the forcing, the
-    precipitation concentrations, and the measured series, and caches
-    the result for the session since the loader is deterministic.
+    precipitation concentrations, and the measured series.
 
     Args:
         csv_path: Path to the East River series CSV; defaults to the
@@ -542,4 +556,19 @@ def arr_to_results(
     gc.collect()
 
     return model_res
+
+
+def default_plot_selection() -> PlotSelection:
+    """
+    The default figure selections: DOC, every non-snow zone, and the
+    dominant SOC mineral.
+
+    Returns:
+        The default `PlotSelection`.
+    """
+    return PlotSelection(
+        species=["DOC"],
+        zones=[zone for zone in ZONE_ORDER if zone not in SNOW_ZONES],
+        minerals=["SOC(s)"],
+    )
 # =================== #

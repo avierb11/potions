@@ -15,10 +15,35 @@ def kge(y_obs: Series, y_pred: Series) -> float:
     return 1.0 - ((r - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2) ** 0.5
 
 
+def _log10_shifted(x: Series) -> Series:
+    """
+    Base-10 log transform with the +0.1 offset used by the "log" metrics.
+
+    The offset keeps zeros from logging to -inf.  The transform is
+    defined for x >= -0.1; values below that bound, where
+    ``log10(x + 0.1)`` is undefined, are floored at the value the
+    transform takes at zero (-1.0), so the metrics stay finite on data
+    with values below the bound.  NaN entries stay NaN.
+
+    Args:
+        x: The series to transform.
+
+    Returns:
+        The transformed series.
+    """
+
+    def _transform_value(value: float) -> float:
+        if value < -0.1:
+            return float(np.log10(0.0 + 0.1))
+        return float(np.log10(value + 0.1))
+
+    return x.map(_transform_value)
+
+
 def log_kge(y_obs: Series, y_pred: Series) -> float:
     """Kling-Gupta efficiency of the log-transformed data"""
-    y_obs = y_obs.map(lambda x: np.log10(x + 0.1))
-    y_pred = y_pred.map(lambda x: np.log10(x + 0.1))
+    y_obs = _log10_shifted(y_obs)
+    y_pred = _log10_shifted(y_pred)
 
     r: float = y_pred.corr(y_obs, method="pearson")
     alpha: float = float(y_pred.std() / y_obs.std())
@@ -37,8 +62,8 @@ def nse(y_obs: Series, y_pred: Series) -> float:
 
 def log_nse(y_obs: Series, y_pred: Series) -> float:
     """Nash-Sutcliffe Efficiency of the log-transformed data"""
-    y_obs = y_obs.map(lambda x: np.log10(x + 0.1))
-    y_pred = y_pred.map(lambda x: np.log10(x + 0.1))
+    y_obs = _log10_shifted(y_obs)
+    y_pred = _log10_shifted(y_pred)
     numer: float = ((y_pred - y_obs) ** 2).sum()
     denom: float = ((y_obs - y_obs.mean()) ** 2).sum()
 
@@ -136,9 +161,11 @@ def flow_weighted_nse(meas_series: Series, sim_series: Series, weights: Series) 
 
 def flow_weighted_log_nse(meas_series: Series, sim_series: Series, weights: Series) -> float:
     """Flow-weighted Nash-Sutcliffe efficiency on the base-10 log-transformed
-    data (with a small offset so that zeros do not log to -inf)."""
-    m: Series = meas_series.map(lambda x: np.log10(x + 0.1))
-    s: Series = sim_series.map(lambda x: np.log10(x + 0.1))
+    data (with a small offset so that zeros do not log to -inf; values
+    below the -0.1 bound are floored at the zero-equivalent, see
+    `_log10_shifted`)."""
+    m: Series = _log10_shifted(meas_series)
+    s: Series = _log10_shifted(sim_series)
     return flow_weighted_nse(m, s, weights)
 
 

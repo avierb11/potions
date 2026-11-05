@@ -4,13 +4,14 @@ calibration GUI.
 
 The GUI is split across the modules in this package:
 
-* ``potions.gui.app`` (the entry script) wires everything together;
+* ``potions.gui.window`` (the main window) wires everything together;
 * ``potions.gui.data`` loads the East River series CSV and runs the
   models;
-* ``potions.gui.sidebar`` renders the sidebar controls;
-* ``potions.gui.plots`` builds the figures and the objective table.
+* ``potions.gui.param_panel`` renders the parameter controls;
+* ``potions.gui.plots`` builds the figures and the objective table;
+* ``potions.gui.state`` persists and restores the GUI state.
 
-This module holds what all three share:
+This module holds what all of them share:
 
 * the data provenance (the site and the water years of the site's
   original calibration design);
@@ -18,8 +19,9 @@ This module holds what all three share:
   reactive-transport, and initial-state parameters, in the order
   ``potions.gui.data`` lists their bounds;
 * the human-readable label for every flat parameter key;
-* the color schemes;
-* the rcParams setup and the slider control.
+* the color schemes, including the blue / red parameter-group themes;
+* the rcParams setup and the pure slider math (value-to-step mapping
+  and decimal precision) shared by the parameter panel and its tests.
 
 Color schemes
 -------------
@@ -40,13 +42,13 @@ series are drawn lighter than measured ones.
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Final, Literal
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import potions as pt
 import potions.objective_functions as obj
-import streamlit as st
 
 # ==== Constants ==== #
 
@@ -190,13 +192,52 @@ RIVER_SPECIES_MEAS_COLORS: Final[dict[str, str]] = {
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
 MEAS_Q_COLOR: Final[str] = "black"
 
+# The number of integer steps every parameter slider spans.  The
+# slider's integer position is mapped onto the (possibly user-edited)
+# bounds, so the step width is a thousandth of the current span.
+NUM_SLIDER_STEPS: Final[int] = 1000
+
+
+# ==== Types ==== #
+@dataclass(frozen=True, slots=True)
+class Theme:
+    """
+    A color theme for a parameter group.
+
+    The accent color tints the group header and the filled portion of
+    the sliders, and the light shade is the background of the group
+    container and the unfilled slider groove.  The two themes give the
+    hydrology and reactive-transport panels their distinct blue / red
+    character (the accents reuse the snow-zone blue and surface-zone
+    red of the figure palette, so the panel and the figures stay
+    visually related).
+
+    Attributes:
+        name: The display name of the themed group.
+        accent: The accent color (hex) for headers and slider fill.
+        light: The light background color (hex) of the group.
+    """
+
+    name: str
+    accent: str
+    light: str
+
+
+# The two parameter-group themes (todo: blues vs reds).
+HYDRO_THEME: Final[Theme] = Theme(
+    name="hydrology", accent="#598DB1", light="#EAF1F8"
+)
+RT_THEME: Final[Theme] = Theme(name="reactive transport", accent="#F64740", light="#FDEDEB")
+# =============== #
+
 # The objective-function metrics shown in the per-run table, in the
 # order of potions' default objective functions
 # (potions.objective_functions.DEFAULT_OBJECTIVE_FUNCTIONS).
 METRIC_NAMES: Final[list[str]] = [name for name, _ in obj.DEFAULT_OBJECTIVE_FUNCTIONS]
 
 # Display labels for the metric columns of the per-run table.  The
-# "log" metrics are evaluated on log10(x + 0.1).
+# "log" metrics are evaluated on log10(x + 0.1), with values below the
+# -0.1 lower bound floored at the zero-equivalent.
 METRIC_LABELS: Final[dict[str, str]] = {
     "kge": "KGE",
     "log_kge": "KGE (log₁₀)",
@@ -210,7 +251,8 @@ METRIC_LABELS: Final[dict[str, str]] = {
 # The note rendered under the per-run objective table.
 METRIC_NOTES: Final[str] = (
     "KGE = Kling–Gupta efficiency; NSE = Nash–Sutcliffe efficiency; the "
-    "log₁₀ metrics are evaluated on log₁₀(x + 0.1); relative bias = "
+    "log₁₀ metrics are evaluated on log₁₀(x + 0.1), with values below "
+    "-0.1 floored at the zero-equivalent; relative bias = "
     "mean(sim − meas) / mean(meas) (0 is unbiased, negative is an "
     "underprediction).  Higher is better for KGE, NSE, Spearman ρ, and R²; "
     "bias closest to 0 is best."
@@ -249,9 +291,9 @@ def param_label(name: str, mineral_names: Sequence[str]) -> str:
     ``initial_state.{zone}_x`` keys.  The zone- and mineral-prefixed
     keys are labeled with the parameter part only (plus the mineral
     name for the bracketed keys), since the zone and mineral context
-    is already shown by the sidebar's subheaders and bold headers.
-    The proportion and initial-state keys (which have no subheader
-    above them) are labeled in full.
+    is already shown by the parameter panel's zone subheaders and
+    mineral headers.  The proportion and initial-state keys (which
+    have no subheader above them) are labeled in full.
 
     Args:
         name: The parameter key, as a key of the bounds mapping.
@@ -286,52 +328,89 @@ def param_label(name: str, mineral_names: Sequence[str]) -> str:
     return label
 
 
-def slider_value(
-    name: str,
-    bounds: dict[str, tuple[float, float]],
-    mineral_names: Sequence[str],
-) -> float:
+def slider_decimals(lo: float, hi: float) -> int:
     """
-    Render the sidebar control for a single parameter and return its
-    value.
+    The number of decimals a value in the bounds needs to display.
 
-    Free parameters (distinct bounds) get a slider whose default is
-    the midpoint of the bounds and which carries an explicit session
-    key, so a changed value persists across reruns regardless of the
-    sidebar layout.  Fixed parameters (identical bounds) are not
-    shown and are pinned to their value.
-
-    The slider step is a thousandth of the parameter's range, and the
-    displayed value carries just enough decimals to show that step, so
-    both wide and tight parameter ranges are resolvable and the label
-    is not rounded to a fixed two decimals.
+    Just enough decimals to distinguish adjacent slider steps (a
+    thousandth of the span, see `NUM_SLIDER_STEPS`), with at least one
+    so integral values still read as numbers.  Degenerate bounds (a
+    fixed parameter) fall back to four decimals, the precision the
+    saved ``parameters.csv`` files carry.
 
     Args:
-        name: The parameter name, as a key of ``bounds``.
-        bounds: The mapping of parameter name to (min, max) bound.
-        mineral_names: The mineral names of the network, in the
-            network's order, for labeling the bracketed mineral keys.
+        lo: The lower bound.
+        hi: The upper bound.
 
     Returns:
-        The value to use for the parameter on this run.
+        The number of decimals to format a value in the bounds with.
     """
-    lo, hi = bounds[name]
-    if abs(lo - hi) <= 1e-5:
-        return lo
-
     span: float = float(hi) - float(lo)
-    step: float = span / 1000.0
-    # Just enough decimals to distinguish adjacent steps, with at
-    # least one so integral values still read as numbers.
-    decimals: int = max(1, int(math.ceil(-math.log10(step))) + 1)
+    if span <= 0:
+        return 4
+    step: float = span / NUM_SLIDER_STEPS
+    return max(1, int(math.ceil(-math.log10(step))) + 1)
 
-    return st.slider(
-        param_label(name, mineral_names),
-        min_value=float(lo),
-        max_value=float(hi),
-        value=float(0.5 * (lo + hi)),
-        step=step,
-        format=f"%.{decimals}f",
-        key=f"param:{name}",
+
+def step_to_value(lo: float, hi: float, step: int) -> float:
+    """
+    The slider value at an integer step of the slider.
+
+    The step is a position on the slider's thousand-step scale
+    (`NUM_SLIDER_STEPS`), mapped linearly onto the (possibly
+    user-edited) bounds.
+
+    Args:
+        lo: The lower bound.
+        hi: The upper bound.
+        step: The integer slider position, in [0, `NUM_SLIDER_STEPS`].
+
+    Returns:
+        The corresponding value, in the bounds.
+    """
+    return float(lo) + (float(hi) - float(lo)) * float(step) / NUM_SLIDER_STEPS
+
+
+def value_to_step(lo: float, hi: float, value: float) -> int:
+    """
+    The integer slider step closest to a value in the bounds.
+
+    The inverse of `step_to_value`: the value is clamped into the
+    bounds and snapped to the nearest step of the thousand-step scale.
+
+    Args:
+        lo: The lower bound.
+        hi: The upper bound.
+        value: The value to convert.
+
+    Returns:
+        The closest slider step, in [0, `NUM_SLIDER_STEPS`] (0 for
+        degenerate bounds).
+    """
+    span: float = float(hi) - float(lo)
+    if span <= 0:
+        return 0
+    clamped: float = min(max(value, lo), hi)
+    return min(
+        NUM_SLIDER_STEPS,
+        max(0, int(round((clamped - lo) / span * NUM_SLIDER_STEPS))),
     )
+
+
+def format_slider_value(lo: float, hi: float, value: float) -> str:
+    """
+    Format a value in the bounds for display in the parameter panel.
+
+    Uses `slider_decimals` so the label carries just enough precision
+    to show the slider step.
+
+    Args:
+        lo: The lower bound.
+        hi: The upper bound.
+        value: The value to format.
+
+    Returns:
+        The formatted value.
+    """
+    return f"{value:.{slider_decimals(lo, hi)}f}"
 # =================== #

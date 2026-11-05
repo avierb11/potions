@@ -55,6 +55,34 @@ def test_log_metrics_perfect_fit(obs) -> None:
     assert log_nse(obs, obs) == pytest.approx(1.0)
 
 
+def test_log_metrics_below_the_bound_are_floored() -> None:
+    # Values below the -0.1 lower bound of log10(x + 0.1) are floored
+    # at the zero-equivalent, so the metrics stay finite (instead of
+    # NaN) and equal the metrics of the series clipped at zero.
+    obs = Series(
+        [0.5, -0.2, 1.0, 2.0, 0.3, -0.5, 0.8, 1.5, 0.2, 0.9], dtype="float64"
+    )
+    pred = Series(
+        [0.6, -0.15, 0.9, 2.2, 0.4, -0.3, 0.7, 1.4, 0.3, 0.8], dtype="float64"
+    )
+    assert np.isfinite(log_kge(obs, pred))
+    assert np.isfinite(log_nse(obs, pred))
+    assert log_kge(obs, pred) == log_kge(obs.clip(lower=0.0), pred.clip(lower=0.0))
+    assert log_nse(obs, pred) == log_nse(obs.clip(lower=0.0), pred.clip(lower=0.0))
+
+
+def test_log_metrics_unchanged_in_the_defined_domain(
+    obs: Series, obs_with_noise: Series
+) -> None:
+    # Both fixtures are all positive, inside the transform's defined
+    # domain: the metrics must stay exactly what they were before the
+    # floor was added, i.e. based on plain log10(x + 0.1).
+    transformed_obs: Series = obs.map(lambda value: np.log10(value + 0.1))
+    transformed_pred: Series = obs_with_noise.map(lambda value: np.log10(value + 0.1))
+    assert log_kge(obs, obs_with_noise) == kge(transformed_obs, transformed_pred)
+    assert log_nse(obs, obs_with_noise) == nse(transformed_obs, transformed_pred)
+
+
 def test_bias_zero_for_perfect_fit(obs) -> None:
     assert bias(obs, obs) == pytest.approx(0.0)
 

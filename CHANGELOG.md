@@ -9,15 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **East River calibration GUI** in `potions.gui`: an interactive
-  Streamlit app (one sidebar slider per calibrated parameter, a
-  per-run objective-function table, and streamflow / river-concentration /
-  zone / reaction-rate figures) that re-runs the East River three-layer
-  lateral hydrology–reactive-transport model on every change.  Start it
-  with the new `potions-gui` console script; the East River series CSV
-  ships with the package, and the *Save run* button writes a fresh
-  timestamped directory under `results/` in the current working
-  directory.  Streamlit (>= 1.28) is now a core dependency.
+- **East River calibration GUI** in `potions.gui`: a PySide6 desktop
+  workbench (replacing the earlier Streamlit app) with the model's
+  three figures in one panel (flipped by arrow buttons or the Left /
+  Right keys), an always-visible per-run objective-function table under
+  the figure, and every calibrated parameter in a panel below, grouped
+  and themed by zone (hydrology in blue, reactive transport in red).
+  Pinned (read-only) parameters can be unlocked by double-click to
+  choose an adjustable range; slider changes re-run the hydrology and
+  reactive-transport models on a background thread.  Start it with the
+  `potions-gui` console script; the East River series CSV ships with
+  the package, and *Save run* writes a fresh timestamped directory
+  under `results/` in the current working directory, including the
+  session state (`gui_state.json`) that the app restores on its next
+  start.  PySide6 (>= 6.4) is now a core dependency (the `potions`
+  conda environment's PySide6 install carries a local `py.typed`
+  marker so `mypy --strict` can type-check the GUI).
 - **Pre-run model validation** with descriptive, typed errors:
   - New error types in `potions.utils`: `ModelStructureError` and
     `ModelInputError` (both subclass `ValueError` and `HydrologyError`).
