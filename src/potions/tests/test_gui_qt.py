@@ -6,8 +6,8 @@ covers the data layer and the pure functions.  Here the actual
 widgets are driven offscreen: the main window (startup, restoring a
 saved run, background runs, saving, and closing with a run in
 flight), the figure panel, the objective table model, and the
-parameter panel (sliders, pinned rows, their dialogs, and the plot
-selection).
+parameter panel (spin-box cells, pinned cells, their dialogs, and the
+plot selection).
 
 The offscreen Qt platform is requested before the first PySide6
 import, and the model itself is never run: the window's
@@ -32,7 +32,12 @@ import pytest
 from matplotlib.figure import Figure
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QMouseEvent
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGridLayout,
+    QVBoxLayout,
+    QWidget,
+)
 
 import potions as pt
 
@@ -393,14 +398,14 @@ class TestMainWindowStartup:
 class TestMainWindowRuns:
     """Background runs: reruns, failures, and the save button."""
 
-    def test_slider_change_starts_second_run(
+    def test_value_change_starts_second_run(
         self,
         qapp: QApplication,
         input_data: gui_data.GuiInputData,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Moving a slider after the first run starts a second one."""
+        """Editing a value after the first run starts a second one."""
         calls: list[np.ndarray] = []
         win = _make_window(
             input_data,
@@ -417,8 +422,8 @@ class TestMainWindowRuns:
             assert len(calls) == 1
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._SliderRow)
-            row._slider.setValue(750)
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
             _wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
@@ -550,8 +555,8 @@ class TestMainWindowRuns:
             # A parameter change after the run blocks the save (the
             # results on screen would be stale).
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._SliderRow)
-            row._slider.setValue(750)
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
             win._debounce_timer.stop()
             win._on_save_run()
             assert win._status_label.text() == (
@@ -604,8 +609,8 @@ class TestMainWindowRuns:
 
             # Second run in flight: accepting waits it out.
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._SliderRow)
-            row._slider.setValue(750)
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(0.775)
             _wait_until(
                 lambda: win._run_generation == 2 and len(releases) == 2
             )
@@ -821,7 +826,7 @@ class TestObjectiveTableModel:
 
 
 class TestParamPanel:
-    """Sliders, pinned rows, their dialogs, and the plot selection."""
+    """Free cells, pinned cells, their dialogs, and the plot selection."""
 
     @staticmethod
     def _make_panel(
@@ -852,26 +857,24 @@ class TestParamPanel:
             panel.deleteLater()
             _pump()
 
-    def test_slider_move(
+    def test_free_cell_value(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
     ) -> None:
         panel = self._make_panel(input_data)
         try:
             row = panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._SliderRow)
+            assert isinstance(row, gui_param_panel._FreeCell)
             values: list[str] = []
             panel.value_changed.connect(values.append)
-            row._slider.setValue(750)
+            row._spin.setValue(0.775)
             assert values == ["proportion.1"]
             assert row.value() == pytest.approx(0.775)
-            assert row._value_label.text() == "0.77500"
             assert panel.param_values()["proportion.1"] == pytest.approx(0.775)
             # set_value is for programmatic updates: no signal, and
             # the panel's copy of the value is left for the caller.
             row.set_value(0.3)
             assert values == ["proportion.1"]
             assert row.value() == pytest.approx(0.3)
-            assert row._value_label.text() == "0.30000"
             assert panel.param_values()["proportion.1"] == pytest.approx(0.775)
         finally:
             panel.deleteLater()
@@ -883,12 +886,12 @@ class TestParamPanel:
         input_data: gui_data.GuiInputData,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Double-clicking a pinned row gives it a range and a slider."""
+        """Double-clicking a pinned cell gives it a range and a spin box."""
         panel = self._make_panel(input_data)
         try:
             key: str = "ground_hs.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FixedRow)
+            assert isinstance(row, gui_param_panel._PinnedCell)
             records = _install_bounds_stub(monkeypatch, (0.25, 1.75))
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
@@ -896,7 +899,7 @@ class TestParamPanel:
                 lambda k, lo, hi: bounds.append((k, lo, hi))
             )
             panel.value_changed.connect(values.append)
-            row.mouseDoubleClickEvent(_double_click_event())
+            qapp.sendEvent(row._spin, _double_click_event())
             assert len(records) == 1
             label: str = param_label(key, input_data.network.mineral_names)
             assert records[0]["title"] == f"Edit range — {label}"
@@ -907,11 +910,13 @@ class TestParamPanel:
             # The dialog is prefilled with the value's ± half-span.
             assert records[0]["lo"] == pytest.approx(0.5)
             assert records[0]["hi"] == pytest.approx(1.5)
-            new_row = panel._rows[key]
-            assert isinstance(new_row, gui_param_panel._SliderRow)
-            assert new_row.value() == pytest.approx(1.0)
-            assert new_row._slider.value() == 500
-            assert new_row._bounds == (0.25, 1.75)
+            new_cell = panel._rows[key]
+            assert isinstance(new_cell, gui_param_panel._FreeCell)
+            assert new_cell._symbol.text() == "alpha"
+            assert new_cell._symbol.toolTip() == label
+            assert new_cell.value() == pytest.approx(1.0)
+            assert new_cell._spin.value() == pytest.approx(1.0)
+            assert new_cell._bounds == (0.25, 1.75)
             assert bounds == [(key, 0.25, 1.75)]
             assert values == [key]
         finally:
@@ -929,7 +934,7 @@ class TestParamPanel:
         try:
             key: str = "ground_rp.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FixedRow)
+            assert isinstance(row, gui_param_panel._PinnedCell)
             records = _install_bounds_stub(monkeypatch, None)
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
@@ -939,25 +944,25 @@ class TestParamPanel:
             panel.value_changed.connect(values.append)
             row.mouseDoubleClickEvent(_double_click_event())
             assert len(records) == 1
-            assert isinstance(panel._rows[key], gui_param_panel._FixedRow)
+            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
             assert bounds == []
             assert values == []
         finally:
             panel.deleteLater()
             _pump()
 
-    def test_edit_slider_endpoint(
+    def test_edit_bounds(
         self,
         qapp: QApplication,
         input_data: gui_data.GuiInputData,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Double-clicking an endpoint edits only that end of the range."""
+        """Double-clicking a free cell edits both ends of its range."""
         panel = self._make_panel(input_data)
         try:
             key: str = "proportion.1"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._SliderRow)
+            assert isinstance(row, gui_param_panel._FreeCell)
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
             panel.bounds_changed.connect(
@@ -966,33 +971,31 @@ class TestParamPanel:
             panel.value_changed.connect(values.append)
 
             records = _install_bounds_stub(monkeypatch, (0.5, 0.95))
-            row._min_label.mouseDoubleClickEvent(_double_click_event())
+            line_edit = row._spin.lineEdit()
+            assert line_edit is not None
+            qapp.sendEvent(line_edit, _double_click_event())
             assert len(records) == 1
             assert records[0]["title"] == (
                 "Edit range — Distal proportion of catchment"
             )
-            assert records[0]["hint"] == (
-                "Current range: 0.25000 to 0.95000.  Edit only the minimum; "
-                "the other end is kept."
-            )
+            assert records[0]["hint"] == "Current range: 0.25000 to 0.95000."
             assert records[0]["lo"] == pytest.approx(0.25)
             assert records[0]["hi"] == pytest.approx(0.95)
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._SliderRow)
+            assert isinstance(row, gui_param_panel._FreeCell)
             assert row._bounds == (0.5, 0.95)
             assert row.value() == pytest.approx(0.6)  # the value is kept
             assert bounds == [(key, 0.5, 0.95)]
             assert values == [key]
 
-            # The same for the other end, from the new range.
+            # The same for the edited range.
             records = _install_bounds_stub(monkeypatch, (0.5, 0.8))
-            row._max_label.mouseDoubleClickEvent(_double_click_event())
-            assert records[0]["hint"] == (
-                "Current range: 0.50000 to 0.95000.  Edit only the maximum; "
-                "the other end is kept."
-            )
+            line_edit = row._spin.lineEdit()
+            assert line_edit is not None
+            qapp.sendEvent(line_edit, _double_click_event())
+            assert records[0]["hint"] == "Current range: 0.50000 to 0.95000."
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._SliderRow)
+            assert isinstance(row, gui_param_panel._FreeCell)
             assert row._bounds == (0.5, 0.8)
             assert bounds == [(key, 0.5, 0.95), (key, 0.5, 0.8)]
             assert values == [key, key]
@@ -1041,17 +1044,17 @@ class TestParamPanel:
         try:
             key: str = "ground_hs.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FixedRow)
+            assert isinstance(row, gui_param_panel._PinnedCell)
             _install_bounds_stub(monkeypatch, (0.25, 1.75))
             row.mouseDoubleClickEvent(_double_click_event())
             assert isinstance(
-                panel._rows[key], gui_param_panel._SliderRow
+                panel._rows[key], gui_param_panel._FreeCell
             )
             panel._values["proportion.1"] = 1.5  # outside the range
             restored: dict[str, float] = panel.reset_bounds()
             assert panel.current_bounds() == dict(input_data.bounds)
             assert restored["proportion.1"] == pytest.approx(0.95)
-            assert isinstance(panel._rows[key], gui_param_panel._FixedRow)
+            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
         finally:
             panel.deleteLater()
             _pump()
@@ -1065,6 +1068,12 @@ class TestParamPanel:
                 panel._group_of("bogus.key")
             assert panel._groups["hydrology"].theme == HYDRO_THEME
             assert panel._plots_group.theme is None
+
+            for name in ("hydrology", "proportion", "reactive", "initial"):
+                assert isinstance(
+                    panel._groups[name]._content_layout, QGridLayout
+                )
+            assert isinstance(panel._plots_group._content_layout, QVBoxLayout)
 
             group: gui_param_panel.ThemedGroup = panel._groups["hydrology"]
             assert group._toggle.text().startswith("▾")

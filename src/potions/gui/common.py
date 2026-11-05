@@ -18,10 +18,11 @@ This module holds what all of them share:
 * the flat parameter layout — which zones carry which hydrology,
   reactive-transport, and initial-state parameters, in the order
   ``potions.gui.data`` lists their bounds;
-* the human-readable label for every flat parameter key;
+* the human-readable label and the short display symbol for every
+  flat parameter key;
 * the color schemes, including the blue / red parameter-group themes;
-* the rcParams setup and the pure slider math (value-to-step mapping
-  and decimal precision) shared by the parameter panel and its tests.
+* the rcParams setup and the bound-precision rule shared by the
+  parameter panel and its tests.
 
 Color schemes
 -------------
@@ -192,29 +193,22 @@ RIVER_SPECIES_MEAS_COLORS: Final[dict[str, str]] = {
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
 MEAS_Q_COLOR: Final[str] = "black"
 
-# The number of integer steps every parameter slider spans.  The
-# slider's integer position is mapped onto the (possibly user-edited)
-# bounds, so the step width is a thousandth of the current span.
-NUM_SLIDER_STEPS: Final[int] = 1000
-
-
 # ==== Types ==== #
 @dataclass(frozen=True, slots=True)
 class Theme:
     """
     A color theme for a parameter group.
 
-    The accent color tints the group header and the filled portion of
-    the sliders, and the light shade is the background of the group
-    container and the unfilled slider groove.  The two themes give the
-    hydrology and reactive-transport panels their distinct blue / red
-    character (the accents reuse the snow-zone blue and surface-zone
-    red of the figure palette, so the panel and the figures stay
-    visually related).
+    The accent color tints the group's title and top border, and the
+    light shade is the background of the group container.  The two
+    themes give the hydrology and reactive-transport panels their
+    distinct blue / red character (the accents reuse the snow-zone
+    blue and surface-zone red of the figure palette, so the panel and
+    the figures stay visually related).
 
     Attributes:
         name: The display name of the themed group.
-        accent: The accent color (hex) for headers and slider fill.
+        accent: The accent color (hex) for the group title and border.
         light: The light background color (hex) of the group.
     """
 
@@ -240,9 +234,9 @@ METRIC_NAMES: Final[list[str]] = [name for name, _ in obj.DEFAULT_OBJECTIVE_FUNC
 # -0.1 lower bound floored at the zero-equivalent.
 METRIC_LABELS: Final[dict[str, str]] = {
     "kge": "KGE",
-    "log_kge": "KGE (log₁₀)",
+    "log_kge": "LogKGE",
     "nse": "NSE",
-    "log_nse": "NSE (log₁₀)",
+    "log_nse": "LogNSE",
     "bias": "relative bias",
     "spearman_rho": "Spearman ρ",
     "r_squared": "R²",
@@ -250,12 +244,12 @@ METRIC_LABELS: Final[dict[str, str]] = {
 
 # The note rendered under the per-run objective table.
 METRIC_NOTES: Final[str] = (
-    "KGE = Kling–Gupta efficiency; NSE = Nash–Sutcliffe efficiency; the "
-    "log₁₀ metrics are evaluated on log₁₀(x + 0.1), with values below "
-    "-0.1 floored at the zero-equivalent; relative bias = "
-    "mean(sim − meas) / mean(meas) (0 is unbiased, negative is an "
-    "underprediction).  Higher is better for KGE, NSE, Spearman ρ, and R²; "
-    "bias closest to 0 is best."
+    "KGE = Kling–Gupta efficiency; NSE = Nash–Sutcliffe efficiency; "
+    "LogKGE and LogNSE are the KGE and NSE evaluated on log₁₀(x + 0.1), "
+    "with values below -0.1 floored at the zero-equivalent; relative "
+    "bias = mean(sim − meas) / mean(meas) (0 is unbiased, negative is "
+    "an underprediction).  Higher is better for KGE, NSE, LogKGE, "
+    "LogNSE, Spearman ρ, and R²; bias closest to 0 is best."
 )
 
 # The narrow set of linestyles the matplotlib type stubs accept for
@@ -328,15 +322,48 @@ def param_label(name: str, mineral_names: Sequence[str]) -> str:
     return label
 
 
-def slider_decimals(lo: float, hi: float) -> int:
+def param_symbol(name: str) -> str:
+    """
+    The short symbol shown in place of a parameter's full label.
+
+    The symbol is the parameter's field name ("proportion" for the
+    catchment-proportion key, the field for zone-prefixed keys, and a
+    bare "x" for the initial-state keys); the parameter's full label
+    is available as the cell's tooltip.
+
+    Args:
+        name: The parameter key, as a key of the bounds mapping.
+
+    Returns:
+        The short symbol for the parameter.
+
+    Raises:
+        ValueError: Raised for a key of an unrecognized form.
+    """
+    if name == "proportion.1":
+        return "proportion"
+
+    if name.startswith("initial_state."):
+        return "x"
+
+    if "." not in name:
+        raise ValueError(f"Unrecognized parameter key: {name!r}")
+
+    _zone_part, rest = name.split(".", 1)
+    field: str = rest.split("[", 1)[0]
+    if field not in PARAM_LABELS:
+        raise ValueError(f"Unrecognized parameter key: {name!r}")
+    return field
+
+
+def bound_decimals(lo: float, hi: float) -> int:
     """
     The number of decimals a value in the bounds needs to display.
 
-    Just enough decimals to distinguish adjacent slider steps (a
-    thousandth of the span, see `NUM_SLIDER_STEPS`), with at least one
-    so integral values still read as numbers.  Degenerate bounds (a
-    fixed parameter) fall back to four decimals, the precision the
-    saved ``parameters.csv`` files carry.
+    Just enough decimals to distinguish values a thousandth of the
+    span apart, with at least one so integral values still read as
+    numbers.  Degenerate bounds (a fixed parameter) fall back to four
+    decimals, the precision the saved ``parameters.csv`` files carry.
 
     Args:
         lo: The lower bound.
@@ -348,69 +375,6 @@ def slider_decimals(lo: float, hi: float) -> int:
     span: float = float(hi) - float(lo)
     if span <= 0:
         return 4
-    step: float = span / NUM_SLIDER_STEPS
+    step: float = span / 1000.0
     return max(1, int(math.ceil(-math.log10(step))) + 1)
-
-
-def step_to_value(lo: float, hi: float, step: int) -> float:
-    """
-    The slider value at an integer step of the slider.
-
-    The step is a position on the slider's thousand-step scale
-    (`NUM_SLIDER_STEPS`), mapped linearly onto the (possibly
-    user-edited) bounds.
-
-    Args:
-        lo: The lower bound.
-        hi: The upper bound.
-        step: The integer slider position, in [0, `NUM_SLIDER_STEPS`].
-
-    Returns:
-        The corresponding value, in the bounds.
-    """
-    return float(lo) + (float(hi) - float(lo)) * float(step) / NUM_SLIDER_STEPS
-
-
-def value_to_step(lo: float, hi: float, value: float) -> int:
-    """
-    The integer slider step closest to a value in the bounds.
-
-    The inverse of `step_to_value`: the value is clamped into the
-    bounds and snapped to the nearest step of the thousand-step scale.
-
-    Args:
-        lo: The lower bound.
-        hi: The upper bound.
-        value: The value to convert.
-
-    Returns:
-        The closest slider step, in [0, `NUM_SLIDER_STEPS`] (0 for
-        degenerate bounds).
-    """
-    span: float = float(hi) - float(lo)
-    if span <= 0:
-        return 0
-    clamped: float = min(max(value, lo), hi)
-    return min(
-        NUM_SLIDER_STEPS,
-        max(0, int(round((clamped - lo) / span * NUM_SLIDER_STEPS))),
-    )
-
-
-def format_slider_value(lo: float, hi: float, value: float) -> str:
-    """
-    Format a value in the bounds for display in the parameter panel.
-
-    Uses `slider_decimals` so the label carries just enough precision
-    to show the slider step.
-
-    Args:
-        lo: The lower bound.
-        hi: The upper bound.
-        value: The value to format.
-
-    Returns:
-        The formatted value.
-    """
-    return f"{value:.{slider_decimals(lo, hi)}f}"
 # =================== #

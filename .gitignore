@@ -206,3 +206,7 @@ results/
 *.bak/
 docs/
 AGENTS.md
+
+# Local notes and tooling
+.opencode/
+todo.md

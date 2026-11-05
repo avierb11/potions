@@ -7,13 +7,12 @@ single catchment-proportion parameter, the reactive-transport
 parameters of every zone (red-themed, with a header per mineral in
 the non-snow zones), and the calibrated initial state.
 
-Every parameter whose bounds are distinct is a slider whose range
-can be re-edited by double-clicking one of its endpoint labels; the
-slider's resolution follows the current range (a thousandth of the
-span, see `NUM_SLIDER_STEPS`).  A parameter whose bounds are
-identical is pinned and shown as a read-only row; double-clicking
-the row opens a dialog that gives it a range, converting it into a
-slider.
+Every parameter whose bounds are distinct is a spin-box cell whose
+range can be re-edited by double-clicking the cell; the value's
+displayed precision follows the current range (see `bound_decimals`).
+A parameter whose bounds are identical is pinned and shown as a
+read-only cell; double-clicking the cell opens a dialog that gives
+it a range, converting it into a free cell.
 
 The last group, "Plots", carries the checkboxes that select the
 species, zones, and minerals drawn in the zone and reaction-rate
@@ -23,19 +22,20 @@ toggled.
 
 from typing import Final
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -45,7 +45,6 @@ from potions.gui.common import (
     HYDRO_PARAMS,
     HYDRO_THEME,
     MINERAL_PARAMS,
-    NUM_SLIDER_STEPS,
     RT_DIM_PARAMS,
     RT_THEME,
     SNOW_ZONES,
@@ -54,11 +53,9 @@ from potions.gui.common import (
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
-    format_slider_value,
+    bound_decimals,
     param_label,
-    slider_decimals,
-    step_to_value,
-    value_to_step,
+    param_symbol,
 )
 from potions.gui.data import GuiInputData, PlotSelection
 
@@ -78,96 +75,51 @@ _BOUND_RANGE_MIN: Final[float] = -1e6
 _BOUND_RANGE_MAX: Final[float] = 1e6
 _BOUND_DECIMALS: Final[int] = 6
 
-# The fixed widths (pixels) of the row's trailing labels, so the
-# values and the upper endpoints line up across rows.
-_VALUE_LABEL_WIDTH: Final[int] = 72
-_ENDPOINT_LABEL_WIDTH: Final[int] = 58
+# The number of columns in the parameter groups' cell grids: the
+# symbol and the spin box of each cell, two cells per row.
+_GRID_COLUMNS: Final[int] = 4
 # =================== #
 
 
 # ==== Widgets ==== #
-class _EndpointLabel(QLabel):
+class _FreeCell(QWidget):
     """
-    A double-clickable min or max endpoint of a slider row's range.
+    A single free-parameter cell: the parameter's symbol and a spin
+    box holding its value.
 
-    The label shows one end of the parameter's current range, as a
-    hint for the slider's step width.  When double-clicked it emits
-    `edit_requested` carrying the position of the end it represents
-    (`0` for the minimum, `1` for the maximum), so the panel opens
-    the range dialog for just that end.
-
-    Args:
-        which: The position of the end shown: `0` for the minimum
-            (left-aligned) or `1` for the maximum (right-aligned).
-        parent: The parent widget; defaults to None.
-    """
-
-    edit_requested = Signal(int)
-
-    def __init__(
-        self, which: int, parent: QWidget | None = None
-    ) -> None:
-        super().__init__(parent)
-        self._which: int = which
-        self.setFixedWidth(_ENDPOINT_LABEL_WIDTH)
-        alignment: Qt.AlignmentFlag = (
-            Qt.AlignmentFlag.AlignLeft
-            if which == 0
-            else Qt.AlignmentFlag.AlignRight
-        )
-        self.setAlignment(alignment)
-        self.setToolTip("Double-click to edit this end of the range")
-
-    def set_text(self, text: str) -> None:
-        """
-        Set the text of the endpoint label.
-
-        Args:
-            text: The formatted bound to show.
-        """
-        self.setText(text)
-
-    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """Emit `edit_requested` for this end, then forward the event."""
-        self.edit_requested.emit(self._which)
-        super().mouseDoubleClickEvent(event)
-
-
-class _SliderRow(QWidget):
-    """
-    A single free-parameter row: name, min and max endpoint labels,
-    the slider, and the formatted current value.
-
-    The slider spans `NUM_SLIDER_STEPS` integer steps mapped
-    linearly onto the (possibly user-edited) range, so re-ranging a
-    parameter keeps the slider's resolution at a thousandth of the
-    span.  The row emits `value_changed` when the user moves the
-    slider and `edit_requested` when an endpoint label is
-    double-clicked.
+    The spin box is clamped to the cell's (possibly user-edited)
+    range, and its decimal precision and step width follow the range
+    (`bound_decimals`).  The symbol carries the parameter's full
+    label as its tooltip, so the cell shows only the symbol while
+    the full name is available on hover.  Double-clicking anywhere
+    on the cell emits `edit_requested`, which the panel answers by
+    opening the dialog that edits both ends of the range.
 
     Signals:
         value_changed: Emitted with the parameter key whenever the
             value changes.
-        edit_requested: Emitted with the parameter key and the
-            position of the clicked end (`0` for the minimum, `1`
-            for the maximum).
+        edit_requested: Emitted with the parameter key when the
+            cell is double-clicked.
 
     Args:
         key: The parameter's bounds key.
-        label: The label shown at the left of the row.
+        symbol: The parameter's short display symbol.
+        label: The parameter's full label, shown as the cell's
+            tooltip.
         bounds: The parameter's current (min, max) range.
         value: The parameter's current value, clamped into the range.
-        theme: The theme of the group the row belongs to, or None
-            for an unthemed group; the slider is tinted with it.
+        theme: The theme of the group the cell belongs to, or None
+            for an unthemed group; the symbol is tinted with it.
         parent: The parent widget; defaults to None.
     """
 
     value_changed = Signal(str)
-    edit_requested = Signal(str, int)
+    edit_requested = Signal(str)
 
     def __init__(
         self,
         key: str,
+        symbol: str,
         label: str,
         bounds: tuple[float, float],
         value: float,
@@ -180,39 +132,30 @@ class _SliderRow(QWidget):
         self._value: float = value
 
         layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 1, 8, 1)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(4)
 
-        name_label: QLabel = QLabel(label)
-        name_label.setToolTip(label)
-
-        self._min_label: _EndpointLabel = _EndpointLabel(0)
-        self._max_label: _EndpointLabel = _EndpointLabel(1)
-
-        self._value_label: QLabel = QLabel()
-        self._value_label.setFixedWidth(_VALUE_LABEL_WIDTH)
-        self._value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        self._symbol: QLabel = QLabel(symbol)
+        self._symbol.setToolTip(label)
+        self._symbol.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
-
-        self._slider: QSlider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setRange(0, NUM_SLIDER_STEPS)
-
-        layout.addWidget(name_label)
-        layout.addWidget(self._min_label)
-        layout.addWidget(self._slider, 1)
-        layout.addWidget(self._value_label)
-        layout.addWidget(self._max_label)
-
+        self._symbol.setMinimumWidth(70)
         if theme is not None:
-            self._apply_theme(theme)
+            self._symbol.setStyleSheet(f"color: {theme.accent};")
+        layout.addWidget(self._symbol, 1)
 
-        self._min_label.edit_requested.connect(self._reemit_edit)
-        self._max_label.edit_requested.connect(self._reemit_edit)
-        self._slider.valueChanged.connect(self._on_slider_moved)
+        self._spin: QDoubleSpinBox = QDoubleSpinBox()
+        self._spin.setToolTip(label)
+        self._spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._spin.valueChanged.connect(self._on_value_edited)
+        layout.addWidget(self._spin, 1)
 
-        self._refresh_bounds_labels()
-        self.set_value(value)
+        self._line_edit: QLineEdit | None = self._spin.lineEdit()
+        if self._line_edit is not None:
+            self._line_edit.installEventFilter(self)
+
+        self.set_bounds(*bounds)
 
     def value(self) -> float:
         """The parameter's current value, in the current range."""
@@ -220,11 +163,11 @@ class _SliderRow(QWidget):
 
     def set_value(self, value: float) -> None:
         """
-        Clamp `value` into the current range and move the slider.
+        Clamp `value` into the current range and move the spin box.
 
-        The slider's signals are blocked while the handle moves, so
+        The spin box's signals are blocked while the value moves, so
         this does not re-emit `value_changed`; the caller re-emits
-        when the change came from outside the slider (an edited
+        when the change came from outside the cell (an edited
         range, a restored state).
 
         Args:
@@ -232,83 +175,83 @@ class _SliderRow(QWidget):
         """
         lo, hi = self._bounds
         self._value = min(max(value, lo), hi)
-        step: int = value_to_step(lo, hi, self._value)
-        self._slider.blockSignals(True)
-        self._slider.setValue(step)
-        self._slider.blockSignals(False)
-        self._refresh_value_label()
+        self._spin.blockSignals(True)
+        self._spin.setValue(self._value)
+        self._spin.blockSignals(False)
 
     def set_bounds(self, lo: float, hi: float) -> None:
         """
         Replace the range, keeping the current (clamped) value.
 
-        Like `set_value`, the slider's signals are blocked, so the
-        caller re-emits the resulting changes.
+        The spin box's range, decimal precision, and step width all
+        follow the new bounds.  Like `set_value`, the spin box's
+        signals are blocked, so the caller re-emits the resulting
+        changes.
 
         Args:
             lo: The new lower bound.
             hi: The new upper bound.
         """
         self._bounds = (lo, hi)
-        self._refresh_bounds_labels()
+        decimals: int = bound_decimals(lo, hi)
+        self._spin.blockSignals(True)
+        self._spin.setRange(lo, hi)
+        self._spin.setDecimals(decimals)
+        self._spin.setSingleStep(10.0 ** (-decimals))
         self._value = min(max(self._value, lo), hi)
-        step: int = value_to_step(lo, hi, self._value)
-        self._slider.blockSignals(True)
-        self._slider.setValue(step)
-        self._slider.blockSignals(False)
-        self._refresh_value_label()
+        self._spin.setValue(self._value)
+        self._spin.blockSignals(False)
 
-    def _on_slider_moved(self, step: int) -> None:
-        """Map a slider step onto the range and emit `value_changed`."""
-        lo, hi = self._bounds
-        self._value = step_to_value(lo, hi, step)
-        self._refresh_value_label()
+    def _on_value_edited(self, value: float) -> None:
+        """Record a user edit of the spin box and emit `value_changed`."""
+        self._value = value
         self.value_changed.emit(self._key)
 
-    def _reemit_edit(self, which: int) -> None:
-        """Forward an endpoint's edit request with this row's key."""
-        self.edit_requested.emit(self._key, which)
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """
+        Open the range dialog when the spin box's line edit is
+        double-clicked (a click there never reaches the cell's
+        double-click handler).
 
-    def _refresh_bounds_labels(self) -> None:
-        """Reformat both endpoint labels for the current range."""
-        lo, hi = self._bounds
-        decimals: int = slider_decimals(lo, hi)
-        self._min_label.set_text(f"{lo:.{decimals}f}")
-        self._max_label.set_text(f"{hi:.{decimals}f}")
+        Args:
+            watched: The object the event was delivered to.
+            event: The event itself.
 
-    def _refresh_value_label(self) -> None:
-        """Reformat the value label for the current value and range."""
-        lo, hi = self._bounds
-        self._value_label.setText(format_slider_value(lo, hi, self._value))
+        Returns:
+            Always False: the event keeps propagating.
+        """
+        if (
+            watched is self._line_edit
+            and event.type() == QEvent.Type.MouseButtonDblClick
+        ):
+            self.edit_requested.emit(self._key)
+        return False
 
-    def _apply_theme(self, theme: Theme) -> None:
-        """Tint the slider's groove and handle with the group's theme."""
-        self._slider.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            f" height: 6px; background: {theme.light};"
-            " border-radius: 3px; }"
-            "QSlider::sub-page:horizontal {"
-            f" background: {theme.accent};"
-            " border-radius: 3px; }"
-            "QSlider::add-page:horizontal { background: transparent; }"
-            "QSlider::handle:horizontal {"
-            f" background: {theme.accent};"
-            " width: 10px; margin: -3px 0; border-radius: 5px; }"
-        )
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """
+        Open the range dialog when any part of the cell is
+        double-clicked, then forward the event.
+        """
+        self.edit_requested.emit(self._key)
+        super().mouseDoubleClickEvent(event)
 
 
-class _FixedRow(QWidget):
+class _PinnedCell(QWidget):
     """
-    A read-only row for a pinned parameter, whose bounds are
-    identical so there is nothing to slide.
+    A read-only cell for a pinned parameter, whose bounds are
+    identical so there is nothing to adjust.
 
-    Double-clicking the row emits `unlock_requested`, which the
-    panel answers by opening the range dialog and converting the row
-    into a slider.
+    The value is shown in a disabled (grayed) spin box, and the
+    symbol carries the parameter's full label as its tooltip.
+    Double-clicking the cell emits `unlock_requested`, which the
+    panel answers by opening the range dialog and converting the
+    cell into a free cell.
 
     Args:
         key: The parameter's bounds key.
-        label: The label shown at the left of the row.
+        symbol: The parameter's short display symbol.
+        label: The parameter's full label, shown as the cell's
+            tooltip.
         value: The pinned value, shown in gray.
         parent: The parent widget; defaults to None.
     """
@@ -318,6 +261,7 @@ class _FixedRow(QWidget):
     def __init__(
         self,
         key: str,
+        symbol: str,
         label: str,
         value: float,
         parent: QWidget | None = None,
@@ -326,26 +270,21 @@ class _FixedRow(QWidget):
         self._key: str = key
 
         layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 1, 8, 1)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(4)
 
-        name_label: QLabel = QLabel(label)
-        name_label.setToolTip(label)
+        self._symbol: QLabel = QLabel(symbol)
+        self._symbol.setToolTip(label)
+        self._symbol.setStyleSheet("color: gray;")
+        self._symbol.setMinimumWidth(70)
+        layout.addWidget(self._symbol, 1)
 
-        value_label: QLabel = QLabel(f"{value:.4f}")
-        value_label.setFixedWidth(_VALUE_LABEL_WIDTH)
-        value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        value_label.setStyleSheet("color: gray;")
-
-        pinned: QLabel = QLabel("(pinned)")
-        pinned.setStyleSheet("color: gray;")
-
-        layout.addWidget(name_label)
-        layout.addStretch()
-        layout.addWidget(value_label)
-        layout.addWidget(pinned)
+        self._spin: QDoubleSpinBox = QDoubleSpinBox()
+        self._spin.setRange(_BOUND_RANGE_MIN, _BOUND_RANGE_MAX)
+        self._spin.setDecimals(bound_decimals(value, value))
+        self._spin.setValue(value)
+        self._spin.setEnabled(False)
+        layout.addWidget(self._spin, 1)
 
         self.setToolTip(
             "Pinned to a single value. Double-click to give this "
@@ -353,9 +292,14 @@ class _FixedRow(QWidget):
         )
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """Emit `unlock_requested` for this row, then forward the event."""
+        """
+        Emit `unlock_requested` for this cell, then forward the
+        event (a double-click on the disabled spin box is forwarded
+        here by Qt).
+        """
         self.unlock_requested.emit(self._key)
         super().mouseDoubleClickEvent(event)
+
 
 
 class _BoldHeader(QLabel):
@@ -494,17 +438,25 @@ class ThemedGroup(QWidget):
 
     The header is a checkable, auto-raise tool button carrying the
     group's title and a collapse arrow; the content widget holding
-    the group's rows is shown or hidden with the button.  A group
+    the group's cells is shown or hidden with the button.  A group
     built with a `Theme` gets the theme's light background, an
-    accent top border, and an accent-colored bold title; the neutral
-    groups (the catchment proportion, the plot selection) are built
-    with `theme=None` and keep the default palette.
+    accent top border, and an accent-colored bold title; the
+    neutral group (the plot selection) is built with `theme=None`
+    and keeps the default palette.
+
+    The content is a single vertical column by default.  A group
+    built with `grid_columns` lays its cells out in a grid with that
+    many columns, read left to right, top to bottom: each cell takes
+    one column, and a header added with `add_header` starts a new
+    row and spans all of the columns.
 
     Args:
         title: The title shown in the group's header.
-        theme: The theme to apply, or None for the neutral groups.
+        theme: The theme to apply, or None for the neutral group.
         collapsed: Whether the group starts collapsed.
         parent: The parent widget; defaults to None.
+        grid_columns: The number of columns for the content grid,
+            or None for a single vertical column.
     """
 
     def __init__(
@@ -513,10 +465,15 @@ class ThemedGroup(QWidget):
         theme: Theme | None,
         collapsed: bool = False,
         parent: QWidget | None = None,
+        grid_columns: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._title: str = title
         self._theme: Theme | None = theme
+        self._grid_columns: int | None = grid_columns
+        self._grid_pos: int = 0
+        self._grid_stretch_row: int = 0
+        self._grid_positions: dict[int, tuple[int, int, int]] = {}
 
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(0, 6, 0, 6)
@@ -530,9 +487,19 @@ class ThemedGroup(QWidget):
         )
 
         self._content: QWidget = QWidget(self)
-        self._content_layout: QVBoxLayout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(8, 2, 8, 8)
-        self._content_layout.addStretch()
+        if grid_columns is not None:
+            grid: QGridLayout = QGridLayout(self._content)
+            grid.setContentsMargins(8, 2, 8, 8)
+            grid.setSpacing(4)
+            for column_index in range(grid_columns):
+                grid.setColumnStretch(column_index, 1)
+            grid.setRowStretch(0, 1)
+            self._content_layout: QGridLayout | QVBoxLayout = grid
+        else:
+            column: QVBoxLayout = QVBoxLayout(self._content)
+            column.setContentsMargins(8, 2, 8, 8)
+            column.addStretch()
+            self._content_layout = column
 
         layout.addWidget(self._toggle)
         layout.addWidget(self._content)
@@ -563,23 +530,85 @@ class ThemedGroup(QWidget):
 
     def content(self) -> QWidget:
         """
-        The content widget holding the group's rows.
+        The content widget holding the group's cells.
 
         Returns:
-            The content widget, for membership tests when a row must
-            be moved between groups.
+            The content widget, for membership tests when a cell
+            must be moved between groups.
         """
         return self._content
 
     def add_widget(self, widget: QWidget) -> None:
         """
-        Insert `widget` into the group's content, above the trailing
+        Add `widget` to the group's content, in the next free slot.
+
+        In a grid group the slot is the next cell in reading order;
+        in a column group the widget is inserted above the trailing
         stretch.
 
         Args:
-            widget: The row or header to add.
+            widget: The cell or caption to add.
         """
-        self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
+        if isinstance(self._content_layout, QGridLayout):
+            assert self._grid_columns is not None
+            grid: QGridLayout = self._content_layout
+            self._place_widget(grid, widget, 1, self._grid_columns)
+        else:
+            assert isinstance(self._content_layout, QVBoxLayout)
+            column: QVBoxLayout = self._content_layout
+            column.insertWidget(column.count() - 1, widget)
+
+    def add_header(self, header: QWidget) -> None:
+        """
+        Add a full-width `header` to the group's content.
+
+        In a grid group the header starts a new row and spans all
+        the columns; in a column group it is added like any other
+        widget.
+
+        Args:
+            header: The header to add (a zone or mineral label, a
+                caption).
+        """
+        if isinstance(self._content_layout, QGridLayout):
+            assert self._grid_columns is not None
+            columns: int = self._grid_columns
+            grid: QGridLayout = self._content_layout
+            if self._grid_pos % columns != 0:
+                self._grid_pos += columns - self._grid_pos % columns
+            self._place_widget(grid, header, columns, columns)
+        else:
+            self.add_widget(header)
+
+    def _place_widget(
+        self,
+        grid: QGridLayout,
+        widget: QWidget,
+        span: int,
+        columns: int,
+    ) -> None:
+        """
+        Place `widget` in the next free grid slot, spanning `span`
+        columns, and advance the slot pointer.
+
+        A single stretch row is kept after the last placed row, so
+        the content stays pinned to the top of the group.
+
+        Args:
+            grid: The content grid to place into.
+            widget: The widget to place.
+            span: How many columns the widget occupies.
+            columns: The grid's total number of columns.
+        """
+        row: int = self._grid_pos // columns
+        col: int = self._grid_pos % columns
+        grid.addWidget(widget, row, col, 1, span)
+        self._grid_positions[id(widget)] = (row, col, span)
+        self._grid_pos += span
+        if self._grid_stretch_row <= row:
+            grid.setRowStretch(self._grid_stretch_row, 0)
+            self._grid_stretch_row = row + 1
+            grid.setRowStretch(self._grid_stretch_row, 1)
 
     def replace_widget(self, old: QWidget, new: QWidget) -> None:
         """
@@ -596,14 +625,34 @@ class ThemedGroup(QWidget):
             ValueError: Raised when `old` is not in the content
                 layout.
         """
-        index: int = self._content_layout.indexOf(old)
-        if index < 0:
-            raise ValueError(
-                f"Cannot replace a widget that is not in this group's content."
+        if isinstance(self._content_layout, QGridLayout):
+            assert self._grid_columns is not None
+            grid: QGridLayout = self._content_layout
+            position: tuple[int, int, int] | None = (
+                self._grid_positions.pop(id(old), None)
             )
-        self._content_layout.removeWidget(old)
-        old.deleteLater()
-        self._content_layout.insertWidget(index, new)
+            if position is None:
+                raise ValueError(
+                    "Cannot replace a widget that is not in this "
+                    "group's content."
+                )
+            row, col, span = position
+            grid.removeWidget(old)
+            old.deleteLater()
+            grid.addWidget(new, row, col, 1, span)
+            self._grid_positions[id(new)] = (row, col, span)
+        else:
+            assert isinstance(self._content_layout, QVBoxLayout)
+            column: QVBoxLayout = self._content_layout
+            index: int = column.indexOf(old)
+            if index < 0:
+                raise ValueError(
+                    "Cannot replace a widget that is not in this "
+                    "group's content."
+                )
+            column.removeWidget(old)
+            old.deleteLater()
+            column.insertWidget(index, new)
 
     def _set_header_text(self) -> None:
         """Restate the header with the arrow of the current state."""
@@ -626,7 +675,7 @@ class ParamPanel(QScrollArea):
     parameter, grouped by zone below the figure, plus the
     figure-selection checkboxes.
 
-    The groups, in order, are: *Hydrology* (blue-themed; one slider
+    The groups, in order, are: *Hydrology* (blue-themed; one cell
     per zone parameter in `ZONE_ORDER`), *Catchment proportion*
     (the single area-fraction parameter), *Reactive transport*
     (red-themed; per-zone storage parameters and per-mineral kinetic
@@ -635,15 +684,18 @@ class ParamPanel(QScrollArea):
     (the species / zone / mineral checkboxes for the zone and
     reaction-rate figures).
 
-    Free parameters (distinct bounds) are sliders; degenerate
-    parameters (identical bounds) are pinned and shown as read-only
-    rows that unlock on double-click.  A slider's endpoints can be
-    re-edited by double-clicking them.
+    The four parameter groups lay their cells out in a four-column
+    grid: a cell's symbol and spin box take one column each, so a
+    row holds two cells.  Free parameters (distinct bounds) are
+    editable spin-box cells; degenerate parameters (identical
+    bounds) are pinned and shown as read-only cells that unlock on
+    double-click.  A free cell's range can be re-edited by
+    double-clicking the cell.
 
     Signals:
         value_changed: Emitted with the parameter key whenever a
-            value changes (slider moved, range edited, state
-            restored).
+            value changes (a spin box was edited, a range was
+            edited, or a saved state was restored).
         bounds_changed: Emitted with the parameter key and its new
             (lower, upper) bounds when a range is edited or a pinned
             parameter is unlocked.
@@ -677,7 +729,7 @@ class ParamPanel(QScrollArea):
             key: (lo if lo == hi else 0.5 * (lo + hi))
             for key, (lo, hi) in input_data.bounds.items()
         }
-        self._rows: dict[str, _SliderRow | _FixedRow] = {}
+        self._rows: dict[str, _FreeCell | _PinnedCell] = {}
         self._groups: dict[str, ThemedGroup] = {}
 
         container: QWidget = QWidget()
@@ -706,7 +758,7 @@ class ParamPanel(QScrollArea):
         The panel's current bounds for every parameter.
 
         The bounds are the loaded defaults until the user edits them
-        by double-clicking a slider's endpoints (or unlocks a pinned
+        by double-clicking a free cell (or unlocks a pinned
         parameter); `reset_bounds` restores the defaults.
 
         Returns:
@@ -799,7 +851,7 @@ class ParamPanel(QScrollArea):
         Used at startup to restore a saved run: the saved bounds
         replace the panel's current ones (a parameter whose saved
         bounds are degenerate is pinned again, one with a range is a
-        slider again), and the saved values are clamped into the
+        free cell again), and the saved values are clamped into the
         saved bounds.  Names not in the loaded bounds (a state saved
         against a different network) are ignored; names missing from
         the saved values fall back to their default (the midpoint of
@@ -856,25 +908,29 @@ class ParamPanel(QScrollArea):
             self._container_layout.insertWidget(insert_at + offset, group)
 
     def _populate_hydrology(self) -> ThemedGroup:
-        """The blue-themed hydrology group: one slider per zone parameter."""
-        group: ThemedGroup = ThemedGroup("Hydrology", HYDRO_THEME)
+        """The blue-themed hydrology group: one cell per zone parameter."""
+        group: ThemedGroup = ThemedGroup(
+            "Hydrology", HYDRO_THEME, grid_columns=_GRID_COLUMNS
+        )
         for zone in ZONE_ORDER:
-            group.add_widget(_ZoneHeader(zone))
+            group.add_header(_ZoneHeader(zone))
             for param in HYDRO_PARAMS[zone]:
-                self._add_param_row(group, f"{zone}.{param}")
+                self._add_param_cell(group, f"{zone}.{param}")
         return group
 
     def _populate_proportion(self) -> ThemedGroup:
-        """The blue-themed catchment-proportion group: one slider."""
-        group: ThemedGroup = ThemedGroup("Catchment proportion", HYDRO_THEME)
-        self._add_param_row(group, "proportion.1")
+        """The blue-themed catchment-proportion group: one cell."""
+        group: ThemedGroup = ThemedGroup(
+            "Catchment proportion", HYDRO_THEME, grid_columns=_GRID_COLUMNS
+        )
+        self._add_param_cell(group, "proportion.1")
         caption: QLabel = QLabel(
             "Fraction of the catchment area in the distal (hillslope) "
             "column; the riparian column receives the remaining fraction."
         )
         caption.setWordWrap(True)
         caption.setStyleSheet("color: gray;")
-        group.add_widget(caption)
+        group.add_header(caption)
         return group
 
     def _populate_reactive(self) -> ThemedGroup:
@@ -883,17 +939,19 @@ class ParamPanel(QScrollArea):
         parameters, and per-mineral kinetic parameters in every
         non-snow zone.
         """
-        group: ThemedGroup = ThemedGroup("Reactive transport", RT_THEME)
+        group: ThemedGroup = ThemedGroup(
+            "Reactive transport", RT_THEME, grid_columns=_GRID_COLUMNS
+        )
         mineral_names: list[str] = self._input_data.network.mineral_names
         for zone in ZONE_ORDER:
-            group.add_widget(_ZoneHeader(zone))
+            group.add_header(_ZoneHeader(zone))
             for param in RT_DIM_PARAMS:
-                self._add_param_row(group, f"{zone}.{param}")
+                self._add_param_cell(group, f"{zone}.{param}")
             if zone not in SNOW_ZONES:
                 for mineral_id, mineral_name in enumerate(mineral_names):
-                    group.add_widget(_BoldHeader(mineral_name, top_margin=6))
+                    group.add_header(_BoldHeader(mineral_name, top_margin=6))
                     for field in MINERAL_PARAMS:
-                        self._add_param_row(
+                        self._add_param_cell(
                             group, f"{zone}.{field}[{mineral_id}]"
                         )
         return group
@@ -903,29 +961,34 @@ class ParamPanel(QScrollArea):
         The red-themed initial-state group: the calibrated
         exchange-site state per speciation zone.
         """
-        group: ThemedGroup = ThemedGroup("Initial state", RT_THEME)
+        group: ThemedGroup = ThemedGroup(
+            "Initial state", RT_THEME, grid_columns=_GRID_COLUMNS
+        )
         for zone in SPECIATION_ZONES:
-            self._add_param_row(group, f"initial_state.{zone}_x")
+            self._add_param_cell(group, f"initial_state.{zone}_x")
         return group
 
-    def _add_param_row(self, group: ThemedGroup, key: str) -> None:
+    def _add_param_cell(self, group: ThemedGroup, key: str) -> None:
         """
-        Add the row for one parameter to `group`, as a slider or a
-        pinned row according to its current bounds.
+        Add the cell for one parameter to `group`, as a free spin-box
+        cell or a pinned cell according to its current bounds.
         """
+        symbol: str = param_symbol(key)
         label: str = param_label(key, self._input_data.network.mineral_names)
         lo, hi = self._bounds[key]
         if lo == hi:
-            fixed_row: _FixedRow = _FixedRow(key, label, self._values[key])
-            fixed_row.unlock_requested.connect(self._on_unlock_requested)
-            self._rows[key] = fixed_row
-        else:
-            slider_row: _SliderRow = _SliderRow(
-                key, label, (lo, hi), self._values[key], group.theme
+            pinned_cell: _PinnedCell = _PinnedCell(
+                key, symbol, label, self._values[key]
             )
-            slider_row.value_changed.connect(self._on_value_changed)
-            slider_row.edit_requested.connect(self._on_endpoint_edit)
-            self._rows[key] = slider_row
+            pinned_cell.unlock_requested.connect(self._on_unlock_requested)
+            self._rows[key] = pinned_cell
+        else:
+            free_cell: _FreeCell = _FreeCell(
+                key, symbol, label, (lo, hi), self._values[key], group.theme
+            )
+            free_cell.value_changed.connect(self._on_value_changed)
+            free_cell.edit_requested.connect(self._on_bounds_edit)
+            self._rows[key] = free_cell
         group.add_widget(self._rows[key])
 
     def _build_plots_group(self, selection: PlotSelection) -> ThemedGroup:
@@ -966,49 +1029,42 @@ class ParamPanel(QScrollArea):
         return group
 
     def _on_value_changed(self, key: str) -> None:
-        """Record a slider's new value and re-emit it to the window."""
-        row: _SliderRow | _FixedRow = self._rows[key]
-        if isinstance(row, _SliderRow):
-            self._values[key] = row.value()
+        """Record a free cell's new value and re-emit it to the window."""
+        cell: _FreeCell | _PinnedCell = self._rows[key]
+        if isinstance(cell, _FreeCell):
+            self._values[key] = cell.value()
         self.value_changed.emit(key)
 
-    def _on_endpoint_edit(self, key: str, which: int) -> None:
+    def _on_bounds_edit(self, key: str) -> None:
         """
-        Open the range dialog for one endpoint of `key` and apply
-        the user's choice to that endpoint only.
+        Open the range dialog for `key` and apply the user's choice
+        to both ends of the range.
         """
         label: str = param_label(key, self._input_data.network.mineral_names)
         lo, hi = self._bounds[key]
-        decimals: int = slider_decimals(lo, hi)
-        end_name: str = "minimum" if which == 0 else "maximum"
-        hint: str = (
-            f"Current range: {lo:.{decimals}f} to {hi:.{decimals}f}.  "
-            f"Edit only the {end_name}; the other end is kept."
-        )
+        decimals: int = bound_decimals(lo, hi)
+        hint: str = f"Current range: {lo:.{decimals}f} to {hi:.{decimals}f}."
         result: tuple[float, float] | None = _BoundsDialog(
             f"Edit range — {label}", lo, hi, hint, self
         ).run()
         if result is None:
             return
         new_lo, new_hi = result
-        lo = new_lo if which == 0 else lo
-        hi = new_hi if which == 1 else hi
-        self._bounds[key] = (lo, hi)
+        self._bounds[key] = (new_lo, new_hi)
 
-        row: _SliderRow | _FixedRow = self._rows[key]
-        if isinstance(row, _SliderRow):
-            row.set_bounds(lo, hi)
-            self._values[key] = row.value()
-        else:
-            self._values[key] = min(max(self._values[key], lo), hi)
+        cell: _FreeCell | _PinnedCell = self._rows[key]
+        if not isinstance(cell, _FreeCell):
+            return
+        cell.set_bounds(new_lo, new_hi)
+        self._values[key] = cell.value()
 
-        self.bounds_changed.emit(key, lo, hi)
+        self.bounds_changed.emit(key, new_lo, new_hi)
         self.value_changed.emit(key)
 
     def _on_unlock_requested(self, key: str) -> None:
         """
         Open the range dialog for a pinned parameter and, if the user
-        accepts a range, convert the row into a slider in place.
+        accepts a range, convert the cell into a free cell in place.
         """
         label: str = param_label(key, self._input_data.network.mineral_names)
         value: float = self._values[key]
@@ -1029,15 +1085,19 @@ class ParamPanel(QScrollArea):
         self._bounds[key] = (new_lo, new_hi)
         self._values[key] = min(max(self._values[key], new_lo), new_hi)
 
-        old_row: _SliderRow | _FixedRow = self._rows[key]
         group: ThemedGroup = self._group_of(key)
-        new_row: _SliderRow = _SliderRow(
-            key, label, (new_lo, new_hi), self._values[key], group.theme
+        free_cell: _FreeCell = _FreeCell(
+            key,
+            param_symbol(key),
+            label,
+            (new_lo, new_hi),
+            self._values[key],
+            group.theme,
         )
-        new_row.value_changed.connect(self._on_value_changed)
-        new_row.edit_requested.connect(self._on_endpoint_edit)
-        self._rows[key] = new_row
-        group.replace_widget(old_row, new_row)
+        free_cell.value_changed.connect(self._on_value_changed)
+        free_cell.edit_requested.connect(self._on_bounds_edit)
+        group.replace_widget(self._rows[key], free_cell)
+        self._rows[key] = free_cell
 
         self.bounds_changed.emit(key, new_lo, new_hi)
         self.value_changed.emit(key)
@@ -1048,20 +1108,20 @@ class ParamPanel(QScrollArea):
 
     def _group_of(self, key: str) -> ThemedGroup:
         """
-        The parameter group containing the row for `key`.
+        The parameter group containing the cell for `key`.
 
         Args:
             key: The parameter's bounds key.
 
         Returns:
-            The group whose content widget is the row's parent.
+            The group whose content widget is the cell's parent.
 
         Raises:
-            KeyError: Raised when no group contains the row.
+            KeyError: Raised when no group contains the cell.
         """
-        row: _SliderRow | _FixedRow = self._rows[key]
+        cell: _FreeCell | _PinnedCell = self._rows[key]
         for group in self._groups.values():
-            if row.parentWidget() is group.content():
+            if cell.parentWidget() is group.content():
                 return group
         raise KeyError(f"No parameter group found for {key!r}.")
     # =================== #

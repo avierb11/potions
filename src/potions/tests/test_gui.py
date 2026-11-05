@@ -6,7 +6,7 @@ Covers the pure-Python layer of the GUI:
 * `potions.gui.data` — the input loader and the parameter-array
   conversions (``arr_to_model`` / ``arr_to_results``; the real
   model run is the ``slow``-marked end-to-end test).
-* `potions.gui.common` — the parameter-label and slider-mapping
+* `potions.gui.common` — the parameter-label and bound-precision
   helpers and the module constants the panel and the figures use.
 * `potions.gui.state` — the ``gui_state.json`` round trip, its
   error paths, the saved-run discovery, and the restore of full and
@@ -48,11 +48,9 @@ from ..gui.common import (
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
-    format_slider_value,
+    bound_decimals,
     param_label,
-    slider_decimals,
-    step_to_value,
-    value_to_step,
+    param_symbol,
 )
 from ..gui.state import (
     GUI_STATE_VERSION,
@@ -357,8 +355,8 @@ class TestParamLabel:
             param_label("ground_rp.bogus[0]", _MINERAL_NAMES)
 
 
-class TestSliderMath:
-    """The integer-step slider mapping and its display precision."""
+class TestBoundDecimals:
+    """The spin box's display precision follows the range's span."""
 
     @pytest.mark.parametrize(
         ("lo", "hi", "decimals"),
@@ -375,35 +373,45 @@ class TestSliderMath:
             (50.0, 1000.0, 2),
         ],
     )
-    def test_slider_decimals(
+    def test_bound_decimals(
         self, lo: float, hi: float, decimals: int
     ) -> None:
-        assert slider_decimals(lo, hi) == decimals
+        assert bound_decimals(lo, hi) == decimals
 
-    def test_step_to_value(self) -> None:
-        assert step_to_value(0.0, 1.0, 500) == pytest.approx(0.5)
-        assert step_to_value(0.0, 1.0, 0) == 0.0
-        assert step_to_value(0.0, 1.0, 1000) == pytest.approx(1.0)
-        assert step_to_value(-1.0, 1.0, 250) == pytest.approx(-0.5)
-        # A degenerate range collapses to its single value at any step.
-        assert step_to_value(3.0, 3.0, 777) == pytest.approx(3.0)
 
-    def test_value_to_step(self) -> None:
-        assert value_to_step(0.0, 1.0, 0.5) == 500
-        assert value_to_step(0.0, 1.0, 0.0) == 0
-        assert value_to_step(0.0, 1.0, 1.0) == 1000
-        # Out-of-range values clamp to the ends of the slider.
-        assert value_to_step(0.0, 1.0, 2.0) == 1000
-        assert value_to_step(0.0, 1.0, -2.0) == 0
-        # A degenerate range is always at step 0.
-        assert value_to_step(3.0, 3.0, 3.0) == 0
+class TestParamSymbol:
+    """The short symbol shown in a cell for each parameter-key form."""
 
-    def test_format_slider_value(self) -> None:
-        # The display precision follows the bounds' span.
-        assert format_slider_value(0.25, 0.95, 0.6) == "0.60000"
-        assert format_slider_value(0.0, 1.0, 0.5) == "0.5000"
-        assert format_slider_value(150.0, 1500.0, 825.0) == "825.0"
-        assert format_slider_value(-15.0, -5.0, -10.0) == "-10.000"
+    def test_proportion(self) -> None:
+        assert param_symbol("proportion.1") == "proportion"
+
+    def test_hydro(self) -> None:
+        assert param_symbol("snow_hs.tt") == "tt"
+
+    def test_reactive_storage(self) -> None:
+        assert param_symbol("surface_hs.max_water") == "max_water"
+
+    def test_ground(self) -> None:
+        assert param_symbol("ground_rp.k") == "k"
+
+    def test_mineral(self) -> None:
+        assert param_symbol("ground_rp.k_a[1]") == "k_a"
+
+    def test_initial_state(self) -> None:
+        assert param_symbol("initial_state.ground_rp_x") == "x"
+
+    def test_unknown_field(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            param_symbol("ground_rp.bogus[0]")
+        assert (
+            str(excinfo.value)
+            == "Unrecognized parameter key: 'ground_rp.bogus[0]'"
+        )
+
+    def test_no_dot(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            param_symbol("bogus")
+        assert str(excinfo.value) == "Unrecognized parameter key: 'bogus'"
 
 
 class TestDefaultPlotSelection:
@@ -1245,7 +1253,15 @@ class TestObjectiveTable:
 
     def test_full_table(self) -> None:
         table = gui_plots.build_objective_table(self._hydro(), self._rt())
-        assert list(table.columns) == list(METRIC_LABELS.values())
+        assert list(table.columns) == [
+            "KGE",
+            "LogKGE",
+            "NSE",
+            "LogNSE",
+            "relative bias",
+            "Spearman \u03c1",
+            "R\u00b2",
+        ]
         assert list(table.index) == ["Streamflow", "DOC", "DIC", "Ca++"]
         assert table.loc["Streamflow", "KGE"] == pytest.approx(0.9)
         assert table.loc["Ca++", "R\u00b2"] == pytest.approx(1.1)

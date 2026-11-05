@@ -163,7 +163,7 @@ def make_time_series_figure(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.02),
         ncol=5,
-        fontsize=8,
+        fontsize=9,
     )
 
     return fig
@@ -247,7 +247,7 @@ def make_zone_figure(
         loc="lower center",
         bbox_to_anchor=(0.5, 0.93),
         ncol=max(len(zones), 1),
-        fontsize=8,
+        fontsize=9,
     )
 
     species_handles: list[Line2D] = [
@@ -267,7 +267,7 @@ def make_zone_figure(
         loc="lower center",
         bbox_to_anchor=(0.5, 0.83),
         ncol=max(len(species), 1),
-        fontsize=8,
+        fontsize=9,
     )
 
     return fig
@@ -338,7 +338,7 @@ def make_rate_figure(rt_sim: pd.DataFrame, minerals: list[str]) -> Figure:
         loc="upper center",
         bbox_to_anchor=(0.5, -0.18),
         ncol=max(len(plot_zones), 1),
-        fontsize=7,
+        fontsize=8,
     )
     # Keep the zone legend while adding the mineral legend on top.
     ax.add_artist(zone_legend)
@@ -358,7 +358,7 @@ def make_rate_figure(rt_sim: pd.DataFrame, minerals: list[str]) -> Figure:
         list(minerals),
         title="Mineral",
         loc="upper right",
-        fontsize=7,
+        fontsize=8,
     )
 
     return fig

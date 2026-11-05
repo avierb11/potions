@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the figure, and every calibrated parameter in a panel below, grouped
   and themed by zone (hydrology in blue, reactive transport in red).
   Pinned (read-only) parameters can be unlocked by double-click to
-  choose an adjustable range; slider changes re-run the hydrology and
+  choose an adjustable range; parameter edits re-run the hydrology and
   reactive-transport models on a background thread.  Start it with the
   `potions-gui` console script; the East River series CSV ships with
   the package, and *Save run* writes a fresh timestamped directory

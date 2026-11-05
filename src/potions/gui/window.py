@@ -14,7 +14,8 @@ stale results if the parameters change mid-run.  Plot-selection
 changes rebuild the zone and rate figures from the last results
 without re-running.
 
-At startup the window restores the most recent saved run: sliders,
+At startup the window restores the most recent saved run: parameter
+values,
 edited bounds, plot selections, the window geometry, and the
 splitter sizes come from the run's ``gui_state.json`` (or, for an
 older run, best-effort from its parameters CSVs), and the figures

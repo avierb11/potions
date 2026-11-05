@@ -50,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     import argparse
     import sys
 
+    from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication
 
     from potions.gui.common import set_rc_params
@@ -78,6 +79,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     set_rc_params()
     app: QApplication = QApplication([])
     app.setStyle("Fusion")
+    # One point larger than the platform default, so the workbench
+    # reads comfortably (no-op for pixel-sized platform fonts, whose
+    # point size reads as -1).
+    font: QFont = app.font()
+    font.setPointSize(font.pointSize() + 1)
+    app.setFont(font)
 
     input_data = load_input_data(csv_path)
     window: MainWindow = MainWindow(
