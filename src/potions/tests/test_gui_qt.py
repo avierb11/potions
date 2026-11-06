@@ -37,7 +37,10 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QGridLayout,
+    QLabel,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -52,6 +55,7 @@ from ..gui.common import (
     HYDRO_THEME,
     METRIC_LABELS,
     METRIC_NAMES,
+    RT_THEME,
     SPECIATION_ZONES,
     TIME_SERIES_OPTIONS,
     param_label,
@@ -226,6 +230,16 @@ def _double_click_event() -> QMouseEvent:
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
     )
+
+
+def _band_of(cell: QWidget) -> str:
+    """
+    The row band a grid cell's stylesheet asks for (its
+    background-color).
+    """
+    match = re.search(r"background-color: (\S+);", cell.styleSheet())
+    assert match is not None, f"No band in {cell.styleSheet()!r}"
+    return match.group(1)
 
 
 class _FakeMessageBox:
@@ -1669,6 +1683,187 @@ class TestParamPanel:
             assert values == ["proportion.1"]
             assert row.value() == pytest.approx(0.3)
             assert panel.param_values()["proportion.1"] == pytest.approx(0.775)
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_cell_layout_and_font(
+        self, qapp: QApplication, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Each cell stacks the symbol above its value in a small font."""
+        panel = self._make_panel(input_data)
+        try:
+            free = panel._rows["proportion.1"]
+            assert isinstance(free, gui_param_panel._FreeCell)
+            layout = free.layout()
+            assert isinstance(layout, QVBoxLayout)
+            assert layout.count() == 2
+            symbol_item = layout.itemAt(0)
+            assert symbol_item is not None
+            assert symbol_item.widget() is free._symbol
+            spin_item = layout.itemAt(1)
+            assert spin_item is not None
+            assert spin_item.widget() is free._spin
+            # The cell and every text widget it holds carry the
+            # small font explicitly (a child with its own
+            # stylesheet would not inherit it).
+            assert (
+                free.font().pointSize() == gui_param_panel._CELL_FONT_SIZE
+            )
+            assert (
+                free._symbol.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+            assert (
+                free._spin.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+            assert free._line_edit is not None
+            assert (
+                free._line_edit.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+            # The spin box is frameless: the cell's border, drawn by
+            # the group, is the cell's only frame, so the grid lines
+            # stay continuous.
+            assert "border: none" in free._spin.styleSheet()
+
+            pinned = panel._rows["ground_hs.alpha"]
+            assert isinstance(pinned, gui_param_panel._PinnedCell)
+            pinned_layout = pinned.layout()
+            assert isinstance(pinned_layout, QVBoxLayout)
+            assert pinned_layout.count() == 2
+            symbol_item = pinned_layout.itemAt(0)
+            assert symbol_item is not None
+            assert symbol_item.widget() is pinned._symbol
+            value_item = pinned_layout.itemAt(1)
+            assert value_item is not None
+            assert value_item.widget() is pinned._value
+            assert (
+                pinned.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+            assert (
+                pinned._symbol.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+            assert (
+                pinned._value.font().pointSize()
+                == gui_param_panel._CELL_FONT_SIZE
+            )
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_grid_cell_banding(
+        self, qapp: QApplication, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Themed cells carry the grid's border and alternating row bands."""
+        panel = self._make_panel(input_data)
+        try:
+            for name, theme in (
+                ("hydrology", HYDRO_THEME),
+                ("reactive", RT_THEME),
+            ):
+                group: gui_param_panel.ThemedGroup = panel._groups[name]
+                assert group.theme == theme
+                band_a, band_b, line = gui_param_panel._GRID_STYLES[
+                    theme.name
+                ]
+
+                cells: list[QWidget] = group.content().findChildren(
+                    gui_param_panel._FreeCell
+                ) + group.content().findChildren(
+                    gui_param_panel._PinnedCell
+                )
+                cells_by_row: dict[int, list[QWidget]] = {}
+                for cell in cells:
+                    row, _col, _span = group._grid_positions[id(cell)]
+                    cells_by_row.setdefault(row, []).append(cell)
+
+                row_bands: list[str] = []
+                for row in sorted(cells_by_row):
+                    row_cells: list[QWidget] = cells_by_row[row]
+                    for cell in row_cells:
+                        assert cell.objectName().startswith("grid_cell_")
+                        assert cell.testAttribute(
+                            Qt.WidgetAttribute.WA_StyledBackground
+                        )
+                        assert f"border: 1px solid {line}" in cell.styleSheet()
+                        assert _band_of(cell) == _band_of(row_cells[0])
+                    row_bands.append(_band_of(row_cells[0]))
+
+                # The cell rows alternate between the theme's two
+                # bands and repeat every two rows; the zone and
+                # mineral headers between the rows do not disturb
+                # the alternation.
+                assert row_bands[0] == band_a
+                for first, second in zip(row_bands, row_bands[1:]):
+                    assert first != second
+                for first, third in zip(row_bands, row_bands[2:]):
+                    assert first == third
+                assert set(row_bands) == {band_a, band_b}
+
+                # The full-width zone headers stay undecorated.
+                headers: list[QLabel] = group.content().findChildren(
+                    gui_param_panel._ZoneHeader
+                )
+                assert len(headers) >= 2
+                for header in headers:
+                    assert header.styleSheet() == ""
+                    assert header.objectName() == ""
+
+            # The single-row groups take the first band.
+            for name in ("proportion", "initial"):
+                single_group: gui_param_panel.ThemedGroup = panel._groups[
+                    name
+                ]
+                assert single_group.theme is not None
+                expected_band: str = gui_param_panel._GRID_STYLES[
+                    single_group.theme.name
+                ][0]
+                single_cells: list[QWidget] = (
+                    single_group.content().findChildren(
+                        gui_param_panel._FreeCell
+                    )
+                    + single_group.content().findChildren(
+                        gui_param_panel._PinnedCell
+                    )
+                )
+                assert single_cells
+                for single_cell in single_cells:
+                    assert _band_of(single_cell) == expected_band
+
+            # The neutral group's widgets keep the default look.
+            box: QCheckBox = panel._time_series_boxes["Streamflow"]
+            assert box.styleSheet() == ""
+            assert box.objectName() == ""
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_unlock_restyles_cell(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unlocked parameter takes over the row's band and border."""
+        panel = self._make_panel(input_data)
+        try:
+            key: str = "ground_hs.alpha"
+            old = panel._rows[key]
+            assert isinstance(old, gui_param_panel._PinnedCell)
+            old_band: str = _band_of(old)
+            _install_bounds_stub(monkeypatch, (0.25, 1.75))
+            qapp.sendEvent(old._value, _double_click_event())
+            new_cell = panel._rows[key]
+            assert isinstance(new_cell, gui_param_panel._FreeCell)
+            assert new_cell.objectName().startswith("grid_cell_")
+            assert new_cell.testAttribute(
+                Qt.WidgetAttribute.WA_StyledBackground
+            )
+            assert _band_of(new_cell) == old_band
         finally:
             panel.deleteLater()
             _pump()

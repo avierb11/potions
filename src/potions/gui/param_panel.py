@@ -14,6 +14,11 @@ A parameter whose bounds are identical is pinned and shown as a
 read-only cell; double-clicking the cell opens a dialog that gives
 it a range, converting it into a free cell.
 
+In a themed group the cells form a compact grid: each cell shows
+the parameter's symbol above its value (or pinned value) in a
+small font, and is drawn with a thin border and an alternating
+row shading, so the grid reads as a table of cells.
+
 The "Plots" group carries the checkboxes that select the series
 drawn in each of the three figures (the time-series figure's
 streamflow and river concentrations first, then the species, zones,
@@ -31,7 +36,7 @@ parameters to the panel without a re-run.
 from typing import Final
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -90,17 +95,55 @@ _BOUND_DECIMALS: Final[int] = 6
 # zone carries), and a full-width header (a zone or mineral name)
 # spans all of them.
 _GRID_COLUMNS: Final[int] = 5
+
+# The point size of a parameter cell's font: the cells form a
+# compact grid of small boxes, so each cell sets a small font of
+# its own (the group titles and the zone / mineral headers keep
+# the default font).
+_CELL_FONT_SIZE: Final[int] = 8
+
+# The decoration of a themed group's cell grid, keyed by the
+# theme's name: (the band of the even cell rows, the band of the
+# odd cell rows, the color of the 1px border that draws the
+# grid).  The two bands are close light shades — one near white,
+# one a slightly darker variant of the theme's light background —
+# tinted to match the group (blue-gray for the hydro groups, warm
+# for the reactive-transport groups).  A new `Theme` must be
+# registered here.
+_GRID_STYLES: Final[dict[str, tuple[str, str, str]]] = {
+    HYDRO_THEME.name: ("#F7FAFC", "#E2EBF5", "#C6D5E4"),
+    RT_THEME.name: ("#FEF9F8", "#F6E1DD", "#E2C6C1"),
+}
+
+
+def _cell_font() -> QFont:
+    """
+    The compact font of a parameter cell's text (see
+    `_CELL_FONT_SIZE`).
+
+    A child widget that carries its own stylesheet does not
+    inherit the font of its parent, so each cell sets this font
+    explicitly on itself and on every text widget it holds.
+    """
+    font: QFont = QFont()
+    font.setPointSize(_CELL_FONT_SIZE)
+    return font
 # =================== #
 
 
 # ==== Widgets ==== #
 class _FreeCell(QWidget):
     """
-    A single free-parameter cell: the parameter's symbol and a spin
-    box holding its value.
+    A single free-parameter cell: the parameter's symbol above a
+    spin box holding its value.
 
-    The spin box is clamped to the cell's (possibly user-edited)
-    range, and its decimal precision and step width follow the range
+    The cell sets a small font of its own (`_CELL_FONT_SIZE`), so
+    the grid of cells reads as compact data, and the spin box is
+    frameless: the group that hosts the cell draws the grid (a
+    thin border and an alternating row shading, see
+    `ThemedGroup`), which is the cell's only frame.  The spin box
+    is clamped to the cell's (possibly user-edited) range, and its
+    decimal precision and step width follow the range
     (`bound_decimals`).  The symbol carries the parameter's full
     label as its tooltip, so the cell shows only the symbol while
     the full name is available on hover.  Double-clicking anywhere
@@ -143,28 +186,48 @@ class _FreeCell(QWidget):
         self._bounds: tuple[float, float] = bounds
         self._value: float = value
 
-        layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 1, 4, 1)
-        layout.setSpacing(2)
+        # A small font of the cell's own: the grid reads as
+        # compact data (see the class docstring).  It is set on
+        # the cell and on each of the cell's text widgets, since
+        # a child that carries its own stylesheet does not
+        # inherit the parent's font.
+        font: QFont = _cell_font()
+        self.setFont(font)
+
+        # The symbol above the value, each on its own line.
+        layout: QVBoxLayout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(1)
 
         self._symbol: QLabel = QLabel(symbol)
         self._symbol.setToolTip(label)
         self._symbol.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self._symbol.setMinimumWidth(40)
         if theme is not None:
             self._symbol.setStyleSheet(f"color: {theme.accent};")
-        layout.addWidget(self._symbol, 1)
+        self._symbol.setFont(font)
+        layout.addWidget(self._symbol)
 
+        # Frameless: the cell's border, drawn by the group, is the
+        # cell's only frame, so the grid lines stay continuous.
         self._spin: QDoubleSpinBox = QDoubleSpinBox()
         self._spin.setToolTip(label)
         self._spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._spin.setStyleSheet(
+            "border: none; background: transparent;"
+            "QLineEdit { background: transparent; }"
+        )
+        self._spin.setFont(font)
         self._spin.valueChanged.connect(self._on_value_edited)
-        layout.addWidget(self._spin, 1)
+        layout.addWidget(self._spin)
 
         self._line_edit: QLineEdit | None = self._spin.lineEdit()
         if self._line_edit is not None:
+            # The line edit was built with the default font before
+            # the spin box's font was set, so it is given the
+            # cell's font explicitly.
+            self._line_edit.setFont(font)
             self._line_edit.installEventFilter(self)
 
         self.set_bounds(*bounds)
@@ -270,13 +333,16 @@ class _PinnedCell(QWidget):
     identical so there is nothing to adjust.
 
     The value is shown in a compact, disabled (grayed) label
-    rather than a spin box: a disabled spin box's frame and
-    buttons take up most of a narrow grid cell and would clip the
-    symbol, so the fixed value is plain text (see
+    directly below the symbol, rather than in a spin box: a
+    disabled spin box's frame and buttons take up most of a narrow
+    grid cell, so the fixed value is plain text (see
     `_compact_value`).  The symbol carries the parameter's full
     label as its tooltip.  Double-clicking the cell emits
     `unlock_requested`, which the panel answers by opening the
     range dialog and converting the cell into a free cell.
+
+    Like a free cell, the cell sets a small font of its own
+    (`_CELL_FONT_SIZE`); the group that hosts it draws the grid.
 
     Args:
         key: The parameter's bounds key.
@@ -300,29 +366,38 @@ class _PinnedCell(QWidget):
         super().__init__(parent)
         self._key: str = key
 
-        layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 1, 4, 1)
-        layout.setSpacing(2)
+        # A small font of the cell's own: the grid reads as
+        # compact data (see the class docstring).  It is set on
+        # the cell and on each of the cell's text widgets, since
+        # a child that carries its own stylesheet does not
+        # inherit the parent's font.
+        font: QFont = _cell_font()
+        self.setFont(font)
+
+        # The symbol above the value, each on its own line.
+        layout: QVBoxLayout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(1)
 
         self._symbol: QLabel = QLabel(symbol)
         self._symbol.setToolTip(label)
         self._symbol.setStyleSheet("color: gray;")
-        self._symbol.setMinimumWidth(40)
-        layout.addWidget(self._symbol, 1)
+        self._symbol.setFont(font)
+        layout.addWidget(self._symbol)
 
         # A disabled label, not a spin box (see the class
         # docstring).  It is disabled so that a double-click on
         # the value is forwarded to this cell, as Qt does for
-        # disabled children.
+        # disabled children.  The label spans the cell's full
+        # width, and its right alignment keeps the value at the
+        # cell's right edge, as in a free cell.
         self._value: QLabel = QLabel(_compact_value(value))
         self._value.setStyleSheet("color: gray;")
+        self._value.setFont(font)
         self._value.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._value.setEnabled(False)
-        # No stretch: the label keeps its natural width and the
-        # symbol takes all of the slack, so the value sits at the
-        # cell's right edge, as in a free cell.
         layout.addWidget(self._value)
 
         self.setToolTip(
@@ -489,6 +564,12 @@ class ThemedGroup(QWidget):
     one column, and a header added with `add_header` starts a new
     row and spans all of the columns.
 
+    In a themed grid group, every cell is drawn as part of a
+    visible grid: a thin border and an alternating row shading,
+    tinted by the theme (see `_GRID_STYLES`), while the full-width
+    headers stay undecorated.  A neutral group's cells keep the
+    default look.
+
     Args:
         title: The title shown in the group's header.
         theme: The theme to apply, or None for the neutral group.
@@ -630,6 +711,10 @@ class ThemedGroup(QWidget):
         Place `widget` in the next free grid slot, spanning `span`
         columns, and advance the slot pointer.
 
+        In a themed group, a cell (a widget spanning fewer than all
+        the columns) is also drawn with the grid's border and the
+        band of its cell row (see `_style_grid_cell`).
+
         A single stretch row is kept after the last placed row, so
         the content stays pinned to the top of the group.
 
@@ -643,18 +728,76 @@ class ThemedGroup(QWidget):
         col: int = self._grid_pos % columns
         grid.addWidget(widget, row, col, 1, span)
         self._grid_positions[id(widget)] = (row, col, span)
+        if span < columns:
+            self._style_grid_cell(widget, row)
         self._grid_pos += span
         if self._grid_stretch_row <= row:
             grid.setRowStretch(self._grid_stretch_row, 0)
             self._grid_stretch_row = row + 1
             grid.setRowStretch(self._grid_stretch_row, 1)
 
+    def _cell_row_parity(self, row: int) -> int:
+        """
+        The alternating band of the cell row `row`: 0 for the
+        group's first cell row, 1 for its second, and so on.
+
+        Only rows that hold cells are counted, so the full-width
+        zone and mineral headers do not disturb the alternation.
+
+        Args:
+            row: The grid row of the cell to look up.
+
+        Returns:
+            The row's band: 0 (the first band) or 1 (the second).
+        """
+        assert self._grid_columns is not None
+        columns: int = self._grid_columns
+        cell_rows_above: int = len(
+            {
+                position[0]
+                for position in self._grid_positions.values()
+                if position[0] < row and position[2] < columns
+            }
+        )
+        return cell_rows_above % 2
+
+    def _style_grid_cell(self, widget: QWidget, row: int) -> None:
+        """
+        Draw a cell of a themed grid: a 1px border and the band of
+        its cell row (see `_GRID_STYLES`).
+
+        The rule is scoped to the cell's object name, so it does
+        not cascade into the cell's children (the symbol label and
+        the spin box keep their own styles).  Cells of a neutral
+        group are left undecorated, as are the full-width headers.
+
+        Args:
+            widget: The cell to draw.
+            row: The grid row the cell occupies.
+        """
+        if self._theme is None:
+            return
+        band_a, band_b, line = _GRID_STYLES[self._theme.name]
+        band: str = band_a if self._cell_row_parity(row) == 0 else band_b
+        object_name: str = f"grid_cell_{id(widget)}"
+        widget.setObjectName(object_name)
+        widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        widget.setStyleSheet(
+            f"#{object_name} {{"
+            f" background-color: {band};"
+            f" border: 1px solid {line};"
+            " }"
+        )
+
     def replace_widget(self, old: QWidget, new: QWidget) -> None:
         """
         Replace `old` with `new` at the same position in the content.
 
         The old widget is removed from the layout and scheduled for
-        deletion.
+        deletion.  In a themed grid group, a replacement cell is
+        re-drawn with the grid's border and the band of the row it
+        takes over, so an unlocked parameter joins the grid like
+        any other cell.
 
         Args:
             old: The widget to replace (a member of the content).
@@ -666,6 +809,7 @@ class ThemedGroup(QWidget):
         """
         if isinstance(self._content_layout, QGridLayout):
             assert self._grid_columns is not None
+            columns: int = self._grid_columns
             grid: QGridLayout = self._content_layout
             position: tuple[int, int, int] | None = (
                 self._grid_positions.pop(id(old), None)
@@ -680,6 +824,8 @@ class ThemedGroup(QWidget):
             old.deleteLater()
             grid.addWidget(new, row, col, 1, span)
             self._grid_positions[id(new)] = (row, col, span)
+            if span < columns:
+                self._style_grid_cell(new, row)
         else:
             assert isinstance(self._content_layout, QVBoxLayout)
             column: QVBoxLayout = self._content_layout
@@ -737,16 +883,18 @@ class ParamPanel(QScrollArea):
     user switches back to full mode).
 
     The four parameter groups lay their cells out in a five-column
-    grid: each cell (the symbol and spin box of one parameter) takes
-    one column, so a row holds five, the most parameters any zone
-    carries, and a zone or mineral header spans all of them.  Five
-    is the densest grid that still fits the widest symbol and spin
-    box at the panel's normal width; the *Plots* group's checkboxes
-    take two per row.  Free parameters (distinct bounds) are
-    editable spin-box cells; degenerate parameters (identical
-    bounds) are pinned and shown as read-only cells that unlock on
-    double-click.  A free cell's range can be re-edited by
-    double-clicking the cell.
+    grid: each cell (the symbol above the spin box of one
+    parameter) takes one column, so a row holds five, the most
+    parameters any zone carries, and a zone or mineral header spans
+    all of them.  Five is the densest grid that still fits the
+    widest symbol and spin box at the panel's normal width; the
+    *Plots* group's checkboxes take two per row.  In a themed
+    group the cells are drawn as a visible grid (a thin border and
+    an alternating row shading; see `ThemedGroup`).  Free
+    parameters (distinct bounds) are editable spin-box cells;
+    degenerate parameters (identical bounds) are pinned and shown
+    as read-only cells that unlock on double-click.  A free cell's
+    range can be re-edited by double-clicking the cell.
 
     Signals:
         value_changed: Emitted with the parameter key whenever a
