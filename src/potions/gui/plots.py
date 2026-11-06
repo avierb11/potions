@@ -2,7 +2,7 @@
 The figures and the objective table of the East River
 lateral-model calibration GUI.
 
-Four figures:
+Five figures:
 
 1. *Streamflow and river concentrations* — whichever of the
    streamflow and the river concentrations the selection asks for
@@ -32,7 +32,8 @@ Four figures:
    ``max_water`` bounds) in the bottom panel, stacked vertically.  The
    zone and species legends are stacked above the figure.  The color
    encodes the zone (the project's lateral-model palette) and the
-   linestyle encodes the species.
+   linestyle encodes the species.  A hydrology-only run (no
+   reactive-transport results) carries the storage panel alone.
 
 3. *Mineral reaction rates* — the simulated reaction rate of every
    selected mineral in every zone that carries the mineral's rate
@@ -48,6 +49,13 @@ Four figures:
    above, on a scale symmetric about the largest absolute finite
    value) with a color bar and a caption noting the difference
    method and the CSV the matrix was saved to.
+
+5. *Line search* — the value profile of a finished line search
+   job (the window's *Line search* button): the searched
+   objective's value at every evaluated step ``t`` of the ascent
+   line (one marker per point), with the best point (the largest
+   finite value) marked in red, and a caption noting the search
+   and the CSV the profile was saved to.
 
 The first three figures show the record from the start of water
 year 2015 (``potions.gui.common.PLOT_START``) onward, so the
@@ -272,14 +280,13 @@ def make_time_series_figure(
             loc="upper center",
             bbox_to_anchor=(0.5, 1.02),
             ncol=5,
-            fontsize=9,
         )
 
     return fig
 
 
 def make_zone_figure(
-    rt_sim: pd.DataFrame,
+    rt_sim: pd.DataFrame | None,
     hydro_sim: pd.DataFrame,
     species: list[str],
     zones: list[str],
@@ -300,13 +307,17 @@ def make_zone_figure(
     and the linestyle encodes the species (the storage panel carries
     one line per zone, so it uses a single linestyle).
 
+    With `rt_sim` as None (a hydrology-only run), the figure
+    carries the storage panel alone, in its own smaller figure.
+
     A previous run's results, when the overlay frames are given, are
     drawn first and faintly (half transparent, unlabeled), so the
     current run's series stay on top; a zone or species the previous
     simulation does not carry is skipped.
 
     Args:
-        rt_sim: The reactive transport simulation DataFrame.
+        rt_sim: The reactive transport simulation DataFrame; None
+            for a hydrology-only run (the storage panel alone).
         hydro_sim: The hydrology simulation DataFrame, for the
             per-zone storage columns (``s_{zone}``, in millimeters).
         species: The network species to plot.
@@ -320,23 +331,71 @@ def make_zone_figure(
     Returns:
         The completed figure.
     """
-    fig: Figure = Figure(figsize=(15, 9))
-    conc_ax: Axes = fig.add_subplot(2, 1, 1)
-    storage_ax: Axes = fig.add_subplot(2, 1, 2)
-
     # Clip to the first plotted water year; see potions.gui.common.PLOT_START.
-    rt_plot: pd.DataFrame = rt_sim.loc[rt_sim.index >= PLOT_START]
     hydro_plot: pd.DataFrame = hydro_sim.loc[hydro_sim.index >= PLOT_START]
-    overlay_rt_plot: pd.DataFrame | None = (
-        overlay_rt_sim.loc[overlay_rt_sim.index >= PLOT_START]
-        if overlay_rt_sim is not None
-        else None
-    )
     overlay_hydro_plot: pd.DataFrame | None = (
         overlay_hydro_sim.loc[overlay_hydro_sim.index >= PLOT_START]
         if overlay_hydro_sim is not None
         else None
     )
+
+    if rt_sim is None:
+        # A hydrology-only run has no reactive-transport
+        # simulation: the figure carries the storage panel alone.
+        fig: Figure = Figure(figsize=(15, 5))
+        storage_ax: Axes = fig.gca()
+
+        # The previous run's storages, drawn first (behind) and
+        # faintly, without labels (they stay out of the legend).
+        if overlay_hydro_plot is not None:
+            for zone in zones:
+                overlay_storage: str = f"s_{zone}"
+                if overlay_storage in overlay_hydro_plot.columns:
+                    storage_ax.plot(
+                        overlay_hydro_plot.index,
+                        overlay_hydro_plot[overlay_storage],
+                        color=ZONE_COLORS[zone],
+                        alpha=_OVERLAY_ALPHA,
+                        linewidth=1,
+                    )
+
+        for zone in zones:
+            storage_ax.plot(
+                hydro_plot.index,
+                hydro_plot[f"s_{zone}"],
+                color=ZONE_COLORS[zone],
+                linewidth=1,
+            )
+
+        storage_ax.set_title("Storage")
+        storage_ax.set_ylabel("Storage (mm)")
+        storage_ax.set_xlim(PLOT_START_DATE, hydro_plot.index.max())
+        fig.subplots_adjust(left=0.07, right=0.96, bottom=0.11, top=0.8)
+
+        zone_handles: list[Line2D] = [
+            Line2D([], [], color=ZONE_COLORS[zone], linewidth=2) for zone in zones
+        ]
+        fig.legend(
+            zone_handles,
+            [ZONE_LABELS[zone] for zone in zones],
+            title="Zone",
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.93),
+            ncol=max(len(zones), 1),
+        )
+        return fig
+
+    # The reactive-transport record, clipped to the same start.
+    rt_plot: pd.DataFrame = rt_sim.loc[rt_sim.index >= PLOT_START]
+    overlay_rt_plot: pd.DataFrame | None = (
+        overlay_rt_sim.loc[overlay_rt_sim.index >= PLOT_START]
+        if overlay_rt_sim is not None
+        else None
+    )
+
+    fig = Figure(figsize=(15, 9))
+    conc_ax: Axes = fig.add_subplot(2, 1, 1)
+    storage_ax = fig.add_subplot(2, 1, 2)
 
     # The previous run's series, drawn first (behind) and faintly,
     # without labels (they stay out of the legend).
@@ -358,7 +417,7 @@ def make_zone_figure(
                     )
     if overlay_hydro_plot is not None:
         for zone in zones:
-            overlay_storage: str = f"s_{zone}"
+            overlay_storage = f"s_{zone}"
             if overlay_storage in overlay_hydro_plot.columns:
                 storage_ax.plot(
                     overlay_hydro_plot.index,
@@ -398,7 +457,7 @@ def make_zone_figure(
     # so the legends are anchored to the figure instead.
     fig.subplots_adjust(left=0.07, right=0.96, bottom=0.07, top=0.76)
 
-    zone_handles: list[Line2D] = [
+    zone_handles = [
         Line2D([], [], color=ZONE_COLORS[zone], linewidth=2) for zone in zones
     ]
     fig.legend(
@@ -408,7 +467,6 @@ def make_zone_figure(
         loc="lower center",
         bbox_to_anchor=(0.5, 0.93),
         ncol=max(len(zones), 1),
-        fontsize=9,
     )
 
     species_handles: list[Line2D] = [
@@ -428,7 +486,6 @@ def make_zone_figure(
         loc="lower center",
         bbox_to_anchor=(0.5, 0.83),
         ncol=max(len(species), 1),
-        fontsize=9,
     )
 
     return fig
@@ -535,7 +592,6 @@ def make_rate_figure(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.18),
         ncol=max(len(plot_zones), 1),
-        fontsize=8,
     )
     # Keep the zone legend while adding the mineral legend on top.
     ax.add_artist(zone_legend)
@@ -555,7 +611,6 @@ def make_rate_figure(
         list(minerals),
         title="Mineral",
         loc="upper right",
-        fontsize=8,
     )
 
     return fig
@@ -639,7 +694,11 @@ def make_gradient_figure(table: pd.DataFrame, note: str) -> Figure:
         The figure with the shaded matrix and its color bar.
     """
     fig: Figure = Figure(figsize=(15, 9))
-    fig.subplots_adjust(left=0.13, bottom=0.16, right=0.85, top=0.9)
+    # The wide left margin leaves room for the 12-point objective
+    # row labels ("Streamflow: LogNSE" and its kin) without clipping
+    # the figure's left edge; the 55 rotated column labels still fit
+    # at this width with no adjacent overlap.
+    fig.subplots_adjust(left=0.16, bottom=0.16, right=0.85, top=0.9)
     ax: Axes = fig.gca()
 
     values: np.ndarray = table.to_numpy(dtype=float)
@@ -655,15 +714,13 @@ def make_gradient_figure(table: pd.DataFrame, note: str) -> Figure:
         interpolation="nearest",
     )
     ax.set_xticks(np.arange(values.shape[1]))
-    ax.set_xticklabels(
-        [str(column) for column in table.columns], rotation=90, fontsize=6
-    )
+    ax.set_xticklabels([str(column) for column in table.columns], rotation=90)
     ax.set_yticks(np.arange(values.shape[0]))
-    ax.set_yticklabels([str(row) for row in table.index], fontsize=7)
+    ax.set_yticklabels([str(row) for row in table.index])
     ax.set_title("Gradients of the objective functions")
 
     colorbar: Colorbar = fig.colorbar(image, ax=ax, fraction=0.06, pad=0.02)
-    colorbar.set_label("gradient", fontsize=8)
+    colorbar.set_label("gradient")
 
     fig.text(
         0.01,
@@ -672,7 +729,73 @@ def make_gradient_figure(table: pd.DataFrame, note: str) -> Figure:
         ha="left",
         va="bottom",
         color="gray",
-        fontsize=8,
+    )
+
+    return fig
+
+
+# ==== Line search figure ==== #
+
+
+def make_line_search_figure(
+    profile: pd.DataFrame,
+    target: str,
+    metric: str,
+    note: str,
+) -> Figure:
+    """
+    The line search's value profile, as a page of the figure panel.
+
+    The page draws the searched objective's value at every
+    evaluated point of the ascent line: the profile's ``value``
+    column against the step ``t`` on the horizontal axis, one
+    marker per point.  The point with the largest finite value is
+    marked in red as the best one, and the job's note is printed
+    under the panel.
+
+    Args:
+        profile: The value profile, one row per evaluated point:
+            the step ``t`` as index, the objective's value in the
+            ``value`` column.
+        target: The objective's target (measured series) name, for
+            the title.
+        metric: The objective's metric display label, for the
+            title and the vertical axis.
+        note: The caption printed under the panel (the search and
+            the path of the saved CSV).
+
+    Returns:
+        The figure with the profile, its best point, and its note.
+    """
+    fig: Figure = Figure(figsize=(15, 9))
+    fig.subplots_adjust(left=0.08, right=0.97, bottom=0.14, top=0.9)
+    ax: Axes = fig.gca()
+
+    t: np.ndarray = profile.index.to_numpy()
+    values: np.ndarray = profile["value"].to_numpy(dtype=np.float64)
+    best_index: int = int(np.nanargmax(values))
+
+    ax.plot(t, values, color="k", linewidth=1, marker="o", markersize=3)
+    ax.plot(
+        [t[best_index]],
+        [values[best_index]],
+        color="r",
+        marker="o",
+        markersize=7,
+        label="best",
+    )
+    ax.set_title(f"Line search — {target}: {metric}")
+    ax.set_xlabel("t")
+    ax.set_ylabel(metric)
+    ax.legend(loc="best")
+
+    fig.text(
+        0.01,
+        0.01,
+        note,
+        ha="left",
+        va="bottom",
+        color="gray",
     )
 
     return fig

@@ -1,12 +1,15 @@
 """
 The figure panel of the East River lateral-model calibration GUI.
 
-Holds the model's three figures (streamflow and river concentrations,
-zone concentrations and storages, and mineral reaction rates) in a
-single panel: only one figure is visible at a time, and the
-previous / next buttons of the panel's header — or the main window's
-Left / Right arrow keys, which are wired to the same handlers — flip
-between the pages.
+Holds the model's figures — the streamflow and river
+concentrations, the zone concentrations and storages, and the
+mineral reaction rates in full mode, the streamflow and zone
+storages in hydrology-only mode, plus a gradient job's matrix and
+a line search's value profile as extra pages when those jobs have
+finished — in a single panel: only one figure is visible at a
+time, and the previous / next buttons of the panel's header — or
+the main window's Left / Right arrow keys, which are wired to the
+same handlers — flip between the pages.
 
 Each figure is attached to a matplotlib Qt canvas.  The package's
 rcParams set a publication dpi (300), which is far too large for an
@@ -16,7 +19,9 @@ panel size through matplotlib's built-in resize handling, so the
 visible figure always fills the panel.
 """
 
+import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -45,7 +50,9 @@ class FigurePanel(QWidget):
     A stacked widget of matplotlib canvases with a header carrying
     the current page's title, a ``n / N`` counter, and previous /
     next buttons.  The pages wrap around, so the last page's next
-    button returns to the first.
+    button returns to the first.  `save_pages` writes every page
+    as a PNG into a directory, as the *Save run* action does into
+    the run directory's ``figures`` subfolder.
 
     Args:
         parent: The parent widget; defaults to None.
@@ -123,6 +130,38 @@ class FigurePanel(QWidget):
         # setCurrentIndex is often a no-op: refresh the header
         # explicitly so it always matches the new page list.
         self._refresh_header()
+
+    def save_pages(self, directory: Path) -> list[Path]:
+        """
+        Save every page's figure as a PNG into the given directory.
+
+        Each figure is saved as plotted (the mode's own figures,
+        and the gradient and line search pages when those jobs have
+        finished), at `CANVAS_DPI`, named after the page's title:
+        anything outside ``0-9A-Za-z`` collapses to a single
+        underscore and the leading and trailing underscores are
+        stripped (a title that sanitizes to nothing falls back to
+        the page's position).
+
+        Args:
+            directory: The directory to write the PNGs into (the
+                run directory's ``figures`` subfolder); created
+                when missing.
+
+        Returns:
+            The paths of the written files, in page order.
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        for index, canvas in enumerate(self._canvases):
+            name: str = re.sub(r"[^0-9A-Za-z]+", "_", self._titles[index])
+            name = name.strip("_")
+            if not name:
+                name = f"figure_{index + 1}"
+            path: Path = directory / f"{name}.png"
+            canvas.figure.savefig(path, dpi=CANVAS_DPI)
+            paths.append(path)
+        return paths
 
     def show_page(self, index: int) -> None:
         """

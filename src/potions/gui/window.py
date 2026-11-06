@@ -1,14 +1,15 @@
 """
 The main window of the East River lateral-model calibration GUI.
 
-The window stacks two splitter sections: the figure panel (the
-model's figures, one visible at a time, flipped by the panel's
-arrow buttons or the main window's Left / Right keys: the three
-full-mode figures, or the single streamflow figure in
-hydrology-only mode, plus the gradient job's matrix as an extra
-page when one has finished) and, below it, an inner splitter
-holding the per-run objective-function table on the left and the
-parameter panel on the right.
+The window stacks two sections: the figure panel (the model's
+figures, one visible at a time, flipped by the panel's arrow
+buttons or the main window's Left / Right keys: the three
+full-mode figures, or the streamflow and zone-storage figures in
+hydrology-only mode, plus the gradient job's matrix and a line
+search's value profile as extra pages when those jobs have
+finished) and, below it, a row holding the fixed-size per-run
+objective-function table on the left and the parameter panel on
+the right.
 
 Parameter changes re-run the models on a worker thread (a short
 debounce covers a drag or a keyboard step) and refresh the figures
@@ -21,8 +22,9 @@ wait for one manual run from the *Run model* button.  The header's
 *Hydrology only* checkbox (off by default) switches the run to
 hydrology-only mode: only the hydrology model is run, scored
 against the measured streamflow, the reactive-transport parameter
-groups are hidden, the figures reduce to the single streamflow
-figure, and the objective table carries only the streamflow column.
+groups are hidden, the figures reduce to the streamflow figure
+and a figure of each zone's water storage, and the objective
+table carries only the streamflow column.
 
 The header's *Gradients* button differentiates every objective
 function with respect to every free parameter (a parameter whose
@@ -34,6 +36,19 @@ through the models on a worker thread.  The resulting matrix, one
 row per objective function and one column per free parameter, is
 written to a ``gradients_YYYYMMDD_HHMMSS.csv`` file in the results
 directory and drawn as an extra page of the figure panel.
+
+The header's *Line search* button follows the steepest ascent of
+one objective function — chosen from a menu listing the
+objectives the current results report a finite value for, among
+the metrics with 1 as their optimal value — from the current
+parameters: the direction comes from the last gradient job's
+matrix when one has run at these parameters, or from the same
+central differences otherwise, and the objective is then
+evaluated at 25 points on the ascent line, all inside the current
+parameter bounds.  The best point's parameters are adopted into
+the panel, and the value profile is written to a
+``line_search_YYYYMMDD_HHMMSS.csv`` file in the results directory
+and drawn as an extra page of the figure panel.
 
 The parameter panel's *History* group lists the previous runs —
 the saved run directories and this session's runs, newest first —
@@ -51,13 +66,14 @@ are built straight from the run's saved simulation output, so the
 window opens without a re-run.  With no saved run it starts from
 the default parameters and runs the models once in the background.
 
-A *Save run* click writes the existing per-run model output plus a
-``gui_state.json`` capturing the session state, so the next start
-restores exactly what the user saw.  With the header's *Save run
-history* checkbox on, every finished run also appends one
-abbreviated record (timestamp, mode, parameter values, objective
-values) to a ``gui_run_history.jsonl`` file in the results
-directory.
+A *Save run* click writes the existing per-run model output, the
+figures as plotted (PNGs into the run directory's ``figures``
+subfolder), and a ``gui_state.json`` capturing the session state,
+so the next start restores exactly what the user saw.  With the
+header's *Save run history* checkbox on, every finished run also
+appends one abbreviated record (timestamp, mode, parameter values,
+objective values) to a ``gui_run_history.jsonl`` file in the
+results directory.
 """
 
 import math
@@ -66,6 +82,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from io import TextIOBase
 from pathlib import Path
 from typing import Any, Final
@@ -75,6 +92,7 @@ import pandas as pd
 import potions as pt
 from matplotlib.figure import Figure
 from potions.hydro_model import HydrologicalModel
+from potions.reactive_transport.rt_zone import WaterVolumeError
 from potions.result_saving import save_hydro_run, save_model_run
 from PySide6.QtCore import (
     QAbstractTableModel,
@@ -83,6 +101,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QPersistentModelIndex,
     QRect,
+    QSize,
     QThread,
     Qt,
     QTimer,
@@ -95,6 +114,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -123,10 +143,16 @@ from potions.gui.gradients import (
     objective_vector,
     write_gradient_csv,
 )
+from potions.gui.line_search import (
+    expand_direction,
+    feasible_t_interval,
+    write_line_search_csv,
+)
 from potions.gui.param_panel import ParamPanel
 from potions.gui.plots import (
     build_objective_table,
     make_gradient_figure,
+    make_line_search_figure,
     make_rate_figure,
     make_time_series_figure,
     make_zone_figure,
@@ -156,20 +182,44 @@ _DEBOUNCE_MS: Final[int] = 400
 # a run is in flight.
 _ELAPSED_MS: Final[int] = 200
 
-# The fixed width (px) of the indeterminate progress bar.
-_PROGRESS_WIDTH: Final[int] = 120
-
 # The initial window size (px); a restored window geometry replaces
 # it before the window is shown.
 _INITIAL_SIZE: Final[tuple[int, int]] = (1200, 900)
 
-# The initial sizes (px) of the window's two splitters, in order:
-# the figure and the lower (table-and-parameters) row of the main
-# vertical splitter, then the objective-table and parameter-panel
-# widths of the inner horizontal splitter.  Qt scales each pair
+# The initial sizes (px) of the main vertical splitter: the figure
+# and the lower (table-and-parameters) row.  Qt scales the pair
 # proportionally to the splitter's size on the first layout, and a
 # restored session state replaces them with its own.
-_INITIAL_SPLIT_SIZES: Final[tuple[int, int, int, int]] = (350, 530, 300, 880)
+_INITIAL_SPLIT_SIZES: Final[tuple[int, int]] = (350, 530)
+
+# The status label's width limits (px): an unbounded label would
+# grow the window's minimum width with every status message, so the
+# label reports a small constant minimum hint (its text is clipped
+# when the window is narrow; the full text stays in the tooltip)
+# and is capped at the maximum width.
+_STATUS_MIN_WIDTH: Final[int] = 80
+_STATUS_MAX_WIDTH: Final[int] = 350
+
+# The fixed objective panel's contents margins (px) in the order
+# left, top, right, bottom: the panel is sized exactly to fit its
+# heading and table plus these margins, so they are the only
+# padding around them.
+_OBJECTIVE_PANEL_MARGINS: Final[tuple[int, int, int, int]] = (12, 4, 12, 8)
+
+# The vertical spacing (px) between the fixed objective panel's
+# heading and its table.
+_OBJECTIVE_PANEL_SPACING: Final[int] = 4
+
+# The number of points the line search evaluates on the ascent
+# line, between the feasible interval's ends.
+_LINE_SEARCH_POINTS: Final[int] = 25
+
+# The metrics the line search can optimize: the metrics with 1 as
+# their optimal value, so the search maximizes them (minimizing
+# ``1 - value`` would find the same best point).
+_LINE_SEARCH_METRICS: Final[frozenset[str]] = frozenset(
+    {"KGE", "LogKGE", "NSE", "LogNSE"}
+)
 
 # The figure panel's minimum height (px): even a restored state or a
 # manual drag can then never squash the plot into a sliver.
@@ -244,12 +294,16 @@ class _RunOutcome:
             failed.
         error: A one-line description of the failure, or None.
         elapsed_seconds: The wall-clock duration of the run.
+        exception: The failure's exception, or None on success; the
+            window shows a water-volume failure as a modal dialog
+            and keeps the exception for that.
     """
 
     generation: int
     results: GuiRunResults | None
     error: str | None
     elapsed_seconds: float
+    exception: Exception | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,18 +393,25 @@ class _RunWorker(QThread):
         started: float = time.perf_counter()
         results: GuiRunResults | None = None
         error: str | None = None
+        exception: Exception | None = None
         try:
             if self._mode == MODE_HYDRO:
                 results = arr_to_hydro_results(self._x, self._input_data)
             else:
                 results = arr_to_results(self._x, self._input_data)
         except Exception as err:
+            results = None
+            exception = err
             error = f"{type(err).__name__}: {err}"
         finally:
             sys.stdout = real_stdout
         self.finished_run.emit(
             _RunOutcome(
-                self._generation, results, error, time.perf_counter() - started
+                self._generation,
+                results,
+                error,
+                time.perf_counter() - started,
+                exception,
             )
         )
 
@@ -411,6 +472,10 @@ class _GradientSnapshot:
     Attributes:
         table: The difference matrix (the objective labels as
             index, the parameter keys as columns).
+        base_x: The base parameter vector the job differentiated
+            around: the line search reuses it as its own base
+            (with the selected row as its direction) when the
+            current parameters still match it.
         mode: The run mode the job's points ran in (`MODE_FULL` or
             `MODE_HYDRO`), shown in the page's title.
         csv_path: The path of the written matrix CSV, quoted in
@@ -420,6 +485,7 @@ class _GradientSnapshot:
     """
 
     table: pd.DataFrame
+    base_x: np.ndarray
     mode: str
     csv_path: Path
     elapsed_seconds: float
@@ -582,6 +648,372 @@ class _GradientWorker(QThread):
         )
 
 
+# ==== Line search ==== #
+@dataclass(frozen=True, slots=True)
+class _LineSearchOutcome:
+    """
+    The outcome of one finished line search job.
+
+    A successful job carries the objective's value profile (one
+    row per evaluated point: the step ``t`` as index, the
+    objective's value and every free parameter's value as
+    columns), the best point's parameter vector and results (so
+    the window can adopt them), and the path of the CSV the
+    profile was written to; a failed job carries the error
+    instead, with the rest None.  The objective's target, metric,
+    and the job's mode ride on every outcome: the window shows
+    them in the completion status line and the page's title, and
+    it needs the mode to tell whether the best point's results
+    are up to date.
+
+    Attributes:
+        error: The failure, formatted as ``Name: message``; None
+            on success.
+        profile: The value profile (the point's step ``t`` as
+            index); None on failure.
+        x_best: The best point's parameter vector; None on
+            failure.
+        best_results: The best point's results; None on failure.
+        csv_path: The path of the written profile CSV; None on
+            failure.
+        target: The objective's target (measured series) name.
+        metric: The objective's metric (the display label, e.g.
+            ``KGE``).
+        mode: The run mode the job's points ran in (`MODE_FULL` or
+            `MODE_HYDRO`).
+        elapsed_seconds: The wall-clock duration of the job.
+    """
+
+    error: str | None
+    profile: pd.DataFrame | None
+    x_best: np.ndarray | None
+    best_results: GuiRunResults | None
+    csv_path: Path | None
+    target: str
+    metric: str
+    mode: str
+    elapsed_seconds: float
+
+
+class _LineSearchWorker(QThread):
+    """
+    One line search job on a worker thread.
+
+    The job follows the steepest ascent of one objective function
+    from the base point: when the direction was not handed in, it
+    is computed by the same central differences as the gradient
+    job (for the one selected row), and the objective is then
+    evaluated at a fixed number of points on the ascent line, all
+    inside the current parameter bounds.  The point with the
+    largest finite value is the best one (the searched metrics all
+    have 1 as their optimal value, so maximizing finds it).
+
+    Signals:
+        finished_line_search: Emitted with the job's outcome.
+        progress_line: Emitted with a progress line (the point
+            being run), shown in the window's status line.
+    """
+
+    finished_line_search = Signal(_LineSearchOutcome)
+    progress_line = Signal(str)
+
+    def __init__(
+        self,
+        base_x: np.ndarray,
+        steps: list[_Perturbation],
+        direction: np.ndarray | None,
+        target: str,
+        metric: str,
+        mode: str,
+        input_data: GuiInputData,
+        bounds: dict[str, tuple[float, float]],
+        base_results: GuiRunResults | None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._base_x: np.ndarray = base_x
+        self._steps: list[_Perturbation] = steps
+        self._direction: np.ndarray | None = direction
+        self._target: str = target
+        self._metric: str = metric
+        self._mode: str = mode
+        self._input_data: GuiInputData = input_data
+        self._bounds: dict[str, tuple[float, float]] = bounds
+        self._base_results: GuiRunResults | None = base_results
+
+    def _run_point(self, x: np.ndarray) -> GuiRunResults:
+        """Run one parameter vector through the models in the job's mode."""
+        if self._mode == MODE_HYDRO:
+            return arr_to_hydro_results(x, self._input_data)
+        return arr_to_results(x, self._input_data)
+
+    def _key(self, x: np.ndarray) -> tuple[float, ...]:
+        """The deduplication key of a parameter vector (its values)."""
+        return tuple(float(v) for v in x)
+
+    def run(self) -> None:
+        """Run the job and emit the outcome, capturing stdout lines."""
+        # The Any annotation is the type of sys.stdout in the
+        # stdlib stubs; the value is a real text stream at runtime.
+        real_stdout: Any = sys.stdout
+        sys.stdout = _CapturingStream(self.progress_line.emit, real_stdout)
+        started: float = time.perf_counter()
+        outcome: _LineSearchOutcome
+        try:
+            outcome = self._compute(started)
+        except Exception as err:
+            outcome = _LineSearchOutcome(
+                error=f"{type(err).__name__}: {err}",
+                profile=None,
+                x_best=None,
+                best_results=None,
+                csv_path=None,
+                target=self._target,
+                metric=self._metric,
+                mode=self._mode,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        finally:
+            sys.stdout = real_stdout
+        self.finished_line_search.emit(outcome)
+
+    def _point_value(self, results: GuiRunResults) -> float:
+        """
+        The job's objective value at one point's results, or NaN.
+
+        Returns:
+            The objective's value, or NaN when the run did not
+            report it.
+        """
+        labels, vector = objective_vector(results)
+        try:
+            return float(vector[labels.index(f"{self._target}: {self._metric}")])
+        except ValueError:
+            return float("nan")
+
+    def _compute(self, started: float) -> _LineSearchOutcome:
+        """
+        Run the job's points and build its success outcome.
+
+        The base point is run only when it was not handed in.
+        When the direction was not handed in either, it is
+        computed as the normalized central-difference gradient of
+        the selected objective: every free parameter is
+        perturbed up and down by 1% of its range (clamped to the
+        range's ends) and each perturbed point is run through the
+        models, deduplicated against the base point like the
+        gradient job; the direction is the selected objective's
+        row of the difference matrix, normalized to unit length
+        and expanded to the parameter vector's space (a pinned
+        parameter's component stays zero).
+
+        The search then evaluates the objective at
+        `_LINE_SEARCH_POINTS` points on the ascent line ``x + t
+        * direction``, ``t`` equally spaced across the interval
+        that keeps every parameter inside its bounds, and the
+        point with the largest finite value is the best.
+
+        Args:
+            started: The wall-clock time the job started, for the
+                outcome's elapsed time.
+
+        Returns:
+            The success outcome: the value profile, the best
+            point's vector and results, and the path of the
+            written CSV.
+
+        Raises:
+            ValueError:
+                Raised when the selected objective has no finite
+                value at the base point, when its differences
+                carry no direction, or when no point on the
+                ascent line lies inside the current bounds (or
+                reports a value).
+        """
+        total: int = len(self._steps) * 2
+        if self._base_results is not None:
+            base_results: GuiRunResults = self._base_results
+        else:
+            self.progress_line.emit(f"Line search run 0/{total}: base")
+            base_results = self._run_point(self._base_x)
+
+        if self._direction is not None:
+            direction: np.ndarray = self._direction
+        else:
+            direction = self._difference_direction(base_results)
+
+        interval: tuple[float, float] | None = feasible_t_interval(
+            self._base_x, direction, self._steps, self._bounds
+        )
+        if interval is None:
+            raise ValueError(
+                "The line search found no feasible step: every point "
+                "on the ascent line lies outside the current "
+                "parameter bounds."
+            )
+        t_lo, t_hi = interval
+        t_points: np.ndarray = np.linspace(t_lo, t_hi, _LINE_SEARCH_POINTS)
+
+        values: list[float] = []
+        results: list[GuiRunResults] = []
+        for index, t in enumerate(t_points, start=1):
+            self.progress_line.emit(
+                f"Line search run {index}/{total}: t = {t:.4f}"
+            )
+            x_point: np.ndarray = self._base_x + t * direction
+            point_results: GuiRunResults = self._run_point(x_point)
+            values.append(self._point_value(point_results))
+            results.append(point_results)
+        values_array: np.ndarray = np.array(values, dtype=np.float64)
+        if not np.isfinite(values_array).any():
+            raise ValueError(
+                f"Every point on the ascent line failed to report a "
+                f"value for {self._target}: {self._metric}."
+            )
+        best_index: int = int(np.nanargmax(values_array))
+        x_best: np.ndarray = self._base_x + t_points[best_index] * direction
+        best_results: GuiRunResults = results[best_index]
+
+        columns: dict[str, np.ndarray] = {"value": values_array}
+        for step in self._steps:
+            position: int = list(self._bounds).index(step.key)
+            columns[step.key] = self._base_x[position] + t_points * direction[
+                position
+            ]
+        profile: pd.DataFrame = pd.DataFrame(columns, index=t_points)
+        csv_path: Path = write_line_search_csv(profile)
+        return _LineSearchOutcome(
+            error=None,
+            profile=profile,
+            x_best=x_best,
+            best_results=best_results,
+            csv_path=csv_path,
+            target=self._target,
+            metric=self._metric,
+            mode=self._mode,
+            elapsed_seconds=time.perf_counter() - started,
+        )
+
+    def _difference_direction(
+        self, base_results: GuiRunResults
+    ) -> np.ndarray:
+        """
+        The normalized steepest-ascent direction of the job's
+        objective, from central differences.
+
+        Every free parameter is perturbed up and down by 1% of its
+        range (clamped to the range's ends) and each perturbed
+        point — deduplicated against the base point, like the
+        gradient job — is run through the models.  The direction
+        is the selected objective's row of the difference matrix,
+        normalized to unit length and expanded to the parameter
+        vector's space (a pinned parameter's component stays zero).
+
+        Args:
+            base_results: The base point's results (its objective
+                vector carries the row's label).
+
+        Returns:
+            The unit-length direction vector, in the parameter
+            vector's order.
+
+        Raises:
+            ValueError:
+                Raised when the base point did not report the
+                selected objective, when its differences are not
+                all finite, or when they are all zero (no
+                direction).
+        """
+        total: int = len(self._steps) * 2
+        results: dict[tuple[float, ...], GuiRunResults] = {}
+        results[self._key(self._base_x)] = base_results
+
+        seen: set[tuple[float, ...]] = {self._key(self._base_x)}
+        pending: list[tuple[str, np.ndarray]] = []
+        for step in self._steps:
+            for suffix, point in ((" +", step.x_plus), (" -", step.x_minus)):
+                key: tuple[float, ...] = self._key(point)
+                if key not in seen:
+                    seen.add(key)
+                    pending.append((f"{step.key}{suffix}", point))
+
+        for index, (label, point) in enumerate(pending, start=1):
+            self.progress_line.emit(f"Line search run {index}/{total}: {label}")
+            results[self._key(point)] = self._run_point(point)
+
+        base_labels, _ = objective_vector(base_results)
+        try:
+            row_index: int = base_labels.index(
+                f"{self._target}: {self._metric}"
+            )
+        except ValueError:
+            raise ValueError(
+                f"The base point did not report the selected objective "
+                f"{self._target}: {self._metric}."
+            ) from None
+        f_plus: list[np.ndarray] = []
+        f_minus: list[np.ndarray] = []
+        for step in self._steps:
+            _, up_vector = objective_vector(results[self._key(step.x_plus)])
+            _, down_vector = objective_vector(
+                results[self._key(step.x_minus)]
+            )
+            f_plus.append(up_vector)
+            f_minus.append(down_vector)
+
+        matrix: np.ndarray = gradient_matrix(f_plus, f_minus, self._steps)
+        row: np.ndarray = matrix[row_index]
+        if not np.isfinite(row).all():
+            raise ValueError(
+                f"The selected objective {self._target}: {self._metric} "
+                "has a missing difference at the base point, so its "
+                "direction cannot be computed."
+            )
+        norm: float = float(np.linalg.norm(row))
+        if norm == 0.0:
+            raise ValueError(
+                f"The selected objective {self._target}: {self._metric} "
+                "is flat at the base point: its differences are all "
+                "zero, so the line search has no direction."
+            )
+        return expand_direction(row / norm, self._steps, self._bounds)
+
+
+@dataclass(frozen=True, slots=True)
+class _LineSearchSnapshot:
+    """
+    The last finished line search job's results, kept for the
+    figure panel.
+
+    The profile is re-drawn as the figure panel's extra page every
+    time the figures are rebuilt, so it stays on screen across
+    runs, mode changes, and plot-selection changes until the next
+    successful line search replaces it.
+
+    Attributes:
+        profile: The value profile (the point's step ``t`` as
+            index, the objective's value and every free
+            parameter's value as columns).
+        target: The objective's target (measured series) name,
+            shown in the page's title.
+        metric: The objective's metric (the display label, e.g.
+            ``KGE``), shown in the page's title.
+        mode: The run mode the job's points ran in (`MODE_FULL` or
+            `MODE_HYDRO`), shown in the page's title.
+        csv_path: The path of the written profile CSV, quoted in
+            the page's caption.
+        elapsed_seconds: The wall-clock duration of the job, shown
+            in the completion status line.
+    """
+
+    profile: pd.DataFrame
+    target: str
+    metric: str
+    mode: str
+    csv_path: Path
+    elapsed_seconds: float
+
+
 # ==== Objective table ==== #
 class _ObjectiveTableModel(QAbstractTableModel):
     """
@@ -665,23 +1097,49 @@ class _ObjectiveTableModel(QAbstractTableModel):
         return str(self._table.index[section])
 
 
+class _StatusLabel(QLabel):
+    """
+    A status line that cannot force the window beyond the screen.
+
+    A plain label reports a minimum size hint equal to its full
+    text, so a long message (a run failure, for instance) would
+    push the window's minimum width past a small screen, and the
+    window could never be squeezed back below it.  This label
+    reports a small constant minimum hint instead: the header row
+    then squeezes the label to that width (clipping the text)
+    rather than growing, and the full message stays in the
+    label's tooltip.  The size hint still follows the text, so the
+    label shows the whole message whenever the window has room
+    for it.
+    """
+
+    def minimumSizeHint(self) -> QSize:
+        """The minimum: a small fixed width and the hint's height."""
+        hint = super().minimumSizeHint()
+        return QSize(min(hint.width(), _STATUS_MIN_WIDTH), hint.height())
+
+
 # ==== Main window ==== #
 class MainWindow(QMainWindow):
     """
     The main window of the East River lateral-model calibration GUI.
 
-    The window stacks two non-collapsible splitter sections: the
-    figure panel (the model's figures, one visible at a time: the
-    three full-mode figures, or the single streamflow figure in
-    hydrology-only mode) and, below it, an inner non-collapsible
-    splitter with the per-run objective-function table on the left
-    and the parameter panel on the right.  The header row carries
-    the title, a *Hydrology only* checkbox next to it (off by
-    default), a status line, an indeterminate progress bar and
-    elapsed-time label (visible only while a run is in flight), a
-    *Save run history* checkbox (off by default), an *Auto-run*
-    checkbox, and the *Run model*, *Reset bounds*, and *Save run*
-    buttons.
+    The window stacks two non-collapsible sections: the figure
+    panel (the model's figures, one visible at a time: the three
+    full-mode figures, or the streamflow and zone-storage figures
+    in hydrology-only mode, plus the gradient and line search
+    pages when those jobs have finished) and, below it, a row
+    with the fixed-size per-run objective-function table on the
+    left and the parameter panel on the right.  The header row
+    carries the title, a *Hydrology only* checkbox next to it (off
+    by default), a status line, a *Save run history* checkbox (off
+    by default), an *Auto-run* checkbox, and the *Run model*,
+    *Gradients*, *Line search*, *Reset bounds*, and *Save run*
+    buttons.  A thin strip along the window's bottom edge shows an
+    indeterminate progress bar and the elapsed time while a job is
+    in flight; the job indicators are kept out of the header so
+    the window's width never depends on a job's state or the
+    length of a status message.
 
     Parameter changes re-run the models on a worker thread, 400 ms
     after the last change, and refresh the figures and the table
@@ -693,15 +1151,17 @@ class MainWindow(QMainWindow):
     executes the hydrology model alone, scored against the
     measured streamflow: the reactive-transport parameter groups
     and the species / zone / mineral figure checkboxes are hidden,
-    the figures reduce to the single streamflow figure, and the
-    objective table carries only the streamflow column.  A mode
-    change stales the results on screen just like a parameter
-    change does.  A run that fails (for instance with
-    ``WaterVolumeError``) is reported in the status bar and the
-    last valid figures stay on screen.  *Run model* and *Save run*
-    are disabled while a run is in flight; *Run model* is also
-    disabled while the results on screen already correspond to the
-    current parameters.
+    the figures reduce to the streamflow figure and a figure of
+    each zone's water storage, and the objective table carries
+    only the streamflow column.  A mode change stales the results
+    on screen just like a parameter change does.  A run that
+    fails (for instance with ``WaterVolumeError``) is reported in
+    the status bar, and a water-volume failure additionally as a
+    modal dialog, and the last valid figures stay on screen.
+    *Run model*, *Gradients*, and *Line search* are disabled
+    while a job is in flight; *Run model* is also disabled while
+    the results on screen already correspond to the current
+    parameters.
 
     At startup the window restores the most recent saved run (its
     parameters, edited bounds, plot selections, run mode, window
@@ -734,7 +1194,9 @@ class MainWindow(QMainWindow):
         # The run currently in flight (None while no run is in
         # flight; the reference is dropped when the worker ends,
         # before the deferred deletion removes the object).
-        self._worker: _RunWorker | _GradientWorker | None = None
+        self._worker: (
+            _RunWorker | _GradientWorker | _LineSearchWorker | None
+        ) = None
         # The generation of the latest started run; an outcome with
         # an older generation is stale and discarded.
         self._run_generation: int = 0
@@ -765,8 +1227,13 @@ class MainWindow(QMainWindow):
         self._saved_run_cache: dict[Path, SavedRun] = {}
         # The last finished gradient job's matrix and metadata
         # (None while no gradient job has finished); the figure
-        # panel draws it as an extra page.
+        # panel draws it as an extra page and the line search
+        # reuses its matrix as the search direction.
         self._gradient_state: _GradientSnapshot | None = None
+        # The last finished line search job's profile and metadata
+        # (None while no line search has finished); the figure
+        # panel draws it as an extra page.
+        self._line_search_state: _LineSearchSnapshot | None = None
 
         self.setWindowTitle(_TITLE)
         self.resize(*_INITIAL_SIZE)
@@ -777,38 +1244,43 @@ class MainWindow(QMainWindow):
 
     # ==== Building ==== #
     def _build_ui(self) -> None:
-        """Assemble the header row and the two-level splitter layout."""
+        """Assemble the header row, the figure, the lower row, and the progress strip."""
         header: QWidget = self._build_header()
 
         self._figure_panel: FigurePanel = self._build_figure_panel()
-        objective_panel: QWidget = self._build_objective_panel()
+        self._build_objective_panel()
         param_panel: ParamPanel = self._build_param_panel()
 
-        # The main splitter stacks the figure over the lower row; the
-        # row's own splitter places the objective table left of the
-        # parameter panel.
+        # The main splitter stacks the figure over the lower row,
+        # which is a plain row: the fixed-size objective panel on
+        # the left and the parameter panel (stretching) on the
+        # right.  There is no inner splitter: the objective panel
+        # is fixed in size, so a seam there could only move, never
+        # resize what is on either side of it.
         self._splitter: QSplitter = QSplitter(Qt.Orientation.Vertical)
-        self._bottom_splitter: QSplitter = QSplitter(Qt.Orientation.Horizontal)
-        self._bottom_splitter.addWidget(objective_panel)
-        self._bottom_splitter.addWidget(param_panel)
+        row: QWidget = QWidget(self)
+        row_layout: QHBoxLayout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(self._objective_panel)
+        row_layout.addWidget(param_panel, 1)
         self._splitter.addWidget(self._figure_panel)
-        self._splitter.addWidget(self._bottom_splitter)
+        self._splitter.addWidget(row)
         for section in range(self._splitter.count()):
             self._splitter.setCollapsible(section, False)
-        for section in range(self._bottom_splitter.count()):
-            self._bottom_splitter.setCollapsible(section, False)
         # Without an explicit distribution Qt lays the sections out
         # from their size hints, which squashes the figure (the
         # canvases report a small hint) into a sliver while the lower
         # row (large hints) takes the rest.
-        self._splitter.setSizes(list(_INITIAL_SPLIT_SIZES[:2]))
-        self._bottom_splitter.setSizes(list(_INITIAL_SPLIT_SIZES[2:]))
+        self._fit_objective_panel()
+        self._splitter.setSizes(list(_INITIAL_SPLIT_SIZES))
         self._figure_panel.setMinimumHeight(_FIGURE_MIN_HEIGHT)
 
+        self._build_progress_strip()
         layout: QVBoxLayout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(header)
         layout.addWidget(self._splitter, 1)
+        layout.addWidget(self._progress_strip)
         central: QWidget = QWidget(self)
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -823,7 +1295,18 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.timeout.connect(self._update_elapsed)
 
     def _build_header(self) -> QWidget:
-        """Build the header row: title, status, progress, and buttons."""
+        """
+        Build the header row: title, status, and buttons.
+
+        The row carries no job indicators (they live in the bottom
+        strip), so the window's minimum width is the same whether
+        or not a job is in flight.  The status label is the row's
+        only compressible item: it reports a small minimum (see
+        `_StatusLabel`) and stretches between the mode checkbox
+        and the job checkboxes, so a narrow window clips its text
+        (the tooltip keeps the full message) instead of pushing
+        the window past the screen.
+        """
         title: QLabel = QLabel(_TITLE)
         font: QFont = QFont(title.font())
         font.setBold(True)
@@ -837,22 +1320,15 @@ class MainWindow(QMainWindow):
             "measured streamflow.  When checked, the reactive-"
             "transport parameter groups and the species / zone / "
             "mineral figure checkboxes are hidden, the figures "
-            "reduce to the single streamflow figure, and the "
-            "objective table carries only the streamflow column."
+            "reduce to the streamflow figure and a figure of each "
+            "zone's water storage, and the objective table carries "
+            "only the streamflow column."
         )
         self._mode_checkbox.toggled.connect(self._on_mode_changed)
 
-        self._status_label: QLabel = QLabel("Preparing…")
+        self._status_label: _StatusLabel = _StatusLabel("Preparing…")
         self._status_label.setStyleSheet("color: gray;")
-
-        self._progress_bar: QProgressBar = QProgressBar()
-        self._progress_bar.setRange(0, 0)
-        self._progress_bar.setTextVisible(False)
-        self._progress_bar.setFixedWidth(_PROGRESS_WIDTH)
-        self._progress_bar.hide()
-
-        self._elapsed_label: QLabel = QLabel("")
-        self._elapsed_label.hide()
+        self._status_label.setMaximumWidth(_STATUS_MAX_WIDTH)
 
         self._save_history_checkbox: QCheckBox = QCheckBox(
             "Save run history"
@@ -894,6 +1370,24 @@ class MainWindow(QMainWindow):
             "drawn as an extra page of the figure panel."
         )
 
+        self._line_search_button: QPushButton = QPushButton("Line search")
+        self._line_search_button.clicked.connect(self._on_line_search_clicked)
+        self._line_search_button.setToolTip(
+            "Follow the steepest ascent of one objective function "
+            "from the current parameters: pick an objective from "
+            "the menu, and the job evaluates it at 25 points on "
+            "the ascent line, all inside the current parameter "
+            "bounds, and adopts the point with the best value "
+            "(the searchable metrics have 1 as their optimal "
+            "value, so the search maximizes the metric).  When a "
+            "gradient job has already run at these parameters its "
+            "matrix supplies the direction; otherwise the "
+            "direction is computed by the same central "
+            "differences.  The value profile is written to a CSV "
+            "in the results directory and drawn as an extra page "
+            "of the figure panel."
+        )
+
         self._reset_button: QPushButton = QPushButton("Reset bounds")
         self._reset_button.clicked.connect(self._on_reset_bounds)
 
@@ -902,58 +1396,123 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
 
         layout: QHBoxLayout = QHBoxLayout()
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
         layout.addWidget(title)
         layout.addWidget(self._mode_checkbox)
         layout.addStretch(1)
-        layout.addWidget(self._status_label)
-        layout.addWidget(self._progress_bar)
-        layout.addWidget(self._elapsed_label)
+        # The status label stretches with the middle stretch (both
+        # factor 1) up to its maximum width; beyond that the middle
+        # stretch absorbs the rest, so the label can grow but never
+        # forces the row wider than the other items.
+        layout.addWidget(self._status_label, 1)
         layout.addWidget(self._save_history_checkbox)
         layout.addWidget(self._auto_run_checkbox)
         layout.addWidget(self._run_button)
         layout.addWidget(self._gradients_button)
+        layout.addWidget(self._line_search_button)
         layout.addWidget(self._reset_button)
         layout.addWidget(self._save_button)
         header: QWidget = QWidget(self)
         header.setLayout(layout)
         return header
 
+    def _build_progress_strip(self) -> None:
+        """
+        Build the thin strip along the window's bottom edge.
+
+        The strip carries the indeterminate progress bar and the
+        elapsed-time label; it is hidden except while a job (a run,
+        a gradient computation, or a line search) is in flight.
+        Keeping the job indicators out of the header row means the
+        header's width — and with it the window's minimum width —
+        is the same whether or not a job is running, so switching
+        between run modes can never push the window past the
+        screen.
+        """
+        self._progress_bar: QProgressBar = QProgressBar()
+        # Range (0, 0): an indeterminate (animated) bar; the jobs
+        # report no reliable percentage of work remaining.
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._elapsed_label: QLabel = QLabel("")
+        self._progress_strip: QWidget = QWidget(self)
+        strip_layout: QHBoxLayout = QHBoxLayout(self._progress_strip)
+        strip_layout.setContentsMargins(8, 4, 8, 4)
+        strip_layout.setSpacing(8)
+        strip_layout.addWidget(self._progress_bar, 1)
+        strip_layout.addWidget(self._elapsed_label)
+        self._progress_strip.hide()
+
     def _build_figure_panel(self) -> FigurePanel:
         """Build the figure panel (its header carries the arrow buttons)."""
         return FigurePanel(self)
 
-    def _build_objective_panel(self) -> QWidget:
-        """Build the panel left of the parameter panel: heading, table, and note."""
+    def _build_objective_panel(self) -> None:
+        """
+        Build the fixed-size objective panel, left of the parameter
+        panel.
+
+        The panel holds the objective table's heading and the table
+        itself and nothing else: the metric note that used to sit
+        under the table now lives in the heading's tooltip, so the
+        panel stays as small as the table needs to be, and the
+        window's width is driven by the parameter panel instead of
+        the table.
+        """
         self._objective_model: _ObjectiveTableModel = _ObjectiveTableModel(self)
-        table: QTableView = QTableView(self)
-        table.setModel(self._objective_model)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        table.setShowGrid(False)
+        self._objective_table: QTableView = QTableView(self)
+        self._objective_table.setModel(self._objective_model)
+        self._objective_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._objective_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self._objective_table.setShowGrid(False)
         # The row headers (the metric labels) identify what each row
         # measures, so they stay visible.
-        table.verticalHeader().setSectionResizeMode(
+        self._objective_table.verticalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
-        table.horizontalHeader().setSectionResizeMode(
+        self._objective_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
 
-        heading: QLabel = QLabel("<b>Objective functions</b>")
-        note: QLabel = QLabel(METRIC_NOTES)
-        note.setWordWrap(True)
-        note.setStyleSheet("color: gray;")
+        self._objective_heading: QLabel = QLabel("<b>Objective functions</b>")
+        self._objective_heading.setToolTip(METRIC_NOTES)
 
         layout: QVBoxLayout = QVBoxLayout()
-        layout.setContentsMargins(12, 4, 12, 8)
-        layout.setSpacing(4)
-        layout.addWidget(heading)
-        layout.addWidget(table)
-        layout.addWidget(note)
-        panel: QWidget = QWidget(self)
-        panel.setLayout(layout)
-        return panel
+        layout.setContentsMargins(*_OBJECTIVE_PANEL_MARGINS)
+        layout.setSpacing(_OBJECTIVE_PANEL_SPACING)
+        layout.addWidget(self._objective_heading)
+        layout.addWidget(self._objective_table)
+        self._objective_panel: QWidget = QWidget(self)
+        self._objective_panel.setLayout(layout)
+
+    def _fit_objective_panel(self) -> None:
+        """
+        Fix the objective panel's size to fit its heading and table.
+
+        The panel is the only lower-row widget without stretch, so
+        its size drives the row's width: sizing it exactly to its
+        contents (plus the panel's margins) keeps the window's
+        width from growing with the table, and leaves the rest of
+        the row to the stretching parameter panel.
+        """
+        margins: tuple[int, int, int, int] = _OBJECTIVE_PANEL_MARGINS
+        width: int = max(
+            self._objective_heading.sizeHint().width(),
+            self._objective_table.sizeHint().width(),
+        ) + margins[0] + margins[2]
+        height: int = (
+            self._objective_heading.sizeHint().height()
+            + self._objective_table.sizeHint().height()
+            + margins[1]
+            + margins[3]
+            + _OBJECTIVE_PANEL_SPACING
+        )
+        self._objective_panel.setFixedSize(width, height)
 
     def _build_param_panel(self) -> ParamPanel:
         """Build the parameter panel and connect its signals to the window."""
@@ -1065,7 +1624,6 @@ class MainWindow(QMainWindow):
             )
         if saved.splitter_sizes is not None:
             self._splitter.setSizes(saved.splitter_sizes[:2])
-            self._bottom_splitter.setSizes(saved.splitter_sizes[2:])
         # The checkbox state is part of the saved state; a state
         # saved before the toggle existed restores it off.
         self._save_history_checkbox.setChecked(saved.save_history)
@@ -1167,11 +1725,11 @@ class MainWindow(QMainWindow):
         self._start_x = x
         self._start_mode = mode
         self._run_started_at = time.perf_counter()
-        self._progress_bar.show()
-        self._elapsed_label.show()
+        self._progress_strip.show()
         self._run_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
+        self._line_search_button.setEnabled(False)
         self._status("Running the model…")
 
         worker: _RunWorker = _RunWorker(
@@ -1221,8 +1779,7 @@ class MainWindow(QMainWindow):
         screen.
         """
         self._elapsed_timer.stop()
-        self._progress_bar.hide()
-        self._elapsed_label.hide()
+        self._progress_strip.hide()
 
         if not isinstance(payload, _RunOutcome):
             return
@@ -1241,6 +1798,13 @@ class MainWindow(QMainWindow):
 
         if outcome.error is not None:
             self._status(f"Run failed: {outcome.error}")
+            if isinstance(outcome.exception, WaterVolumeError):
+                # The water-volume failure is the one the user most
+                # needs to act on, so it gets a modal dialog as well
+                # as the status line.
+                QMessageBox.critical(
+                    self, "Water volume error", str(outcome.exception)
+                )
         elif outcome.results is None:
             self._status("Run failed: the worker reported no results.")
         else:
@@ -1271,10 +1835,11 @@ class MainWindow(QMainWindow):
         # at the worker here because this handler runs before the
         # worker's finished signal clears the reference.
         self._run_button.setEnabled(not up_to_date)
-        # No run is in flight any more, so the gradient job can
-        # start again (a stale restart below re-disables it via
-        # `_start_run`).
+        # No run is in flight any more, so the gradient and the
+        # line search jobs can start again (a stale restart below
+        # re-disables both via `_start_run`).
         self._gradients_button.setEnabled(True)
+        self._line_search_button.setEnabled(True)
         # The parameters or the mode changed while this run was in
         # flight: the results are stale, so start the next one with
         # the latest values (this is what the generation counter is
@@ -1329,11 +1894,11 @@ class MainWindow(QMainWindow):
         )
 
         self._run_started_at = time.perf_counter()
-        self._progress_bar.show()
-        self._elapsed_label.show()
+        self._progress_strip.show()
         self._run_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
+        self._line_search_button.setEnabled(False)
         self._status("Computing gradients…")
 
         worker: _GradientWorker = _GradientWorker(
@@ -1371,8 +1936,7 @@ class MainWindow(QMainWindow):
         with the path of the written CSV.
         """
         self._elapsed_timer.stop()
-        self._progress_bar.hide()
-        self._elapsed_label.hide()
+        self._progress_strip.hide()
         self._run_started_at = None
 
         if not isinstance(payload, _GradientOutcome):
@@ -1395,6 +1959,7 @@ class MainWindow(QMainWindow):
                 self._last_run_mode = outcome.mode
             self._gradient_state = _GradientSnapshot(
                 table=table,
+                base_x=outcome.base_x,
                 mode=outcome.mode,
                 csv_path=csv_path,
                 elapsed_seconds=outcome.elapsed_seconds,
@@ -1409,11 +1974,226 @@ class MainWindow(QMainWindow):
         # worker's finished signal clears the reference after this
         # one, like in `_on_finished_run`): the run and the save
         # buttons mirror the results' staleness and the gradients
-        # button always comes back up.
+        # and line search buttons always come back up.
         up_to_date: bool = self._results_are_up_to_date()
         self._save_button.setEnabled(up_to_date)
         self._run_button.setEnabled(not up_to_date)
         self._gradients_button.setEnabled(True)
+        self._line_search_button.setEnabled(True)
+
+    # ==== Line search ==== #
+    def _on_line_search_clicked(self) -> None:
+        """
+        Show the line search's menu from the *Line search* button.
+
+        The menu lists every objective function for which the
+        current results report a finite value, among the metrics
+        the search can optimize (the ones with 1 as their optimal
+        value: KGE, LogKGE, NSE, and LogNSE); picking one starts a
+        line search of that objective.  A job already in flight
+        takes precedence: the click is ignored, since a job cannot
+        be interrupted.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            return
+        table: pd.DataFrame = self._objective_model._table
+        if table.empty:
+            self._status(
+                "No objective values to search yet: run the model first."
+            )
+            return
+        candidates: list[tuple[str, str]] = [
+            (str(target), str(metric))
+            for target in table.columns
+            for metric in table.index
+            if metric in _LINE_SEARCH_METRICS
+            and np.isfinite(table.loc[metric, target])
+        ]
+        if not candidates:
+            self._status(
+                "No search objective is available: run the model first."
+            )
+            return
+        menu: QMenu = QMenu(self)
+        for target, metric in candidates:
+            action: QAction = menu.addAction(f"{target}: {metric}")
+            action.triggered.connect(
+                partial(self._on_line_search_selected, target, metric)
+            )
+        menu.exec(
+            self._line_search_button.mapToGlobal(
+                self._line_search_button.rect().bottomLeft()
+            )
+        )
+
+    def _on_line_search_selected(
+        self, target: str, metric: str, _checked: bool
+    ) -> None:
+        """Start a line search of the objective picked from the menu."""
+        self._start_line_search(target, metric)
+
+    def _start_line_search(self, target: str, metric: str) -> None:
+        """
+        Start a line search of one objective function.
+
+        The search follows the steepest ascent of the objective
+        from the current parameters: when a gradient job has
+        already finished at these parameters (in the same mode,
+        with the same free parameters), its matrix supplies the
+        direction for free; otherwise the direction is computed by
+        the same central differences as the gradient job, for the
+        one selected row.  The objective is then evaluated at 25
+        points on the ascent line, all inside the current
+        parameter bounds, and the point with the best (largest)
+        value is adopted.
+
+        The run indicators show the job's progress like a model
+        run's; a job cannot be interrupted.
+        """
+        x: np.ndarray = self._current_x()
+        bounds: dict[str, tuple[float, float]] = (
+            self._param_panel.current_bounds()
+        )
+        steps: list[_Perturbation] = free_parameter_steps(x, bounds)
+        if not steps:
+            self._status("No free parameters to search.")
+            return
+        direction: np.ndarray | None = None
+        snapshot: _GradientSnapshot | None = self._gradient_state
+        if (
+            snapshot is not None
+            and snapshot.mode == self._current_mode()
+            and np.array_equal(snapshot.base_x, x)
+            and len(snapshot.table.columns) == len(steps)
+        ):
+            try:
+                row: np.ndarray = snapshot.table.loc[
+                    f"{target}: {metric}"
+                ].to_numpy(dtype=np.float64)
+                direction = expand_direction(row, steps, bounds)
+            except KeyError:
+                direction = None
+        base_results: GuiRunResults | None = (
+            self._results
+            if self._results is not None and self._results_are_up_to_date()
+            else None
+        )
+
+        self._run_started_at = time.perf_counter()
+        self._progress_strip.show()
+        self._run_button.setEnabled(False)
+        self._save_button.setEnabled(False)
+        self._gradients_button.setEnabled(False)
+        self._line_search_button.setEnabled(False)
+        self._status(f"Line search in progress: {target}: {metric} …")
+        self._worker = _LineSearchWorker(
+            x,
+            steps,
+            direction,
+            target,
+            metric,
+            self._current_mode(),
+            self._input_data,
+            bounds,
+            base_results,
+            self,
+        )
+        worker: _LineSearchWorker = self._worker
+        worker.progress_line.connect(self._on_line_search_progress_line)
+        worker.finished_line_search.connect(self._on_finished_line_search)
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._elapsed_timer.start()
+        worker.start()
+
+    def _on_line_search_progress_line(self, line: str) -> None:
+        """
+        Show the line search's latest progress line in the status
+        bar.
+        """
+        if line:
+            self._status(f"Line search in progress — {line}")
+
+    def _on_finished_line_search(self, payload: object) -> None:
+        """
+        Apply a finished line search job's outcome to the window.
+
+        A failed job is reported in the status bar and leaves the
+        figures on screen unchanged.  A finished job's profile is
+        kept as the figure panel's extra page, its best point's
+        parameters and results are adopted into the window (the
+        panel is restored to the best point's values and the
+        figures and table refresh), and its completion is reported
+        in the status bar with the best step, the best value, and
+        the path of the written CSV.
+        """
+        self._elapsed_timer.stop()
+        self._progress_strip.hide()
+        self._run_started_at = None
+        self._gradients_button.setEnabled(True)
+        self._line_search_button.setEnabled(True)
+
+        if not isinstance(payload, _LineSearchOutcome):
+            return
+        outcome: _LineSearchOutcome = payload
+        if (
+            outcome.error is not None
+            or outcome.profile is None
+            or outcome.x_best is None
+            or outcome.best_results is None
+            or outcome.csv_path is None
+        ):
+            self._status(f"Line search failed: {outcome.error}")
+            # No job is in flight by the time this handler runs (the
+            # worker's finished signal clears the reference after
+            # this one, like in `_on_finished_gradient`): the run
+            # and the save buttons mirror the results' staleness.
+            up_to_date: bool = self._results_are_up_to_date()
+            self._save_button.setEnabled(up_to_date)
+            self._run_button.setEnabled(not up_to_date)
+            return
+
+        # The best point is the profile's largest finite value.
+        values: np.ndarray = outcome.profile["value"].to_numpy(
+            dtype=np.float64
+        )
+        best_index: int = int(np.nanargmax(values))
+        best_t: float = float(outcome.profile.index[best_index])
+        best_value: float = float(values[best_index])
+
+        bounds: dict[str, tuple[float, float]] = (
+            self._param_panel.current_bounds()
+        )
+        best_values: dict[str, float] = {
+            key: float(value)
+            for key, value in zip(bounds, outcome.x_best, strict=True)
+        }
+        self._param_panel.restore_state(best_values, bounds)
+        self._results = outcome.best_results
+        self._last_run_x = outcome.x_best
+        self._last_run_mode = outcome.mode
+        self._line_search_state = _LineSearchSnapshot(
+            profile=outcome.profile,
+            target=outcome.target,
+            metric=outcome.metric,
+            mode=outcome.mode,
+            csv_path=outcome.csv_path,
+            elapsed_seconds=outcome.elapsed_seconds,
+        )
+        self._refresh_from_results()
+        self._status(
+            f"Line search finished in {outcome.elapsed_seconds:.1f} s: "
+            f"best t = {best_t:.4f} ({outcome.target}: "
+            f"{outcome.metric} = {best_value:.3f}); the best point's "
+            f"parameters are in the panel and the profile was saved "
+            f"to {outcome.csv_path}."
+        )
+        # The save button lights up only when the best point is
+        # where the panel now sits and the job ran in the current
+        # mode; the run button mirrors the same staleness.
+        up_to_date = self._results_are_up_to_date()
+        self._save_button.setEnabled(up_to_date)
+        self._run_button.setEnabled(not up_to_date)
 
     def _record_run_history(self) -> None:
         """
@@ -1798,18 +2578,23 @@ class MainWindow(QMainWindow):
     # ==== Save ==== #
     def _on_save_run(self) -> None:
         """
-        Save the current run: the existing per-run model output plus
-        a ``gui_state.json`` capturing the session state.
+        Save the current run: the existing per-run model output,
+        the figures as plotted, and a ``gui_state.json`` capturing
+        the session state.
 
         The run is saved only when the results on screen correspond
         to the current parameters and mode (a run still catching up
         blocks the save, since its output would be stale).  A
         full-mode run saves the ``hydro`` and ``rt`` bundle pair
         and a hydrology-only run the flat hydrology bundle; the
-        state file records the run mode.  The new run directory
-        becomes the first entry in the panel's *History* group (the
-        newest save), so it can be restored from the dropdown
-        without a re-run.
+        state file records the run mode.  Every figure currently
+        loaded in the figure panel (the mode's own figures, and the
+        gradient and line search pages when those jobs have
+        finished) is saved as a PNG into a ``figures`` subfolder of
+        the run directory.  The new run directory becomes the
+        first entry in the panel's *History* group (the newest
+        save), so it can be restored from the dropdown without a
+        re-run.
         """
         if self._results is None:
             self._status("Nothing to save yet: the model has not run.")
@@ -1872,18 +2657,20 @@ class MainWindow(QMainWindow):
                 "height": geom.height(),
             },
             splitter_sizes=[
-                int(size)
-                for size in [
-                    *self._splitter.sizes(),
-                    *self._bottom_splitter.sizes(),
-                ]
+                int(size) for size in self._splitter.sizes()
             ],
             save_history=self._save_history_checkbox.isChecked(),
             mode=self._current_mode(),
         )
         write_gui_state(run_dir, state)
+        figure_paths: list[Path] = self._figure_panel.save_pages(
+            run_dir / "figures"
+        )
         self._add_saved_history_item(run_dir)
-        self._status(f"Saved run to {run_dir}.")
+        self._status(
+            f"Saved run to {run_dir}; {len(figure_paths)} figure "
+            f"page(s) saved to {run_dir / 'figures'}."
+        )
 
     # ==== Refresh ==== #
     def _refresh_from_results(self) -> None:
@@ -1894,13 +2681,15 @@ class MainWindow(QMainWindow):
         Every figure honors the current plot selection, so a
         selection change refreshes them without a re-run.  A
         hydrology-only run's results carry no reactive-transport
-        simulation, so only the single streamflow figure is shown
-        and the objective table carries only the streamflow column.
-        A previous run selected in the panel's *History* group
-        (with its overlay checkbox on) is drawn faintly on every
-        figure, behind the current run's series.  When a gradient
-        job has finished, its difference matrix is drawn as an
-        extra page after the mode's own figures.
+        simulation, so the streamflow figure and a figure of each
+        zone's water storage are shown and the objective table
+        carries only the streamflow column.  A previous run
+        selected in the panel's *History* group (with its overlay
+        checkbox on) is drawn faintly on every figure, behind the
+        current run's series.  When a gradient job has finished,
+        its difference matrix is drawn as an extra page after the
+        mode's own figures, and when a line search has finished,
+        its value profile rides along as a further page.
         """
         if self._results is None:
             return
@@ -1923,9 +2712,9 @@ class MainWindow(QMainWindow):
 
         hydro_sim: pd.DataFrame = hydro.simulation
         if rt is None:
-            # A hydrology-only run shows the streamflow figure
-            # alone, with no reactive-transport column in the
-            # table.
+            # A hydrology-only run shows the streamflow figure and
+            # each zone's water storage, with no reactive-transport
+            # column in the table.
             time_series: Figure = make_time_series_figure(
                 hydro_sim,
                 None,
@@ -1935,8 +2724,17 @@ class MainWindow(QMainWindow):
                 overlay_hydro_sim=overlay_hydro,
                 overlay_rt_sim=overlay_rt,
             )
+            storage: Figure = make_zone_figure(
+                None,
+                hydro_sim,
+                [],
+                selection.zones,
+                overlay_rt_sim=overlay_rt,
+                overlay_hydro_sim=overlay_hydro,
+            )
             figures: tuple[tuple[str, Figure], ...] = (
                 ("Streamflow", time_series),
+                ("Zone storage", storage),
             )
             table: pd.DataFrame = build_objective_table(
                 hydro.objective_functions, None
@@ -1986,13 +2784,39 @@ class MainWindow(QMainWindow):
             gradient_fig: Figure = make_gradient_figure(snapshot.table, note)
             figures = figures + ((f"Gradients ({mode_label})", gradient_fig),)
 
+        # The last finished line search's profile rides along as an
+        # extra page, like the gradient matrix.
+        if self._line_search_state is not None:
+            search: _LineSearchSnapshot = self._line_search_state
+            note = (
+                f"Steepest ascent of {search.target}: {search.metric}, "
+                f"{_LINE_SEARCH_POINTS} points within the current "
+                f"bounds; saved to {search.csv_path}."
+            )
+            mode_label = "hydro" if search.mode == MODE_HYDRO else "full"
+            search_fig: Figure = make_line_search_figure(
+                search.profile, search.target, search.metric, note
+            )
+            figures = figures + (
+                (f"Line search ({mode_label})", search_fig),
+            )
+
         self._figure_panel.set_figures(figures)
         self._objective_model.set_table(table)
+        # The objective panel is fixed in size; re-fit it after the
+        # table's contents (and thus its size hint) changed.
+        self._fit_objective_panel()
 
     # ==== Status ==== #
     def _status(self, text: str) -> None:
-        """Set the status line of the header row."""
+        """
+        Set the status line of the header row.
+
+        The label clips text longer than its maximum width, so the
+        full text is mirrored into the label's tooltip.
+        """
         self._status_label.setText(text)
+        self._status_label.setToolTip(text)
 
     # ==== Closing ==== #
     def closeEvent(self, event: QCloseEvent) -> None:

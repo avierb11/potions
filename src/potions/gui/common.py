@@ -273,9 +273,13 @@ def set_rc_params() -> None:
     Configure the matplotlib rcParams for the GUI figures.
 
     Removes the axes spines and left-aligns the titles so the figures
-    match the project's published-figure style.
+    match the project's published-figure style, and sets a 12-point
+    base font: the workbench's smallest text is the base font itself,
+    so no figure text (tick labels, titles, legends, notes) is ever
+    smaller than 12 point.
     """
     plt.rcParams["figure.dpi"] = 300
+    plt.rcParams["font.size"] = 12
     plt.rcParams["axes.spines.bottom"] = False
     plt.rcParams["axes.spines.top"] = False
     plt.rcParams["axes.spines.left"] = False

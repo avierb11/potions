@@ -3,14 +3,17 @@ Interactive GUI for `potions`.
 
 The package provides one GUI: the East River lateral-model
 calibration workbench (`potions.gui.window`).  It is a PySide6
-desktop app: the model's three figures in a single panel (flipped
-by arrow buttons or the Left / Right keys) over a row that holds
-the per-run objective-function table on the left and every
+desktop app: the model's figures in a single panel (flipped by
+arrow buttons or the Left / Right keys: the streamflow, zone, and
+mineral figures in full mode, or the streamflow and zone-storage
+figures in hydrology-only mode, plus the gradient and line search
+pages when those jobs have finished) over a row that holds the
+fixed-size per-run objective-function table on the left and every
 calibrated parameter on the right, grouped by zone (hydrology in
-blue, reactive transport in red).  Parameter changes re-run the models on
-a background thread; a *Save run* click stores the run's model
-output together with the session state, which the app restores on
-its next start.
+blue, reactive transport in red).  Parameter changes re-run the
+models on a background thread; a *Save run* click stores the
+run's model output and figures together with the session state,
+which the app restores on its next start.
 
 Start the GUI with the console script installed with the package::
 
@@ -79,11 +82,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     set_rc_params()
     app: QApplication = QApplication([])
     app.setStyle("Fusion")
-    # One point larger than the platform default, so the workbench
-    # reads comfortably (no-op for pixel-sized platform fonts, whose
-    # point size reads as -1).
+    # A fixed 12-point base font: the workbench's smallest text is
+    # the base font itself, so no text in the window is ever smaller
+    # than 12 point (the platform default is usually smaller).
     font: QFont = app.font()
-    font.setPointSize(font.pointSize() + 1)
+    font.setPointSize(12)
     app.setFont(font)
 
     input_data = load_input_data(csv_path)

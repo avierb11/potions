@@ -4,10 +4,11 @@ Qt (PySide6) tests for the East River lateral-model calibration GUI.
 These are the interactive-layer counterparts to `test_gui`, which
 covers the data layer and the pure functions.  Here the actual
 widgets are driven offscreen: the main window (startup, restoring a
-saved run, background runs, saving, the history dropdown's restore
-and overlay, and closing with a run in flight), the figure panel,
-the objective table model, and the parameter panel (spin-box cells,
-pinned cells, their dialogs, and the plot selection).
+saved run, background runs, saving, the gradients and line search
+jobs, the history dropdown's restore and overlay, and closing with
+a run in flight), the figure panel, the objective table model, and
+the parameter panel (spin-box cells, pinned cells, their dialogs,
+and the plot selection).
 
 The offscreen Qt platform is requested before the first PySide6
 import, and the model itself is never run: the window's
@@ -39,13 +40,18 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
+    QLayoutItem,
+    QMenu,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 import potions as pt
 from potions.hydro_model import HydrologicalModel
+from potions.reactive_transport.rt_zone import WaterVolumeError
 
 from ..gui import data as gui_data
 from ..gui import figure_panel as gui_figure_panel
@@ -244,8 +250,10 @@ def _band_of(cell: QWidget) -> str:
 
 class _FakeMessageBox:
     """
-    Stands in for `QMessageBox`; the window only calls `question`,
-    which returns the class-level `answer`.
+    Stands in for `QMessageBox`; the window only calls `question`
+    (which returns the class-level `answer`) and `critical`
+    (whose calls are recorded, for the water-volume failure
+    dialog).
     """
 
     class StandardButton:
@@ -253,6 +261,7 @@ class _FakeMessageBox:
         Yes: int = 1
 
     answer: int = StandardButton.No
+    critical_calls: list[tuple[str, str]] = []
 
     @staticmethod
     def question(
@@ -262,6 +271,15 @@ class _FakeMessageBox:
         buttons: int = 0,
     ) -> int:
         return _FakeMessageBox.answer
+
+    @staticmethod
+    def critical(
+        parent: object | None,
+        title: str,
+        text: str,
+        *buttons: object,
+    ) -> None:
+        _FakeMessageBox.critical_calls.append((title, text))
 
 
 # ------------------------------------------------------------------ #
@@ -310,8 +328,11 @@ class TestMainWindowStartup:
             # The results on screen correspond to the current
             # parameters, so a manual run would do nothing.
             assert not win._run_button.isEnabled()
-            assert win._progress_bar.isHidden()
-            assert win._elapsed_label.isHidden()
+            # The progress strip (bar and elapsed label) is hidden when
+            # no job is in flight.  `isHidden()` only reflects a
+            # widget's own visibility flag, so assert the strip rather
+            # than its children.
+            assert win._progress_strip.isHidden()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
             assert panel.page_count() == 3
             assert panel.current_page() == 0
@@ -385,7 +406,7 @@ class TestMainWindowStartup:
             # geometry.
             win.resize(1100, 800)
             _pump()
-            # The requested sizes are scaled to each splitter's
+            # The requested sizes are scaled to the splitter's
             # actual size, with each section clamped to its child's
             # minimum size hint: the proportions survive up to that
             # clamping, so a loose tolerance is the right assertion.
@@ -394,15 +415,6 @@ class TestMainWindowStartup:
             assert total > 0
             for size, target in zip(sizes, (300, 600)):
                 assert size / total == pytest.approx(target / 900, abs=0.05)
-            bottom_sizes: list[float] = [
-                float(s) for s in win._bottom_splitter.sizes()
-            ]
-            bottom_total: float = sum(bottom_sizes)
-            assert bottom_total > 0
-            for size, target in zip(bottom_sizes, (200, 400)):
-                assert size / bottom_total == pytest.approx(
-                    target / 600, abs=0.05
-                )
             assert win._figure_panel.page_count() == 3
         finally:
             _close_window(win)
@@ -489,11 +501,12 @@ class TestMainWindowStartup:
             assert panel._groups["reactive"].isHidden()
             assert panel._groups["initial"].isHidden()
             assert not panel._groups["hydrology"].isHidden()
-            # One streamflow figure and one target column.
+            # Streamflow and zone-storage figures, one target column.
             figure: gui_figure_panel.FigurePanel = win._figure_panel
-            assert figure.page_count() == 1
+            assert figure.page_count() == 2
+            assert figure._titles == ["Streamflow", "Zone storage"]
             assert figure._title_label.text() == "Streamflow"
-            assert figure._page_label.text() == "1 / 1"
+            assert figure._page_label.text() == "1 / 2"
             assert win._objective_model.columnCount() == 1
             assert win._results is not None
             assert win._results.rt is None
@@ -669,6 +682,42 @@ class TestMainWindowRuns:
         finally:
             _close_window(win)
 
+    def test_water_volume_error_modal(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A water-volume failure gets a modal dialog besides the status."""
+        message: str = "the zone volume exceeds its maximum"
+
+        def fake(
+            x: np.ndarray, _input_data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            raise WaterVolumeError(message)
+
+        monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+        _FakeMessageBox.critical_calls.clear()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gui_window, "arr_to_results", fake)
+        win = gui_window.MainWindow(input_data)
+        try:
+            _wait_until(
+                lambda: win._worker is None
+                and win._status_label.text()
+                == f"Run failed: WaterVolumeError: {message}"
+            )
+            _pump()
+            assert _FakeMessageBox.critical_calls == [
+                ("Water volume error", message)
+            ]
+            assert win._results is None
+            assert not win._save_button.isEnabled()
+            assert win._run_button.isEnabled()
+        finally:
+            _close_window(win)
+
     def test_save_run(
         self,
         qapp: QApplication,
@@ -722,7 +771,21 @@ class TestMainWindowRuns:
             win._on_save_run()
             assert len(saves) == 1
             assert saves[0]["results_dir"] is None
-            assert win._status_label.text() == f"Saved run to {run_dir}."
+            assert win._status_label.text() == (
+                f"Saved run to {run_dir}; 3 figure page(s) saved to "
+                f"{run_dir / 'figures'}."
+            )
+            # The figures are saved as plotted, named after their
+            # page titles (non-alphanumerics collapse to a single
+            # underscore).
+            figure_names: list[str] = sorted(
+                path.name for path in (run_dir / "figures").glob("*.png")
+            )
+            assert figure_names == [
+                "Mineral_reaction_rates.png",
+                "Streamflow_and_river_concentrations.png",
+                "Zone_concentrations_and_storage.png",
+            ]
 
             saved = read_gui_state(run_dir)
             assert saved is not None
@@ -741,32 +804,21 @@ class TestMainWindowRuns:
                 "width": 1200,
                 "height": 900,
             }
-            # The saved list holds the two splitters' laid-out sizes
-            # in order: the main vertical pair, then the inner
-            # horizontal pair.  Each pair is scaled to its splitter's
-            # actual size, with sections clamped to their children's
-            # minimum size hints, so compare each pair's proportions
-            # against its initial split with a loose tolerance.
+            # The saved list holds the main vertical splitter's
+            # laid-out sizes: scaled to the splitter's actual size,
+            # with each section clamped to its child's minimum size
+            # hint, so compare the proportions against the initial
+            # split with a loose tolerance.
             assert saved.splitter_sizes is not None
             sizes: list[float] = [float(s) for s in saved.splitter_sizes]
-            initial: list[tuple[int, int]] = [
-                (
-                    gui_window._INITIAL_SPLIT_SIZES[0],
-                    gui_window._INITIAL_SPLIT_SIZES[1],
-                ),
-                (
-                    gui_window._INITIAL_SPLIT_SIZES[2],
-                    gui_window._INITIAL_SPLIT_SIZES[3],
-                ),
-            ]
-            for pair, target_pair in zip((sizes[:2], sizes[2:]), initial):
-                total: float = sum(pair)
-                assert total > 0
-                target_total: float = float(sum(target_pair))
-                for size, target in zip(pair, target_pair):
-                    assert size / total == pytest.approx(
-                        target / target_total, abs=0.05
-                    )
+            initial: tuple[int, int] = gui_window._INITIAL_SPLIT_SIZES
+            total: float = sum(sizes)
+            assert total > 0
+            target_total: float = float(sum(initial))
+            for size, target in zip(sizes, initial):
+                assert size / total == pytest.approx(
+                    target / target_total, abs=0.05
+                )
 
             # The run-history toggle is part of the saved state:
             # off here by default, and the second save records it on.
@@ -950,7 +1002,11 @@ class TestMainWindowRuns:
             # The hidden checkboxes keep their state, so the plot
             # selection is unchanged.
             assert panel.selection() == gui_data.default_plot_selection()
-            assert win._figure_panel.page_count() == 1
+            assert win._figure_panel.page_count() == 2
+            assert win._figure_panel._titles == [
+                "Streamflow",
+                "Zone storage",
+            ]
             assert win._objective_model.columnCount() == 1
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -1008,7 +1064,10 @@ class TestMainWindowRuns:
             win._on_save_run()
             assert len(saves) == 1
             assert saves[0]["results_dir"] is None
-            assert win._status_label.text() == f"Saved run to {run_dir}."
+            assert win._status_label.text() == (
+                f"Saved run to {run_dir}; 2 figure page(s) saved to "
+                f"{run_dir / 'figures'}."
+            )
             saved = read_gui_state(run_dir)
             assert saved is not None
             assert saved.mode == MODE_HYDRO
@@ -1309,7 +1368,7 @@ class TestHistory:
             assert results.rt is None
             assert win._param_panel._groups["reactive"].isHidden()
             assert win._param_panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 1
+            assert win._figure_panel.page_count() == 2
             assert win._objective_model.columnCount() == 1
             assert len(full_calls) == 1
             assert len(hydro_calls) == 1
@@ -1430,7 +1489,9 @@ class TestHistory:
             win._on_save_run()
             status: str = win._status_label.text()
             match: re.Match[str] | None = re.fullmatch(
-                r"Saved run to (?P<dir>.+)\.", status
+                r"Saved run to (?P<dir>[^;]+); \d+ figure page\(s\) "
+                r"saved to .*",
+                status,
             )
             assert match is not None
             run_dir: Path = Path(match.group("dir"))
@@ -1562,6 +1623,37 @@ class TestFigurePanel:
             panel.deleteLater()
             _pump()
 
+    def test_save_pages(
+        self, qapp: QApplication, tmp_path: Path
+    ) -> None:
+        """Every page is saved as a PNG named after its title."""
+        panel = gui_figure_panel.FigurePanel()
+        try:
+            panel.set_figures(
+                [
+                    _figure("Streamflow and river concentrations"),
+                    _figure("Mineral reaction rates"),
+                    _figure("!!!"),
+                ]
+            )
+            out_dir: Path = tmp_path / "nested" / "figures"
+            paths: list[Path] = panel.save_pages(out_dir)
+            # Each title's non-alphanumerics collapse to a single
+            # underscore; a title that sanitizes to nothing falls
+            # back to the page's position.
+            assert [path.name for path in paths] == [
+                "Streamflow_and_river_concentrations.png",
+                "Mineral_reaction_rates.png",
+                "figure_3.png",
+            ]
+            # The directory is created with its parents.
+            for path in paths:
+                assert path.parent == out_dir
+                assert path.is_file()
+        finally:
+            panel.deleteLater()
+            _pump()
+
 
 # ------------------------------------------------------------------ #
 # _ObjectiveTableModel (standalone)
@@ -1687,42 +1779,26 @@ class TestParamPanel:
             panel.deleteLater()
             _pump()
 
-    def test_cell_layout_and_font(
+    def test_cell_layout(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
     ) -> None:
-        """Each cell stacks the symbol above its value in a small font."""
+        """Each cell places the symbol left of its value, a stretch between."""
         panel = self._make_panel(input_data)
         try:
             free = panel._rows["proportion.1"]
             assert isinstance(free, gui_param_panel._FreeCell)
             layout = free.layout()
-            assert isinstance(layout, QVBoxLayout)
-            assert layout.count() == 2
+            assert isinstance(layout, QHBoxLayout)
+            assert layout.count() == 3
             symbol_item = layout.itemAt(0)
             assert symbol_item is not None
             assert symbol_item.widget() is free._symbol
-            spin_item = layout.itemAt(1)
+            stretch_item = layout.itemAt(1)
+            assert stretch_item is not None
+            assert stretch_item.spacerItem() is not None
+            spin_item = layout.itemAt(2)
             assert spin_item is not None
             assert spin_item.widget() is free._spin
-            # The cell and every text widget it holds carry the
-            # small font explicitly (a child with its own
-            # stylesheet would not inherit it).
-            assert (
-                free.font().pointSize() == gui_param_panel._CELL_FONT_SIZE
-            )
-            assert (
-                free._symbol.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
-            assert (
-                free._spin.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
-            assert free._line_edit is not None
-            assert (
-                free._line_edit.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
             # The spin box is frameless: the cell's border, drawn by
             # the group, is the cell's only frame, so the grid lines
             # stay continuous.
@@ -1731,26 +1807,17 @@ class TestParamPanel:
             pinned = panel._rows["ground_hs.alpha"]
             assert isinstance(pinned, gui_param_panel._PinnedCell)
             pinned_layout = pinned.layout()
-            assert isinstance(pinned_layout, QVBoxLayout)
-            assert pinned_layout.count() == 2
+            assert isinstance(pinned_layout, QHBoxLayout)
+            assert pinned_layout.count() == 3
             symbol_item = pinned_layout.itemAt(0)
             assert symbol_item is not None
             assert symbol_item.widget() is pinned._symbol
-            value_item = pinned_layout.itemAt(1)
+            stretch_item = pinned_layout.itemAt(1)
+            assert stretch_item is not None
+            assert stretch_item.spacerItem() is not None
+            value_item = pinned_layout.itemAt(2)
             assert value_item is not None
             assert value_item.widget() is pinned._value
-            assert (
-                pinned.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
-            assert (
-                pinned._symbol.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
-            assert (
-                pinned._value.font().pointSize()
-                == gui_param_panel._CELL_FONT_SIZE
-            )
         finally:
             panel.deleteLater()
             _pump()
@@ -2096,6 +2163,43 @@ class TestParamPanel:
             )
             assert panel._plots_group._grid_columns == 2
 
+            # Every group's title is left-aligned: the toggle is
+            # sized to fit its text (`QToolButton` ignores the
+            # `text-align` style property, so a stretched button
+            # would center the title) and sits at the left end of a
+            # header row, with a 4px left padding matching the
+            # cells' left margin.
+            def _assert_fitted_toggle(
+                group: gui_param_panel.ThemedGroup,
+            ) -> None:
+                assert (
+                    group._toggle.sizePolicy().horizontalPolicy()
+                    == QSizePolicy.Policy.Preferred
+                )
+                assert (
+                    group._toggle.sizePolicy().verticalPolicy()
+                    == QSizePolicy.Policy.Fixed
+                )
+                group_layout = group.layout()
+                assert group_layout is not None
+                header_item = group_layout.itemAt(0)
+                assert isinstance(header_item, QLayoutItem)
+                header_row = header_item.layout()
+                assert isinstance(header_row, QHBoxLayout)
+                assert header_row.itemAt(0).widget() is group._toggle
+                assert header_row.itemAt(1).spacerItem() is not None
+
+            for name in ("hydrology", "proportion", "reactive", "initial"):
+                _assert_fitted_toggle(panel._groups[name])
+                assert (
+                    "padding: 4px 0 4px 4px;" in panel._groups[name].styleSheet()
+                )
+            _assert_fitted_toggle(panel._plots_group)
+            assert (
+                panel._plots_group._toggle.styleSheet()
+                == "QToolButton { padding: 4px 0 4px 4px; }"
+            )
+
             group: gui_param_panel.ThemedGroup = panel._groups["hydrology"]
             assert group._toggle.text().startswith("▾")
             assert not group.content().isHidden()
@@ -2319,7 +2423,7 @@ class TestGradients:
                 for j in range(2, len(free)):
                     assert loaded.iloc[i, j] == pytest.approx(0.0)
 
-            assert win._figure_panel.page_count() == 2
+            assert win._figure_panel.page_count() == 3
             assert win._figure_panel._titles[-1] == "Gradients (hydro)"
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -2410,5 +2514,296 @@ class TestGradients:
             assert win._worker is None
             assert len(calls) == 1
             assert win._gradients_button.isEnabled()
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# The header's *Line search* button: the steepest-ascent jobs
+# ------------------------------------------------------------------ #
+
+
+class TestLineSearch:
+    """The header's *Line search* button: the steepest-ascent jobs."""
+
+    def test_menu_lists_finite_line_search_metrics(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The menu lists every finite objective with an optimizable metric."""
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+
+            executed: list[QMenu] = []
+
+            class _FakeLineSearchMenu(QMenu):
+                """The window's menu: its exec is recorded, never opened."""
+
+                # The PySide6 stubs misdeclare exec's return type as
+                # QAction; Qt 6's QMenu::exec returns an int.
+                def exec(self, *args: object) -> int:  # type: ignore[override]
+                    executed.append(self)
+                    return 0
+
+            # A class-attribute patch cannot shadow the C-level method,
+            # but the window resolves QMenu from its own module globals,
+            # so the subclass stands in for the menu the click builds.
+            monkeypatch.setattr(gui_window, "QMenu", _FakeLineSearchMenu)
+            win._on_line_search_clicked()
+            assert len(executed) == 1
+            action_texts: list[str] = [
+                action.text() for action in executed[0].actions()
+            ]
+            # Every finite cell of the table whose metric the search
+            # can optimize: each target's four optimizable metrics,
+            # in the table's column and row order.
+            assert action_texts == [
+                f"{target}: {metric}"
+                for target in ("Streamflow", "DOC", "DIC", "Ca++")
+                for metric in ("KGE", "LogKGE", "NSE", "LogNSE")
+            ]
+            # Showing the menu starts no job.
+            assert win._worker is None
+            assert win._line_search_state is None
+        finally:
+            _close_window(win)
+
+    def test_full_mode_job(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A search with no gradient job computes its own direction."""
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            # The fake shifts the streamflow objectives by 2 * x of
+            # free[0] alone, so the steepest ascent of Streamflow's
+            # KGE is the unit direction along free[0]'s axis and the
+            # best point is free[0]'s upper bound.
+            mid: float = win._param_panel.param_values()[free[0]]
+            high: float = win._param_panel.current_bounds()[free[0]][1]
+
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            # The base point's results were handed in, the direction
+            # came from its own central differences, then the 25
+            # points were run.
+            assert len(calls) == 1 + 2 * len(free) + 25
+
+            assert win._line_search_state is not None
+            profile: pd.DataFrame = win._line_search_state.profile
+            assert len(profile) == 25
+            assert profile.index.is_monotonic_increasing
+            # The direction is unit length, so the farthest step is
+            # the whole remaining distance to the upper bound.
+            assert float(profile.index.max()) == pytest.approx(high - mid)
+
+            # The best point is adopted into the panel: free[0] sits
+            # at its upper bound, where the shifted value is
+            # largest, and the results on screen are that point's,
+            # so the save button lights up.
+            assert (
+                win._param_panel.param_values()[free[0]]
+                == pytest.approx(high)
+            )
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+            assert win._line_search_button.isEnabled()
+
+            # The profile is written once and rides along as the
+            # figure panel's last page.
+            csvs: list[Path] = list(
+                (tmp_path / "results").glob("line_search_*.csv")
+            )
+            assert len(csvs) == 1
+            assert win._line_search_state.csv_path is not None
+            assert tmp_path / win._line_search_state.csv_path == csvs[0]
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Line search (full)"
+
+            assert re.fullmatch(
+                r"Line search finished in \d+(?:\.\d+)? s: best t = [\d.]+ "
+                r"\(Streamflow: KGE = [\d.]+\); the best point's parameters "
+                r"are in the panel and the profile was saved to .*"
+                r"line_search_\d{8}_\d{6}\.csv\.",
+                win._status_label.text(),
+            ) is not None
+        finally:
+            _close_window(win)
+
+    def test_reuses_gradient_snapshot(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A finished gradient job's row supplies the direction for free."""
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            win._on_gradients_clicked()
+            _wait_until(
+                lambda: win._gradient_state is not None
+                and win._worker is None
+            )
+            _pump()
+            calls_after_gradient: int = len(calls)
+            assert calls_after_gradient == 1 + 2 * len(free)
+
+            mid: float = win._param_panel.param_values()[free[0]]
+            high: float = win._param_panel.current_bounds()[free[0]][1]
+
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            # No direction differences and no base re-run: the
+            # snapshot's row supplies the direction and the base
+            # point's results are handed in, so only the 25 points
+            # are new calls.
+            assert len(calls) == calls_after_gradient + 25
+
+            assert win._line_search_state is not None
+            profile: pd.DataFrame = win._line_search_state.profile
+            assert len(profile) == 25
+            # The snapshot's row is the raw difference, 2.0 along
+            # free[0]'s axis, so the farthest step covers half the
+            # remaining distance — yet the endpoint is the same
+            # upper bound the unit direction reaches.
+            assert float(profile.index.max()) == pytest.approx(
+                (high - mid) / 2
+            )
+            assert (
+                win._param_panel.param_values()[free[0]]
+                == pytest.approx(high)
+            )
+
+            # Both jobs' pages ride along, in order.
+            assert win._figure_panel.page_count() == 5
+            assert win._figure_panel._titles[-2:] == [
+                "Gradients (full)",
+                "Line search (full)",
+            ]
+        finally:
+            _close_window(win)
+
+    def test_empty_objective_table(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With no finished run, the click reports and starts nothing."""
+
+        def failing(
+            x: np.ndarray, _input_data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            raise ValueError("boom")
+
+        win = _make_window(input_data, tmp_path, monkeypatch, failing)
+        try:
+            _wait_until(
+                lambda: win._worker is None
+                and win._status_label.text() == "Run failed: ValueError: boom"
+            )
+            _pump()
+            win._on_line_search_clicked()
+            assert (
+                win._status_label.text()
+                == "No objective values to search yet: run the model first."
+            )
+            assert win._worker is None
+            assert win._line_search_state is None
+        finally:
+            _close_window(win)
+
+    def test_no_free_parameters(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With every range collapsed, the selection is refused."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            def no_free() -> dict[str, tuple[float, float]]:
+                return {
+                    key: (value, value)
+                    for key, value in win._param_panel.param_values().items()
+                }
+
+            monkeypatch.setattr(win._param_panel, "current_bounds", no_free)
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            _pump()
+            assert (
+                win._status_label.text() == "No free parameters to search."
+            )
+            assert win._worker is None
+            assert win._line_search_state is None
+            assert len(calls) == 1
+            assert win._line_search_button.isEnabled()
         finally:
             _close_window(win)

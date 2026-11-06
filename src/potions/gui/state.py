@@ -57,8 +57,8 @@ from potions.gui.data import (
 # ==== Constants ==== #
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
-# The version of the gui_state.json format written and accepted here.
-GUI_STATE_VERSION: Final[int] = 1
+# The version of the gui_state.json format written here.
+GUI_STATE_VERSION: Final[int] = 2
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -70,6 +70,10 @@ MODE_FULL: Final[str] = "full"
 MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
+# The versions of the gui_state.json format accepted on restore:
+# the current one and version 1 (the two-splitter layout, whose
+# splitter sizes are mapped onto the current one).
+_ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset({1, GUI_STATE_VERSION})
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
 # same second, a counter suffix.
@@ -96,11 +100,9 @@ class GuiState:
         window_geometry: The window position and size, as a mapping
             with ``x`` / ``y`` / ``width`` / ``height`` keys; None when
             the state predates geometry persistence.
-        splitter_sizes: The sizes of the window's two splitters, in
+        splitter_sizes: The sizes of the main vertical splitter, in
             order: the figure and the lower (table-and-parameters)
-            row of the main vertical splitter, then the objective-
-            table and parameter-panel widths of the inner horizontal
-            splitter; None when the state predates splitter
+            row; None when the state predates splitter
             persistence.
         save_history: Whether the *Save run history* checkbox was
             on in the session; an absent field in a state file
@@ -171,15 +173,16 @@ class GuiState:
             The restored `GuiState`.
 
         Raises:
-            ValueError: Raised when the file's version is not
-                `GUI_STATE_VERSION` or a required field is missing or
-                has an unexpected shape.
+            ValueError: Raised when the file's version is not one of
+                the accepted versions (`_ACCEPTED_VERSIONS`) or a
+                required field is missing or has an unexpected
+                shape.
         """
         version: object = data.get("version", GUI_STATE_VERSION)
-        if version != GUI_STATE_VERSION:
+        if version not in _ACCEPTED_VERSIONS:
             raise ValueError(
                 f"Unsupported gui_state.json version {version!r} "
-                f"(expected {GUI_STATE_VERSION})."
+                f"(expected {sorted(_ACCEPTED_VERSIONS)})."
             )
 
         csv_path: object = data.get("csv_path")
@@ -396,24 +399,26 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
     """
     The optional ``splitter_sizes`` field of a gui_state.json mapping.
 
-    The current layout writes four sizes (the two sections of the
-    main vertical splitter, then the two of the inner horizontal
-    one).  A state saved by the single-splitter layout writes three
-    (figure, objective table, parameters stacked vertically) and is
-    mapped onto the current layout: the figure keeps its height, and
-    the table and the parameters move side by side into the lower
-    row.
+    The current layout writes two sizes (the main vertical
+    splitter's sections: the figure and the lower
+    table-and-parameters row).  The two-splitter layout of version 1
+    wrote four (the two main sections, then the two of the inner
+    horizontal one) and is mapped onto the current layout by
+    keeping the first two; the single-splitter layout before that
+    wrote three (figure, objective table, parameters stacked
+    vertically) and is mapped by summing the lower two into the
+    lower row.
 
     Args:
         data: The parsed JSON mapping.
 
     Returns:
-        The list of splitter sizes in the current four-size layout,
+        The list of splitter sizes in the current two-size layout,
         or None.
 
     Raises:
         ValueError: Raised when the field is present but is not a
-            list of three or four integers.
+            list of two, three, or four integers.
     """
     raw: object = data.get("splitter_sizes")
     if raw is None:
@@ -425,14 +430,16 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
             "gui_state.json 'splitter_sizes' must be a list of integers."
         )
     values: list[int] = [int(item) for item in raw]
+    if len(values) == 2:
+        return values
     if len(values) == 3:
         figure, objective, parameters = values
-        return [figure, objective + parameters, objective, parameters]
+        return [figure, objective + parameters]
     if len(values) == 4:
-        return values
+        return values[:2]
     raise ValueError(
-        f"gui_state.json 'splitter_sizes' must hold three or four "
-        f"sizes, got {len(values)}."
+        f"gui_state.json 'splitter_sizes' must hold two, three, or "
+        f"four sizes, got {len(values)}."
     )
 
 
@@ -709,9 +716,10 @@ class SavedRun:
         window_geometry: The window position and size to restore, as
             a mapping with ``x`` / ``y`` / ``width`` / ``height`` keys;
             None when the state did not carry them.
-        splitter_sizes: The sizes of the window's two splitters to
-            restore (the main vertical pair, then the inner
-            horizontal pair); None when the state did not carry them.
+        splitter_sizes: The sizes of the main vertical splitter to
+            restore (the figure and the lower
+            table-and-parameters row); None when the state did not
+            carry them.
         save_history: Whether the session's *Save run history*
             checkbox was on when the run was saved; False for a run
             saved before the toggle existed.

@@ -219,7 +219,7 @@ def _full_state(
         param_bounds=bounds,
         selection=gui_data.default_plot_selection(),
         window_geometry={"x": 10, "y": 20, "width": 1100, "height": 800},
-        splitter_sizes=[300, 600, 200, 400],
+        splitter_sizes=[300, 600],
         save_history=save_history,
         mode=mode,
     )
@@ -508,12 +508,12 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 1
-        assert state.to_dict()["version"] == 1
+        assert GUI_STATE_VERSION == 2
+        assert state.to_dict()["version"] == 2
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 1
+        assert raw["version"] == 2
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         param_values = _as_dict(raw, "param_values")
         assert param_values["proportion.1"] == 0.7
@@ -522,20 +522,32 @@ class TestGuiStateRoundTrip:
         selection = _as_dict(raw, "selection")
         assert selection["species"] == ["DOC"]
         assert selection["time_series"] == ["Streamflow", "DOC", "DIC", "Ca++"]
-        # The two splitters' sizes: the main vertical pair (figure,
-        # lower row), then the inner horizontal pair (table, params).
-        assert raw["splitter_sizes"] == [300, 600, 200, 400]
+        # The main vertical splitter's two sections: the figure and
+        # the lower (table-and-parameters) row.
+        assert raw["splitter_sizes"] == [300, 600]
 
     def test_legacy_three_size_splitter(
         self, input_data: gui_data.GuiInputData
     ) -> None:
-        """A single-splitter state maps onto the two-splitter layout."""
+        """A pre-version-1 stacked state maps onto the current layout."""
         raw: dict[str, object] = _full_state(input_data).to_dict()
         raw["splitter_sizes"] = [300, 200, 400]
         restored = GuiState.from_dict(raw)
         # The figure keeps its height; the table and the parameters
-        # share the lower row at their former heights.
-        assert restored.splitter_sizes == [300, 600, 200, 400]
+        # collapse into the lower row at their former combined height.
+        assert restored.splitter_sizes == [300, 600]
+
+    def test_legacy_four_size_splitter(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A version-1 two-splitter state maps onto the current layout."""
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["version"] = 1
+        raw["splitter_sizes"] = [300, 600, 200, 400]
+        restored = GuiState.from_dict(raw)
+        # The version-1 inner horizontal pair (table, params) is
+        # dropped; the main vertical sections keep their sizes.
+        assert restored.splitter_sizes == [300, 600]
 
     def test_optional_fields_none(self, input_data: gui_data.GuiInputData) -> None:
         state = _full_state(input_data)
@@ -619,7 +631,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected 1).",
+                "Unsupported gui_state.json version 99 (expected [1, 2]).",
             ),
             (
                 {"csv_path": 12},
@@ -646,8 +658,8 @@ class TestFromDictErrors:
                 "gui_state.json 'splitter_sizes' must be a list of integers.",
             ),
             (
-                {"splitter_sizes": [300, 200]},
-                "gui_state.json 'splitter_sizes' must hold three or four sizes, got 2.",
+                {"splitter_sizes": [1, 2, 3, 4, 5]},
+                "gui_state.json 'splitter_sizes' must hold two, three, or four sizes, got 5.",
             ),
             (
                 {"save_history": "yes"},
@@ -764,7 +776,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected 1).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2]).\n"
         )
 
     def test_top_level_not_object(
@@ -785,7 +797,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 1,")
+        assert text.startswith("{\n  \"version\": 2,")
         assert text.endswith("\n")
 
 
