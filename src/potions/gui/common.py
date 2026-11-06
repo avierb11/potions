@@ -230,6 +230,9 @@ HYDRO_THEME: Final[Theme] = Theme(
     name="hydrology", accent="#598DB1", light="#EAF1F8"
 )
 RT_THEME: Final[Theme] = Theme(name="reactive transport", accent="#F64740", light="#FDEDEB")
+# The window background of the reactive-transport mode, deliberately
+# distinct from RT_THEME's light tint, which the panel groups keep.
+RT_MODE_TINT: Final[str] = "#FBEEDB"
 # =============== #
 
 # The objective-function metrics shown in the per-run table, in the

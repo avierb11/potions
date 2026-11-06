@@ -1287,6 +1287,49 @@ class TestAutoRunToggle:
 
 
 # ------------------------------------------------------------------ #
+# MainWindow: mode tint
+# ------------------------------------------------------------------ #
+
+
+class TestModeTint:
+    """The window's background tint by run mode."""
+
+    def test_mode_background_tint(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Toggling the mode checkbox tints the window background."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            # The startup run finished in the default full mode, so
+            # the window carries the warm reactive-transport tint.
+            assert win.styleSheet() == "background-color: #FBEEDB;"
+            # With auto-run off, toggling the mode updates the panel
+            # and the tint but starts no re-run.
+            win._auto_run_checkbox.setChecked(False)
+            win._mode_checkbox.setChecked(True)
+            assert win.styleSheet() == "background-color: #EAF1F8;"
+            win._mode_checkbox.setChecked(False)
+            assert win.styleSheet() == "background-color: #FBEEDB;"
+            assert len(calls) == 1
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
 # MainWindow: history
 # ------------------------------------------------------------------ #
 

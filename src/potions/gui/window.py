@@ -125,7 +125,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from potions.gui.common import METRIC_NOTES
+from potions.gui.common import HYDRO_THEME, METRIC_NOTES, RT_MODE_TINT
 from potions.gui.data import (
     DEFAULT_CSV_PATH,
     GuiInputData,
@@ -1586,6 +1586,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_actions()
         self._restore_or_start()
+        # The restored mode (or the default) is final by now, so the
+        # window can take it as its background tint.
+        self._set_mode_tint(self._current_mode())
 
     # ==== Building ==== #
     def _build_ui(self) -> None:
@@ -2958,6 +2961,7 @@ class MainWindow(QMainWindow):
         self._mode_checkbox.setChecked(mode == MODE_HYDRO)
         self._mode_checkbox.blockSignals(False)
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
+        self._set_mode_tint(mode)
         self._last_run_mode = mode
         self._save_button.setEnabled(True)
         # The restored results correspond to the restored parameters,
@@ -2966,17 +2970,35 @@ class MainWindow(QMainWindow):
         self._refresh_from_results()
 
     # ==== Parameter panel ==== #
+    def _set_mode_tint(self, mode: str) -> None:
+        """
+        Tint the window's background by run mode.
+
+        The window itself takes the mode's background: the cool
+        hydrology tint for a hydrology-only run, the warm
+        reactive-transport tint otherwise.  The parameter-panel
+        groups keep their own theme tints, so only the window
+        changes with the mode.
+
+        Args:
+            mode: The run mode (`MODE_HYDRO` or `MODE_FULL`).
+        """
+        tint: str = HYDRO_THEME.light if mode == MODE_HYDRO else RT_MODE_TINT
+        self.setStyleSheet(f"background-color: {tint};")
+
     def _on_mode_changed(self, _enabled: bool) -> None:
         """
         The header's *Hydrology only* checkbox was toggled.
 
         The parameter panel hides or shows its reactive-transport
-        parts, the results on screen are stale in the new mode (the
-        run button reflects that), and with auto-run on a debounced
-        re-run follows so the figures match the mode.
+        parts, the window takes the new mode's tint, the results on
+        screen are stale in the new mode (the run button reflects
+        that), and with auto-run on a debounced re-run follows so
+        the figures match the mode.
         """
         mode: str = self._current_mode()
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
+        self._set_mode_tint(mode)
         self._update_run_button()
         if self._auto_run_checkbox.isChecked():
             self._debounce_timer.start()
