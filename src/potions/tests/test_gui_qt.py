@@ -11,11 +11,16 @@ the parameter panel (spin-box cells, pinned cells, their dialogs,
 and the plot selection).
 
 The offscreen Qt platform is requested before the first PySide6
-import, and the model itself is never run: the window's
-`arr_to_results` and `arr_to_hydro_results` calls are patched
-with fakes that return the synthetic results from `test_gui`
-(a real run takes about five minutes and is covered by that
-file's own slow test).
+import, and the model itself is never run: `arr_to_results` and
+`arr_to_hydro_results` are patched with fakes that return the
+synthetic results from `test_gui` (a real run takes about five
+minutes and is covered by that file's own slow test).  The
+in-process model run resolves the fakes from the `window`
+module; the gradient and line-search jobs resolve theirs from
+the `data` module, because their points run in forked pool
+workers that inherit the patched module attributes (the pool
+initializers still load the small packaged input CSV; the
+fakes ignore its contents).
 """
 
 import os
@@ -2441,6 +2446,33 @@ def _gradient_fake_factory(
     return full_fake, hydro_fake
 
 
+def _file_gated_fake(
+    real_fake: Callable[
+        [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
+    ],
+    gate_path: Path,
+) -> Callable[[np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults]:
+    """
+    Wrap `real_fake` in a gate the test releases by touching
+    `gate_path`: each call blocks (polling briefly, with a
+    generous timeout) until the file exists, then delegates.
+
+    Unlike a `threading.Event`, a file is visible to the forked
+    pool worker processes the jobs use, so the test can hold a
+    job's points until it has connected to the worker's signals.
+    """
+
+    def gated_fake(
+        x: np.ndarray, _input_data: gui_data.GuiInputData
+    ) -> gui_data.GuiRunResults:
+        deadline: float = time.monotonic() + 60.0
+        while not gate_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return real_fake(x, _input_data)
+
+    return gated_fake
+
+
 def _gradient_window(
     input_data: gui_data.GuiInputData,
     tmp_path: Path,
@@ -2451,15 +2483,34 @@ def _gradient_window(
     hydro_fake: Callable[
         [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
     ],
+    gate_path: Path | None = None,
 ) -> gui_window.MainWindow:
     """
     Build a main window in an empty `tmp_path` with `full_fake` and
     `hydro_fake` patched in for `arr_to_results` and
-    `arr_to_hydro_results` (the gradient job's worker calls both).
+    `arr_to_hydro_results`, both on the `window` module (the
+    in-process startup run) and on the `data` module (the forked
+    pool workers that run the jobs' points).  When `gate_path` is
+    given, the `data` copies block until the file is touched, so a
+    job's test can connect to its worker's signals first.
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
     monkeypatch.setattr(gui_window, "arr_to_hydro_results", hydro_fake)
+    if gate_path is None:
+        monkeypatch.setattr(gui_data, "arr_to_results", full_fake)
+        monkeypatch.setattr(gui_data, "arr_to_hydro_results", hydro_fake)
+    else:
+        monkeypatch.setattr(
+            gui_data,
+            "arr_to_results",
+            _file_gated_fake(full_fake, gate_path),
+        )
+        monkeypatch.setattr(
+            gui_data,
+            "arr_to_hydro_results",
+            _file_gated_fake(hydro_fake, gate_path),
+        )
     return gui_window.MainWindow(input_data)
 
 
@@ -2531,8 +2582,14 @@ class TestGradients:
         full_fake, hydro_fake = _gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
+        gate = tmp_path / "job_gate"
         win = _gradient_window(
-            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
         )
         try:
             _wait_until(
@@ -2542,12 +2599,33 @@ class TestGradients:
             assert len(calls) == 1
 
             win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
             _wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
             _pump()
-            assert len(calls) == 1 + 2 * len(free)
+            # The job's points ran in the pool (their `calls`
+            # appends never reach this process): only the
+            # in-process startup run is recorded, and the last
+            # step completes the bar.
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) <= total <= 2 * len(free)
 
             loaded: pd.DataFrame = pd.read_csv(
                 _only_csv(tmp_path), index_col="objective"
@@ -2588,8 +2666,14 @@ class TestGradients:
         full_fake, hydro_fake = _gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
+        gate = tmp_path / "job_gate"
         win = _gradient_window(
-            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
         )
         try:
             _wait_until(
@@ -2605,12 +2689,33 @@ class TestGradients:
             assert len(calls) == 2
 
             win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
             _wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
             _pump()
-            assert len(calls) == 2 + 2 * len(free)
+            # The job's points ran in the pool (their `calls`
+            # appends never reach this process): the two in-process
+            # runs (the startup and the mode change) are the only
+            # calls recorded, and the last step completes the bar.
+            assert len(calls) == 2
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) <= total <= 2 * len(free)
 
             loaded: pd.DataFrame = pd.read_csv(
                 _only_csv(tmp_path), index_col="objective"
@@ -2638,25 +2743,34 @@ class TestGradients:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        free = _free_keys(input_data)
         calls: list[np.ndarray] = []
-
-        def flaky(
-            x: np.ndarray, _input_data: gui_data.GuiInputData
-        ) -> gui_data.GuiRunResults:
-            calls.append(np.array(x))
-            if len(calls) > 1:
-                raise RuntimeError("boom")
-            hydro, rt = _synthetic_results(input_data)
-            return gui_data.GuiRunResults(hydro, rt)
+        plain_fake = _fake_results_factory(calls, input_data)
+        failing_index: int = list(input_data.bounds).index(free[0])
 
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(gui_window, "arr_to_results", flaky)
+        monkeypatch.setattr(gui_window, "arr_to_results", plain_fake)
         win = gui_window.MainWindow(input_data)
         try:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             _pump()
+
+            # Only the free[0] "+" perturbation exceeds the base
+            # value: the base point is handed in (the results are
+            # up to date), free[0] "-" and every other job point
+            # equal the base there, so they run clean.
+            base_value: float = win._param_panel.param_values()[free[0]]
+
+            def flaky(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                if float(x[failing_index]) > base_value:
+                    raise RuntimeError("boom")
+                return plain_fake(x, _input_data)
+
+            monkeypatch.setattr(gui_data, "arr_to_results", flaky)
 
             win._on_gradients_clicked()
             _wait_until(
@@ -2673,7 +2787,10 @@ class TestGradients:
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
             assert win._gradients_button.isEnabled()
-            assert len(calls) == 2
+            # The job's points ran in the pool (their `calls`
+            # appends never reach this process): only the
+            # in-process startup run is recorded.
+            assert len(calls) == 1
             assert list((tmp_path / "results").glob("gradients_*.csv")) == []
         finally:
             _close_window(win)
@@ -2738,7 +2855,7 @@ class TestGradients:
         win = _gradient_window(
             input_data, tmp_path, monkeypatch, full_fake, hydro_fake
         )
-        gate = threading.Event()
+        gate = tmp_path / "job_gate"
         try:
             # Let the window's startup run finish first, so the
             # job's base point is handed in rather than rerun.
@@ -2748,23 +2865,22 @@ class TestGradients:
             _pump()
             assert win._results_are_up_to_date()
 
-            # The job's own model calls block on a gate until the
-            # test has connected to the worker's progress_step
-            # signal: the worker is created by the click, so it
-            # cannot be connected in advance, and the gate keeps it
-            # from completing (and emitting a step for) a point
-            # before the connection.
-            def gated_fake(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
-            ) -> gui_data.GuiRunResults:
-                gate.wait(timeout=60)
-                return full_fake(x, _input_data)
-
-            monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
+            # The job's pool points block on a file gate (visible
+            # to the forked workers) until the test has connected
+            # to the worker's progress_step signal: the worker is
+            # created by the click, so it cannot be connected in
+            # advance, and the gate keeps it from completing (and
+            # emitting a step for) a point before the connection.
             monkeypatch.setattr(
-                gui_window, "arr_to_hydro_results", gated_fake
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(full_fake, gate),
             )
-            calls.clear()
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_hydro_results",
+                _file_gated_fake(hydro_fake, gate),
+            )
 
             win._on_gradients_clicked()
             worker = win._worker
@@ -2778,7 +2894,7 @@ class TestGradients:
                 spinner_up.append(not win._job_spinner.isHidden())
 
             worker.progress_step.connect(on_step)
-            gate.set()
+            gate.touch()
 
             _wait_until(
                 lambda: win._gradient_state is not None
@@ -2792,14 +2908,13 @@ class TestGradients:
             assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
             assert len({total for _done, total in steps}) == 1
             total: int = steps[0][1]
-            assert steps[-1][0] == total
+            assert steps[-1] == (total, total)
 
             # The base was handed in, so the total is the deduped
             # number of perturbed points: at most one point per
             # parameter coincides with the base, and each
             # parameter contributes at least one of its two.
             assert len(free) <= total <= 2 * len(free)
-            assert len(calls) == total
 
             # The spinner is up for every step and down after the
             # job, and the bar is back to its indeterminate rest
@@ -2810,7 +2925,7 @@ class TestGradients:
             assert not win._progress_bar.isTextVisible()
             assert win._progress_strip.isHidden()
         finally:
-            gate.set()
+            gate.touch()
             _close_window(win)
 
 
@@ -2891,8 +3006,14 @@ class TestLineSearch:
         full_fake, hydro_fake = _gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
+        gate = tmp_path / "job_gate"
         win = _gradient_window(
-            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
         )
         try:
             _wait_until(
@@ -2909,15 +3030,35 @@ class TestLineSearch:
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
             win._on_line_search_selected("Streamflow", "KGE", False)
+            worker = win._worker
+            assert isinstance(worker, gui_window._LineSearchWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
             _wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
             _pump()
-            # The base point's results were handed in, the direction
-            # came from its own central differences, then the 25
-            # points were run.
-            assert len(calls) == 1 + 2 * len(free) + 25
+            # The base point's results were handed in, the
+            # direction came from its own central differences
+            # (the first pool phase), then the 25 search points
+            # were run (the second): all the job's points ran in
+            # the pool, so only the in-process startup run is
+            # recorded, and the last step completes the bar.
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) + 25 <= total <= 2 * len(free) + 25
 
             assert win._line_search_state is not None
             profile: pd.DataFrame = win._line_search_state.profile
@@ -2974,8 +3115,14 @@ class TestLineSearch:
         full_fake, hydro_fake = _gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
+        gradient_gate = tmp_path / "gradient_gate"
         win = _gradient_window(
-            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gradient_gate,
         )
         try:
             _wait_until(
@@ -2985,18 +3132,65 @@ class TestLineSearch:
             assert len(calls) == 1
 
             win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+
+            gradient_steps: list[tuple[int, int]] = []
+
+            def on_gradient_step(done: int, total: int) -> None:
+                gradient_steps.append((done, total))
+
+            worker.progress_step.connect(on_gradient_step)
+            gradient_gate.touch()
             _wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
             _pump()
+            # The job's points ran in the pool (their `calls`
+            # appends never reach this process): only the
+            # in-process startup run is recorded, and the last
+            # step completes the bar.
             calls_after_gradient: int = len(calls)
-            assert calls_after_gradient == 1 + 2 * len(free)
+            assert calls_after_gradient == 1
+            assert gradient_steps
+            assert all(
+                a[0] < b[0]
+                for a, b in zip(gradient_steps, gradient_steps[1:])
+            )
+            assert len({total for _done, total in gradient_steps}) == 1
+            total: int = gradient_steps[0][1]
+            assert gradient_steps[-1] == (total, total)
+            assert len(free) <= total <= 2 * len(free)
 
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
+            # The search's own pool phase is gated on its own file,
+            # re-patched for the search's workers.
+            search_gate = tmp_path / "search_gate"
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(full_fake, search_gate),
+            )
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_hydro_results",
+                _file_gated_fake(hydro_fake, search_gate),
+            )
+
             win._on_line_search_selected("Streamflow", "KGE", False)
+            search_worker = win._worker
+            assert isinstance(search_worker, gui_window._LineSearchWorker)
+
+            search_steps: list[tuple[int, int]] = []
+
+            def on_search_step(done: int, total: int) -> None:
+                search_steps.append((done, total))
+
+            search_worker.progress_step.connect(on_search_step)
+            search_gate.touch()
             _wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
@@ -3004,9 +3198,16 @@ class TestLineSearch:
             _pump()
             # No direction differences and no base re-run: the
             # snapshot's row supplies the direction and the base
-            # point's results are handed in, so only the 25 points
-            # are new calls.
-            assert len(calls) == calls_after_gradient + 25
+            # point's results are handed in, so the only pool
+            # points are the 25 search points — and none of them
+            # run in-process, so the recorded calls stay put.
+            assert len(calls) == 1
+            assert search_steps
+            assert all(
+                a[0] < b[0] for a, b in zip(search_steps, search_steps[1:])
+            )
+            assert len({total for _done, total in search_steps}) == 1
+            assert search_steps[-1] == (25, 25)
 
             assert win._line_search_state is not None
             profile: pd.DataFrame = win._line_search_state.profile
@@ -3123,6 +3324,7 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = threading.Event()
+        file_gate = tmp_path / "job_gate"
 
         def gated_fake(
             x: np.ndarray, _input_data: gui_data.GuiInputData
@@ -3136,6 +3338,19 @@ class TestLineSearch:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
         monkeypatch.setattr(gui_window, "arr_to_hydro_results", gated_fake)
+        # The search job's points run in a forked pool, whose
+        # workers resolve the fakes from the `data` module. The
+        # file gate holds them until the test releases it.
+        monkeypatch.setattr(
+            gui_data,
+            "arr_to_results",
+            _file_gated_fake(full_fake, file_gate),
+        )
+        monkeypatch.setattr(
+            gui_data,
+            "arr_to_hydro_results",
+            _file_gated_fake(full_fake, file_gate),
+        )
         win = gui_window.MainWindow(input_data)
         try:
             # The window's startup run blocks on the gate: a model
@@ -3182,9 +3397,10 @@ class TestLineSearch:
             assert np.array_equal(calls[0], _midpoint_vector(input_data))
 
             # With no job in flight, the same call starts the
-            # search: the base point's results are handed in, the
-            # worker computes the direction by its own central
-            # differences, and the 25 search points are run.
+            # search: the base point's results are handed in, and
+            # the worker computes the direction and the search
+            # points itself in the pool.
+            file_gate.touch()
             win._on_line_search_selected("Streamflow", "KGE", False)
             assert isinstance(win._worker, gui_window._LineSearchWorker)
             _wait_until(
@@ -3192,7 +3408,11 @@ class TestLineSearch:
                 and win._worker is None
             )
             _pump()
-            assert len(calls) == 1 + 2 * len(free) + 25
+            # Only the in-process startup run is recorded: the
+            # job's points ran in forked workers, whose calls
+            # never reach this process's list.
+            assert len(calls) == 1
         finally:
             gate.set()
+            file_gate.touch()
             _close_window(win)

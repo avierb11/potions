@@ -17,6 +17,9 @@ Covers the pure-Python layer of the GUI:
 * `potions.gui.gradients` — the finite-difference gradient
   calculator: the free-parameter perturbation, the objective
   vector, the difference matrix, and the timestamped CSV export.
+* `potions.gui.model_pool` — the worker pool the jobs use to run a
+  batch of parameter points: the per-worker initializer and the
+  per-point results / error-string reporting.
 * `potions.gui.plots` — the four figure builders and the objective
   table, asserted on the figures' artists (titles, axes, series
   counts, legend entries, colors, linestyles, clipping).
@@ -25,10 +28,12 @@ The Qt-layer tests live in `test_gui_qt.py`.
 """
 
 import json
+import multiprocessing
 import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Callable, ClassVar, Iterable
 
 import matplotlib
 import numpy as np
@@ -48,6 +53,7 @@ from potions.result_saving import (
 
 from ..gui import data as gui_data
 from ..gui import gradients as gui_gradients
+from ..gui import model_pool
 from ..gui import plots as gui_plots
 from ..gui import state as gui_state
 from ..gui.common import (
@@ -2328,3 +2334,275 @@ class TestGradientFigure:
         array = image.get_array()
         assert isinstance(array, np.ma.MaskedArray)
         assert array.mask.tolist() == [[True, True]]
+
+
+# ------------------------------------------------------------------ #
+# model_pool
+# ------------------------------------------------------------------ #
+
+
+def _marker_results(
+    input_data: gui_data.GuiInputData,
+    x: np.ndarray,
+    hydro_only: bool = False,
+) -> gui_data.GuiRunResults:
+    """
+    Synthetic results whose first hydro objective encodes the point.
+
+    The marker value — the sum of the point's elements, offset by
+    1000 in hydro mode so the two modes are distinguishable — is
+    placed in the first metric of the hydro objective series, so a
+    test can tell which point produced which results object.
+    """
+    index: pd.Index = input_data.forc.precip.index
+    marker: float = float(np.asarray(x).sum()) + (1000.0 if hydro_only else 0.0)
+    values: list[float] = [marker] + [0.0] * (len(METRIC_NAMES) - 1)
+    hydro: pt.HydroModelResults = pt.HydroModelResults(
+        forcing=input_data.forc,
+        simulation=_synthetic_hydro_sim(index),
+        objective_functions=pd.Series(values, index=METRIC_NAMES, dtype=float),
+    )
+    if hydro_only:
+        return gui_data.GuiRunResults(hydro, None)
+    rt: pt.RtModelResults = pt.RtModelResults(
+        simulation=_synthetic_rt_sim(
+            index, list(input_data.network.mineral_names)
+        ),
+        objective_functions=pd.DataFrame(
+            {
+                species: [0.5 + 0.1 * i for i in range(len(METRIC_NAMES))]
+                for species in ["DOC", "DIC", "Ca++"]
+            },
+            index=METRIC_NAMES,
+        ).T,
+        saved_dir=None,
+    )
+    return gui_data.GuiRunResults(hydro, rt)
+
+
+class _PoolRecorder:
+    """
+    A stand-in for ``multiprocessing.Pool`` for the pool tests.
+
+    It records each construction and, like the real pool, runs the
+    initializer once per requested worker before any task runs.
+    Tasks are executed in this process in reverse input order
+    (one of the legitimate out-of-order completions of
+    ``imap_unordered``) so an implementation that collected results
+    in arrival order would come out in the wrong order.
+    """
+
+    instances: ClassVar["list[_PoolRecorder]"] = []
+
+    def __init__(
+        self,
+        processes: int | None = None,
+        initializer: Callable[..., object] | None = None,
+        initargs: Iterable[Any] = (),
+    ) -> None:
+        self.processes: int = processes if processes is not None else 1
+        self.initializer: Callable[..., object] | None = initializer
+        self.initargs: Iterable[Any] = initargs
+        self.closed: bool = False
+        self.joined: bool = False
+        _PoolRecorder.instances.append(self)
+        for _worker in range(self.processes):
+            if initializer is not None:
+                initializer(*initargs)
+
+    def imap_unordered(
+        self,
+        func: Callable[[Any], Any],
+        iterable: Iterable[Any],
+        chunksize: int = 1,
+    ) -> list[Any]:
+        return list(reversed([func(task) for task in iterable]))
+
+    def close(self) -> None:
+        self.closed = True
+
+    def join(self) -> None:
+        self.joined = True
+
+
+@pytest.mark.skipif(
+    multiprocessing.get_start_method() != "fork",
+    reason="pool tests require the fork start method",
+)
+class TestModelPool:
+    """``model_pool.map_model_runs``: the shared worker pool for the jobs."""
+
+    @pytest.fixture(autouse=True)
+    def clear_pool_record(self) -> None:
+        _PoolRecorder.instances.clear()
+
+    def test_map_model_runs_returns_results_in_input_order(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        points: list[np.ndarray] = [
+            np.array([1.0, 2.0]),
+            np.array([-1.0, 0.5]),
+            np.array([0.0, 4.0]),
+        ]
+
+        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+            return input_data
+
+        def fake_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_results", fake_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
+
+        assert len(results) == 3
+        markers: list[float] = [
+            float(result.hydro.objective_functions.iloc[0])
+            for result in results
+            if not isinstance(result, str)
+        ]
+        assert len(markers) == 3
+        # The points' sums are 3.0, -0.5, and 4.0: the results must
+        # come back in input order, not in completion order.
+        assert markers == [3.0, -0.5, 4.0]
+        assert _PoolRecorder.instances[0].closed
+        assert _PoolRecorder.instances[0].joined
+
+    def test_map_model_runs_reports_worker_exceptions_as_strings(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        points: list[np.ndarray] = [
+            np.array([1.0, 2.0]),
+            np.array([-1.0, 0.5]),
+            np.array([0.0, 4.0]),
+        ]
+
+        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+            return input_data
+
+        def failing_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            if point[0] < 0:
+                raise ValueError("boom")
+            return _marker_results(data, point)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_results", failing_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
+
+        assert results[1] == "ValueError: boom"
+        assert not isinstance(results[0], str)
+        assert not isinstance(results[2], str)
+
+    def test_map_model_runs_empty_points_returns_empty_without_pool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        assert model_pool.map_model_runs([], MODE_FULL, "unused.csv") == []
+        assert _PoolRecorder.instances == []
+
+    def test_map_model_runs_initializer_failure_fails_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        points: list[np.ndarray] = [
+            np.array([1.0]),
+            np.array([2.0]),
+            np.array([3.0]),
+        ]
+
+        def failing_load(csv_path: Path) -> gui_data.GuiInputData:
+            raise RuntimeError("missing csv")
+
+        monkeypatch.setattr(gui_data, "load_input_data", failing_load)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
+
+        assert len(results) == 3
+        for result in results:
+            assert isinstance(result, str)
+            assert "missing csv" in result
+        assert _PoolRecorder.instances[0].closed
+        assert _PoolRecorder.instances[0].joined
+
+    def test_map_model_runs_initializer_runs_per_worker(
+        self,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log_file: Path = tmp_path / "worker_init.log"
+        points: list[np.ndarray] = [np.array([1.0]), np.array([2.0])]
+
+        def logging_load(csv_path: Path) -> gui_data.GuiInputData:
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"{csv_path}\n")
+            return input_data
+
+        def fake_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point)
+
+        monkeypatch.setattr(gui_data, "load_input_data", logging_load)
+        monkeypatch.setattr(gui_data, "arr_to_results", fake_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        results = model_pool.map_model_runs(
+            points, MODE_FULL, str(log_file), workers=2
+        )
+
+        assert len(results) == 2
+        # Two workers means exactly two initializer calls, each
+        # loading the CSV once.
+        assert log_file.read_text(encoding="utf-8").splitlines() == [
+            str(log_file),
+            str(log_file),
+        ]
+
+    def test_map_model_runs_hydro_mode_dispatches_to_hydro_results(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        points: list[np.ndarray] = [np.array([1.0, 2.0])]
+
+        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+            return input_data
+
+        def full_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            raise AssertionError(
+                "full-mode conversion should not run in hydro mode"
+            )
+
+        def hydro_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point, hydro_only=True)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_results", full_run)
+        monkeypatch.setattr(gui_data, "arr_to_hydro_results", hydro_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        results = model_pool.map_model_runs(points, MODE_HYDRO, "unused.csv")
+
+        assert len(results) == 1
+        first = results[0]
+        assert not isinstance(first, str)
+        assert first.rt is None
+        assert float(first.hydro.objective_functions.iloc[0]) == 1003.0

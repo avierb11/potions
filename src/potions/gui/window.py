@@ -127,6 +127,7 @@ from PySide6.QtWidgets import (
 
 from potions.gui.common import METRIC_NOTES
 from potions.gui.data import (
+    DEFAULT_CSV_PATH,
     GuiInputData,
     GuiRunResults,
     PlotSelection,
@@ -148,6 +149,7 @@ from potions.gui.line_search import (
     feasible_t_interval,
     write_line_search_csv,
 )
+from potions.gui.model_pool import map_model_runs
 from potions.gui.param_panel import ParamPanel
 from potions.gui.plots import (
     build_objective_table,
@@ -559,14 +561,15 @@ class _GradientWorker(QThread):
 
     Each free parameter is perturbed up and down by 1% of its
     current range (clamped to the range's ends) and each
-    perturbed point is run through the models in the job's run
-    mode; the base point reuses the window's results when they
-    were up to date at the job's start and is run otherwise.  The
-    worker mirrors its stdout to the real one (so console output
-    is unchanged) and forwards its progress lines to the window's
-    status bar; on completion it emits ``finished_gradient`` with
-    a `_GradientOutcome`.  Jobs cannot be interrupted, so the
-    window waits for a worker before closing.
+    perturbed point is modelled once, in a worker pool, in the
+    job's run mode; the base point reuses the window's results
+    when they were up to date at the job's start and is run
+    otherwise.  The worker mirrors its stdout to the real one
+    (so console output is unchanged) and forwards its progress
+    lines to the window's status bar; on completion it emits
+    ``finished_gradient`` with a `_GradientOutcome`.  Jobs cannot
+    be interrupted, so the window waits for a worker before
+    closing.
 
     Signals:
         finished_gradient: Emitted (on the main thread) with the
@@ -585,7 +588,8 @@ class _GradientWorker(QThread):
             parameter vector's key order.
         mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
             points run in.
-        input_data: The assembled calibration inputs.
+        csv_path: The path of the input CSV each pool worker
+            loads in its initializer.
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
             point too).
@@ -601,7 +605,7 @@ class _GradientWorker(QThread):
         base_x: np.ndarray,
         steps: list[_Perturbation],
         mode: str,
-        input_data: GuiInputData,
+        csv_path: str,
         base_results: GuiRunResults | None,
         parent: QObject | None = None,
     ) -> None:
@@ -609,19 +613,13 @@ class _GradientWorker(QThread):
         self._base_x: np.ndarray = base_x
         self._steps: list[_Perturbation] = steps
         self._mode: str = mode
-        self._input_data: GuiInputData = input_data
+        self._csv_path: str = csv_path
         self._base_results: GuiRunResults | None = base_results
 
     @staticmethod
     def _key(point: np.ndarray) -> tuple[float, ...]:
         """The identity of a parameter vector, for the results cache."""
         return tuple(float(value) for value in point)
-
-    def _run_point(self, point: np.ndarray) -> GuiRunResults:
-        """Run the models for `point` in this job's run mode."""
-        if self._mode == MODE_HYDRO:
-            return arr_to_hydro_results(point, self._input_data)
-        return arr_to_results(point, self._input_data)
 
     def run(self) -> None:
         """Run the points of the job and emit the outcome,
@@ -650,16 +648,22 @@ class _GradientWorker(QThread):
 
     def _compute(self, started: float) -> _GradientOutcome:
         """
-        Run the job's points and build its success outcome.
+        Run the job's points in a worker pool and build the
+        outcome.
 
         The base point is run only when it was not handed in; the
         perturbed points are deduplicated against it (a point
-        clamped at a range end coincides with the base) and each
-        distinct point is run once, in the steps' order.
+        clamped at a range end coincides with the base) and the
+        distinct points are each modelled once, in the pool.
 
         Each completed point is reported as a (done, total) step
         count (the base point when it was run, then each deduped
         perturbed point), for the window's progress bar.
+
+        A point that failed — including a failed pool initializer,
+        which fails every point its worker receives — fails the
+        whole job with the first failure's message, in the
+        points' input order.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -667,37 +671,59 @@ class _GradientWorker(QThread):
 
         Returns:
             The success outcome: the difference matrix, the base
-            point's results, and the path of the written CSV.
+            point's results, and the path of the written CSV; on
+            a failed point, the error outcome instead (with the
+            handed-in base results when there were any).
         """
         total: int = len(self._steps) * 2
-        if self._base_results is not None:
-            base_results: GuiRunResults = self._base_results
-            done: int = 0
-        else:
-            self.progress_line.emit(f"Gradient run 0/{total}: base")
-            base_results = self._run_point(self._base_x)
-            done = 1
-        results: dict[tuple[float, ...], GuiRunResults] = {}
-        results[self._key(self._base_x)] = base_results
 
         seen: set[tuple[float, ...]] = {self._key(self._base_x)}
-        pending: list[tuple[str, np.ndarray]] = []
+        points: list[np.ndarray] = []
+        labels: list[str] = []
+        if self._base_results is None:
+            points.append(self._base_x)
+            labels.append("base")
         for step in self._steps:
             for suffix, point in ((" +", step.x_plus), (" -", step.x_minus)):
                 key: tuple[float, ...] = self._key(point)
                 if key not in seen:
                     seen.add(key)
-                    pending.append((f"{step.key}{suffix}", point))
+                    points.append(point)
+                    labels.append(f"{step.key}{suffix}")
 
-        step_total: int = done + len(pending)
-        if done > 0:
-            self.progress_step.emit(done, step_total)
+        step_total: int = len(points)
+        done: int = 0
 
-        for index, (label, point) in enumerate(pending, start=1):
-            self.progress_line.emit(f"Gradient run {index}/{total}: {label}")
-            results[self._key(point)] = self._run_point(point)
+        def on_result(index: int, payload: GuiRunResults | str) -> None:
+            nonlocal done
             done += 1
+            self.progress_line.emit(
+                f"Gradient run {done}/{total}: {labels[index]}"
+            )
             self.progress_step.emit(done, step_total)
+
+        payloads: list[GuiRunResults | str] = map_model_runs(
+            points,
+            self._mode,
+            self._csv_path,
+            on_result=on_result,
+        )
+        results: dict[tuple[float, ...], GuiRunResults] = {}
+        if self._base_results is not None:
+            results[self._key(self._base_x)] = self._base_results
+        for point, payload in zip(points, payloads):
+            if isinstance(payload, str):
+                return _GradientOutcome(
+                    error=payload,
+                    table=None,
+                    base_results=self._base_results,
+                    base_x=self._base_x,
+                    mode=self._mode,
+                    csv_path=None,
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+            results[self._key(point)] = payload
+        base_results: GuiRunResults = results[self._key(self._base_x)]
 
         base_labels, _ = objective_vector(base_results)
         f_plus: list[np.ndarray] = []
@@ -786,6 +812,11 @@ class _LineSearchWorker(QThread):
     largest finite value is the best one (the searched metrics all
     have 1 as their optimal value, so maximizing finds it).
 
+    Every point — the base point when it was not handed in, the
+    direction's perturbation points when the direction is
+    computed, and the search's points — is modelled in a worker
+    pool.
+
     Signals:
         finished_line_search: Emitted with the job's outcome.
         progress_line: Emitted with a progress line (the point
@@ -795,6 +826,25 @@ class _LineSearchWorker(QThread):
             run, then each direction point when the direction is
             computed, then each of the search's points), for the
             window's progress bar.
+
+    Args:
+        base_x: The parameter vector to search from.
+        steps: The ± perturbation of every free parameter, in the
+            parameter vector's key order.
+        direction: The ascent direction, or None to compute it by
+            central differences.
+        target: The objective's target (measured series) name.
+        metric: The objective's metric (the display label, e.g.
+            ``KGE``).
+        mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
+            points run in.
+        csv_path: The path of the input CSV each pool worker
+            loads in its initializer.
+        bounds: The current parameter bounds, keyed by parameter.
+        base_results: The base point's results when they are
+            already up to date on screen (None to run the base
+            point too).
+        parent: The parent object (the window); defaults to None.
     """
 
     finished_line_search = Signal(_LineSearchOutcome)
@@ -809,7 +859,7 @@ class _LineSearchWorker(QThread):
         target: str,
         metric: str,
         mode: str,
-        input_data: GuiInputData,
+        csv_path: str,
         bounds: dict[str, tuple[float, float]],
         base_results: GuiRunResults | None,
         parent: QObject | None = None,
@@ -821,15 +871,9 @@ class _LineSearchWorker(QThread):
         self._target: str = target
         self._metric: str = metric
         self._mode: str = mode
-        self._input_data: GuiInputData = input_data
+        self._csv_path: str = csv_path
         self._bounds: dict[str, tuple[float, float]] = bounds
         self._base_results: GuiRunResults | None = base_results
-
-    def _run_point(self, x: np.ndarray) -> GuiRunResults:
-        """Run one parameter vector through the models in the job's mode."""
-        if self._mode == MODE_HYDRO:
-            return arr_to_hydro_results(x, self._input_data)
-        return arr_to_results(x, self._input_data)
 
     def _key(self, x: np.ndarray) -> tuple[float, ...]:
         """The deduplication key of a parameter vector (its values)."""
@@ -875,32 +919,60 @@ class _LineSearchWorker(QThread):
         except ValueError:
             return float("nan")
 
+    def _failed_outcome(
+        self, error: str, started: float
+    ) -> _LineSearchOutcome:
+        """
+        The failed-job outcome carrying `error`.
+
+        Args:
+            error: The failure, as reported by the point's run.
+            started: The wall-clock time the job started, for the
+                outcome's elapsed time.
+        """
+        return _LineSearchOutcome(
+            error=error,
+            profile=None,
+            x_best=None,
+            best_results=None,
+            csv_path=None,
+            target=self._target,
+            metric=self._metric,
+            mode=self._mode,
+            elapsed_seconds=time.perf_counter() - started,
+        )
+
     def _compute(self, started: float) -> _LineSearchOutcome:
         """
-        Run the job's points and build its success outcome.
+        Run the job's points in a worker pool and build its
+        success outcome.
 
         The base point is run only when it was not handed in.
-        When the direction was not handed in either, it is
-        computed as the normalized central-difference gradient of
-        the selected objective: every free parameter is
+        When the direction was not handed in either, the pool
+        first runs the direction's points — every free parameter
         perturbed up and down by 1% of its range (clamped to the
-        range's ends) and each perturbed point is run through the
-        models, deduplicated against the base point like the
-        gradient job; the direction is the selected objective's
-        row of the difference matrix, normalized to unit length
-        and expanded to the parameter vector's space (a pinned
-        parameter's component stays zero).
+        range's ends), deduplicated against the base point like
+        the gradient job — and the direction is then the selected
+        objective's row of their difference matrix, normalized to
+        unit length and expanded to the parameter vector's space
+        (a pinned parameter's component stays zero).
 
         The search then evaluates the objective at
-        `_LINE_SEARCH_POINTS` points on the ascent line ``x + t
-        * direction``, ``t`` equally spaced across the interval
-        that keeps every parameter inside its bounds, and the
-        point with the largest finite value is the best.
+        `_LINE_SEARCH_POINTS` further pool points on the ascent
+        line ``x + t * direction``, ``t`` equally spaced across
+        the interval that keeps every parameter inside its
+        bounds, and the point with the largest finite value is
+        the best.
 
         Each completed point is reported as a (done, total) step
-        count (the base point when it was run, then each direction
-        point when the direction is computed, then each of the
-        search's points), for the window's progress bar.
+        count (the base point when it was run, then each
+        direction point when the direction is computed, then each
+        of the search's points), for the window's progress bar.
+
+        A point that failed — including a failed pool
+        initializer, which fails every point its worker receives
+        — fails the whole job with the first failure's message,
+        in the points' input order.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -909,7 +981,8 @@ class _LineSearchWorker(QThread):
         Returns:
             The success outcome: the value profile, the best
             point's vector and results, and the path of the
-            written CSV.
+            written CSV; on a failed point, the error outcome
+            instead.
 
         Raises:
             ValueError:
@@ -920,23 +993,18 @@ class _LineSearchWorker(QThread):
                 reports a value).
         """
         total: int = len(self._steps) * 2
-        if self._base_results is not None:
-            base_results: GuiRunResults = self._base_results
-            done: int = 0
-        else:
-            self.progress_line.emit(f"Line search run 0/{total}: base")
-            base_results = self._run_point(self._base_x)
-            done = 1
 
-        if self._direction is not None:
-            direction: np.ndarray = self._direction
-            direction_points: int = 0
-        else:
-            # The direction's points are the deduplicated
-            # perturbations of the free parameters, exactly as
-            # `_difference_direction` will run them.
+        # The first pool phase: the base point when it was not
+        # handed in, and — when the direction must be computed —
+        # the direction's deduplicated perturbation points, the
+        # same set the gradient job would run.
+        phase1_points: list[np.ndarray] = []
+        phase1_labels: list[str] = []
+        if self._base_results is None:
+            phase1_points.append(self._base_x)
+            phase1_labels.append("base")
+        if self._direction is None:
             seen: set[tuple[float, ...]] = {self._key(self._base_x)}
-            pending: list[tuple[str, np.ndarray]] = []
             for step in self._steps:
                 for suffix, point in (
                     (" +", step.x_plus),
@@ -945,20 +1013,43 @@ class _LineSearchWorker(QThread):
                     key: tuple[float, ...] = self._key(point)
                     if key not in seen:
                         seen.add(key)
-                        pending.append((f"{step.key}{suffix}", point))
-            direction_points = len(pending)
+                        phase1_points.append(point)
+                        phase1_labels.append(f"{step.key}{suffix}")
 
-        step_total: int = done + direction_points + _LINE_SEARCH_POINTS
-        if done > 0:
+        step_total: int = len(phase1_points) + _LINE_SEARCH_POINTS
+        done: int = 0
+
+        def on_phase1_result(
+            index: int, payload: GuiRunResults | str
+        ) -> None:
+            nonlocal done
+            done += 1
+            self.progress_line.emit(
+                f"Line search run {done}/{total}: {phase1_labels[index]}"
+            )
             self.progress_step.emit(done, step_total)
 
-        if self._direction is not None:
-            direction = self._direction
-        else:
-            direction = self._difference_direction(
-                base_results, done, step_total
+        phase1_payloads: list[GuiRunResults | str] = []
+        if phase1_points:
+            phase1_payloads = map_model_runs(
+                phase1_points,
+                self._mode,
+                self._csv_path,
+                on_result=on_phase1_result,
             )
-            done += direction_points
+        results: dict[tuple[float, ...], GuiRunResults] = {}
+        if self._base_results is not None:
+            results[self._key(self._base_x)] = self._base_results
+        for point, payload in zip(phase1_points, phase1_payloads):
+            if isinstance(payload, str):
+                return self._failed_outcome(payload, started)
+            results[self._key(point)] = payload
+        base_results: GuiRunResults = results[self._key(self._base_x)]
+
+        if self._direction is not None:
+            direction: np.ndarray = self._direction
+        else:
+            direction = self._difference_direction(base_results, results)
 
         interval: tuple[float, float] | None = feasible_t_interval(
             self._base_x, direction, self._steps, self._bounds
@@ -971,19 +1062,35 @@ class _LineSearchWorker(QThread):
             )
         t_lo, t_hi = interval
         t_points: np.ndarray = np.linspace(t_lo, t_hi, _LINE_SEARCH_POINTS)
+        search_points: list[np.ndarray] = [
+            self._base_x + t * direction for t in t_points
+        ]
+        search_labels: list[str] = [f"t = {t:.4f}" for t in t_points]
+
+        def on_search_result(
+            index: int, payload: GuiRunResults | str
+        ) -> None:
+            nonlocal done
+            done += 1
+            self.progress_line.emit(
+                f"Line search run {done}/{total}: {search_labels[index]}"
+            )
+            self.progress_step.emit(done, step_total)
+
+        search_payloads: list[GuiRunResults | str] = map_model_runs(
+            search_points,
+            self._mode,
+            self._csv_path,
+            on_result=on_search_result,
+        )
 
         values: list[float] = []
-        results: list[GuiRunResults] = []
-        for index, t in enumerate(t_points, start=1):
-            self.progress_line.emit(
-                f"Line search run {index}/{total}: t = {t:.4f}"
-            )
-            x_point: np.ndarray = self._base_x + t * direction
-            point_results: GuiRunResults = self._run_point(x_point)
-            values.append(self._point_value(point_results))
-            results.append(point_results)
-            done += 1
-            self.progress_step.emit(done, step_total)
+        point_results: list[GuiRunResults] = []
+        for payload in search_payloads:
+            if isinstance(payload, str):
+                return self._failed_outcome(payload, started)
+            point_results.append(payload)
+            values.append(self._point_value(payload))
         values_array: np.ndarray = np.array(values, dtype=np.float64)
         if not np.isfinite(values_array).any():
             raise ValueError(
@@ -992,7 +1099,7 @@ class _LineSearchWorker(QThread):
             )
         best_index: int = int(np.nanargmax(values_array))
         x_best: np.ndarray = self._base_x + t_points[best_index] * direction
-        best_results: GuiRunResults = results[best_index]
+        best_results: GuiRunResults = point_results[best_index]
 
         columns: dict[str, np.ndarray] = {"value": values_array}
         for step in self._steps:
@@ -1017,31 +1124,30 @@ class _LineSearchWorker(QThread):
     def _difference_direction(
         self,
         base_results: GuiRunResults,
-        done: int,
-        total: int,
+        results: dict[tuple[float, ...], GuiRunResults],
     ) -> np.ndarray:
         """
         The normalized steepest-ascent direction of the job's
-        objective, from central differences.
+        objective, from its direction points' central
+        differences.
 
-        Every free parameter is perturbed up and down by 1% of its
-        range (clamped to the range's ends) and each perturbed
-        point — deduplicated against the base point, like the
-        gradient job — is run through the models.  The direction
-        is the selected objective's row of the difference matrix,
-        normalized to unit length and expanded to the parameter
-        vector's space (a pinned parameter's component stays zero).
-
-        Each completed point is reported as a (done, total) step
-        count, continuing from `done` out of `total` steps, for
-        the window's progress bar.
+        The direction's points — every free parameter perturbed
+        up and down by 1% of its range (clamped to the range's
+        ends), deduplicated against the base point, like the
+        gradient job — were already run in the job's first pool
+        phase; their results, together with the base point's,
+        are `results`.  This method reads them only, so it runs
+        no points and reports no progress of its own.  The
+        direction is the selected objective's row of the
+        difference matrix, normalized to unit length and expanded
+        to the parameter vector's space (a pinned parameter's
+        component stays zero).
 
         Args:
             base_results: The base point's results (its objective
                 vector carries the row's label).
-            done: The number of steps completed before this
-                method's points.
-            total: The job's total step count.
+            results: The first phase's results, keyed by each
+                point's value tuple (the base point's included).
 
         Returns:
             The unit-length direction vector, in the parameter
@@ -1054,27 +1160,6 @@ class _LineSearchWorker(QThread):
                 all finite, or when they are all zero (no
                 direction).
         """
-        line_total: int = len(self._steps) * 2
-        results: dict[tuple[float, ...], GuiRunResults] = {}
-        results[self._key(self._base_x)] = base_results
-
-        seen: set[tuple[float, ...]] = {self._key(self._base_x)}
-        pending: list[tuple[str, np.ndarray]] = []
-        for step in self._steps:
-            for suffix, point in ((" +", step.x_plus), (" -", step.x_minus)):
-                key: tuple[float, ...] = self._key(point)
-                if key not in seen:
-                    seen.add(key)
-                    pending.append((f"{step.key}{suffix}", point))
-
-        for index, (label, point) in enumerate(pending, start=1):
-            self.progress_line.emit(
-                f"Line search run {index}/{line_total}: {label}"
-            )
-            results[self._key(point)] = self._run_point(point)
-            done += 1
-            self.progress_step.emit(done, total)
-
         base_labels, _ = objective_vector(base_results)
         try:
             row_index: int = base_labels.index(
@@ -2167,7 +2252,7 @@ class MainWindow(QMainWindow):
             x,
             steps,
             self._current_mode(),
-            self._input_data,
+            self._csv_path or str(DEFAULT_CSV_PATH),
             base_results,
             self,
         )
@@ -2374,7 +2459,7 @@ class MainWindow(QMainWindow):
             target,
             metric,
             self._current_mode(),
-            self._input_data,
+            self._csv_path or str(DEFAULT_CSV_PATH),
             bounds,
             base_results,
             self,
