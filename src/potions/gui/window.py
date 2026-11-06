@@ -200,6 +200,17 @@ _INITIAL_SPLIT_SIZES: Final[tuple[int, int]] = (350, 530)
 _STATUS_MIN_WIDTH: Final[int] = 80
 _STATUS_MAX_WIDTH: Final[int] = 350
 
+# The side (px) of the header's running-indicator square.  Its
+# fixed size keeps the header's — and so the window's — minimum
+# width constant whether or not a job is running.
+_SPINNER_SIZE: Final[int] = 24
+
+# The period (ms) of the running indicator's frame-advance timer.
+_SPINNER_INTERVAL_MS: Final[int] = 100
+
+# The running indicator's frames, in cycle order.
+_SPINNER_FRAMES: Final[tuple[str, ...]] = ("▖", "▘", "▝", "▗")
+
 # The fixed objective panel's contents margins (px) in the order
 # left, top, right, bottom: the panel is sized exactly to fit its
 # heading and table plus these margins, so they are the only
@@ -400,6 +411,10 @@ class _RunWorker(QThread):
             `_RunOutcome` of this run.
         progress_line: Emitted with each completed stdout line of
             the run, for the window's status bar.
+        progress_step: Emitted with (done, total) step counts:
+            (0, 1) before the models run and (1, 1) before the
+            outcome, on both the success and the error path, for
+            the window's progress bar.
 
     Args:
         generation: The run's generation counter.
@@ -412,6 +427,7 @@ class _RunWorker(QThread):
 
     finished_run = Signal(object)
     progress_line = Signal(str)
+    progress_step = Signal(int, int)
 
     def __init__(
         self,
@@ -437,6 +453,7 @@ class _RunWorker(QThread):
         results: GuiRunResults | None = None
         error: str | None = None
         exception: Exception | None = None
+        self.progress_step.emit(0, 1)
         try:
             if self._mode == MODE_HYDRO:
                 results = arr_to_hydro_results(self._x, self._input_data)
@@ -448,6 +465,7 @@ class _RunWorker(QThread):
             error = f"{type(err).__name__}: {err}"
         finally:
             sys.stdout = real_stdout
+        self.progress_step.emit(1, 1)
         self.finished_run.emit(
             _RunOutcome(
                 self._generation,
@@ -556,6 +574,10 @@ class _GradientWorker(QThread):
         progress_line: Emitted with the job's progress lines (the
             base point, then each perturbed point), for the
             window's status bar.
+        progress_step: Emitted with (done, total) step counts:
+            one per completed point (the base point when it was
+            run, then each deduped perturbed point), for the
+            window's progress bar.
 
     Args:
         base_x: The parameter vector to differentiate around.
@@ -572,6 +594,7 @@ class _GradientWorker(QThread):
 
     finished_gradient = Signal(object)
     progress_line = Signal(str)
+    progress_step = Signal(int, int)
 
     def __init__(
         self,
@@ -634,6 +657,10 @@ class _GradientWorker(QThread):
         clamped at a range end coincides with the base) and each
         distinct point is run once, in the steps' order.
 
+        Each completed point is reported as a (done, total) step
+        count (the base point when it was run, then each deduped
+        perturbed point), for the window's progress bar.
+
         Args:
             started: The wall-clock time the job started, for the
                 outcome's elapsed time.
@@ -645,9 +672,11 @@ class _GradientWorker(QThread):
         total: int = len(self._steps) * 2
         if self._base_results is not None:
             base_results: GuiRunResults = self._base_results
+            done: int = 0
         else:
             self.progress_line.emit(f"Gradient run 0/{total}: base")
             base_results = self._run_point(self._base_x)
+            done = 1
         results: dict[tuple[float, ...], GuiRunResults] = {}
         results[self._key(self._base_x)] = base_results
 
@@ -660,9 +689,15 @@ class _GradientWorker(QThread):
                     seen.add(key)
                     pending.append((f"{step.key}{suffix}", point))
 
+        step_total: int = done + len(pending)
+        if done > 0:
+            self.progress_step.emit(done, step_total)
+
         for index, (label, point) in enumerate(pending, start=1):
             self.progress_line.emit(f"Gradient run {index}/{total}: {label}")
             results[self._key(point)] = self._run_point(point)
+            done += 1
+            self.progress_step.emit(done, step_total)
 
         base_labels, _ = objective_vector(base_results)
         f_plus: list[np.ndarray] = []
@@ -755,10 +790,16 @@ class _LineSearchWorker(QThread):
         finished_line_search: Emitted with the job's outcome.
         progress_line: Emitted with a progress line (the point
             being run), shown in the window's status line.
+        progress_step: Emitted with (done, total) step counts:
+            one per completed point (the base point when it was
+            run, then each direction point when the direction is
+            computed, then each of the search's points), for the
+            window's progress bar.
     """
 
     finished_line_search = Signal(_LineSearchOutcome)
     progress_line = Signal(str)
+    progress_step = Signal(int, int)
 
     def __init__(
         self,
@@ -856,6 +897,11 @@ class _LineSearchWorker(QThread):
         that keeps every parameter inside its bounds, and the
         point with the largest finite value is the best.
 
+        Each completed point is reported as a (done, total) step
+        count (the base point when it was run, then each direction
+        point when the direction is computed, then each of the
+        search's points), for the window's progress bar.
+
         Args:
             started: The wall-clock time the job started, for the
                 outcome's elapsed time.
@@ -876,14 +922,43 @@ class _LineSearchWorker(QThread):
         total: int = len(self._steps) * 2
         if self._base_results is not None:
             base_results: GuiRunResults = self._base_results
+            done: int = 0
         else:
             self.progress_line.emit(f"Line search run 0/{total}: base")
             base_results = self._run_point(self._base_x)
+            done = 1
 
         if self._direction is not None:
             direction: np.ndarray = self._direction
+            direction_points: int = 0
         else:
-            direction = self._difference_direction(base_results)
+            # The direction's points are the deduplicated
+            # perturbations of the free parameters, exactly as
+            # `_difference_direction` will run them.
+            seen: set[tuple[float, ...]] = {self._key(self._base_x)}
+            pending: list[tuple[str, np.ndarray]] = []
+            for step in self._steps:
+                for suffix, point in (
+                    (" +", step.x_plus),
+                    (" -", step.x_minus),
+                ):
+                    key: tuple[float, ...] = self._key(point)
+                    if key not in seen:
+                        seen.add(key)
+                        pending.append((f"{step.key}{suffix}", point))
+            direction_points = len(pending)
+
+        step_total: int = done + direction_points + _LINE_SEARCH_POINTS
+        if done > 0:
+            self.progress_step.emit(done, step_total)
+
+        if self._direction is not None:
+            direction = self._direction
+        else:
+            direction = self._difference_direction(
+                base_results, done, step_total
+            )
+            done += direction_points
 
         interval: tuple[float, float] | None = feasible_t_interval(
             self._base_x, direction, self._steps, self._bounds
@@ -907,6 +982,8 @@ class _LineSearchWorker(QThread):
             point_results: GuiRunResults = self._run_point(x_point)
             values.append(self._point_value(point_results))
             results.append(point_results)
+            done += 1
+            self.progress_step.emit(done, step_total)
         values_array: np.ndarray = np.array(values, dtype=np.float64)
         if not np.isfinite(values_array).any():
             raise ValueError(
@@ -938,7 +1015,10 @@ class _LineSearchWorker(QThread):
         )
 
     def _difference_direction(
-        self, base_results: GuiRunResults
+        self,
+        base_results: GuiRunResults,
+        done: int,
+        total: int,
     ) -> np.ndarray:
         """
         The normalized steepest-ascent direction of the job's
@@ -952,9 +1032,16 @@ class _LineSearchWorker(QThread):
         normalized to unit length and expanded to the parameter
         vector's space (a pinned parameter's component stays zero).
 
+        Each completed point is reported as a (done, total) step
+        count, continuing from `done` out of `total` steps, for
+        the window's progress bar.
+
         Args:
             base_results: The base point's results (its objective
                 vector carries the row's label).
+            done: The number of steps completed before this
+                method's points.
+            total: The job's total step count.
 
         Returns:
             The unit-length direction vector, in the parameter
@@ -967,7 +1054,7 @@ class _LineSearchWorker(QThread):
                 all finite, or when they are all zero (no
                 direction).
         """
-        total: int = len(self._steps) * 2
+        line_total: int = len(self._steps) * 2
         results: dict[tuple[float, ...], GuiRunResults] = {}
         results[self._key(self._base_x)] = base_results
 
@@ -981,8 +1068,12 @@ class _LineSearchWorker(QThread):
                     pending.append((f"{step.key}{suffix}", point))
 
         for index, (label, point) in enumerate(pending, start=1):
-            self.progress_line.emit(f"Line search run {index}/{total}: {label}")
+            self.progress_line.emit(
+                f"Line search run {index}/{line_total}: {label}"
+            )
             results[self._key(point)] = self._run_point(point)
+            done += 1
+            self.progress_step.emit(done, total)
 
         base_labels, _ = objective_vector(base_results)
         try:
@@ -1160,6 +1251,64 @@ class _StatusLabel(QLabel):
         """The minimum: a small fixed width and the hint's height."""
         hint = super().minimumSizeHint()
         return QSize(min(hint.width(), _STATUS_MIN_WIDTH), hint.height())
+
+
+class _SpinnerLabel(QLabel):
+    """
+    The header's running-job indicator: a small square label that
+    cycles through its frames while a job (a run, a gradient
+    computation, or a line search) is in flight.
+
+    The label is hidden while no job runs and has a fixed square
+    footprint (see `_SPINNER_SIZE`), so showing or hiding it never
+    changes the header's minimum width and never resizes the
+    window.  While spinning, a timer advances the displayed frame
+    on each tick (see `_SPINNER_INTERVAL_MS`).
+
+    Args:
+        parent: The parent widget; defaults to None.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._frame_index: int = 0
+        self.setFixedSize(_SPINNER_SIZE, _SPINNER_SIZE)
+        font: QFont = QFont(self.font())
+        font.setBold(True)
+        self.setFont(font)
+        self._timer: QTimer = QTimer(self)
+        self._timer.setInterval(_SPINNER_INTERVAL_MS)
+        self._timer.timeout.connect(self._advance_frame)
+        self.hide()
+
+    def set_spinning(self, enabled: bool) -> None:
+        """
+        Show or hide the indicator.
+
+        Enabling shows the label at its current frame and starts
+        the frame-advance timer; disabling stops the timer, hides
+        the label, and clears the frame.
+
+        Args:
+            enabled: Whether a job is in flight.
+        """
+        if enabled:
+            self._show_frame()
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self.setText("")
+            self.hide()
+
+    def _show_frame(self) -> None:
+        """Set the current frame and make the label visible."""
+        self.setText(_SPINNER_FRAMES[self._frame_index])
+        self.show()
+
+    def _advance_frame(self) -> None:
+        """Advance to the next frame of the cycle."""
+        self._frame_index = (self._frame_index + 1) % len(_SPINNER_FRAMES)
+        self._show_frame()
 
 
 # ==== Main window ==== #
@@ -1345,22 +1494,29 @@ class MainWindow(QMainWindow):
 
     def _build_header(self) -> QWidget:
         """
-        Build the header row: title, status, and buttons.
+        Build the header row: title, running indicator, status, and
+        buttons.
 
-        The row carries no job indicators (they live in the bottom
-        strip), so the window's minimum width is the same whether
-        or not a job is in flight.  The status label is the row's
-        only compressible item: it reports a small minimum (see
-        `_StatusLabel`) and stretches between the mode checkbox
-        and the job checkboxes, so a narrow window clips its text
-        (the tooltip keeps the full message) instead of pushing
-        the window past the screen.
+        The row carries the fixed-size running indicator (a
+        `_SpinnerLabel`) next to the title: its footprint does not
+        change with the job state, so the window's minimum width is
+        the same whether or not a job is in flight (the remaining
+        job indicators live in the bottom strip).  The status label
+        is the row's only compressible item: it reports a small
+        minimum (see `_StatusLabel`) and stretches between the mode
+        checkbox and the job checkboxes, so a narrow window clips
+        its text (the tooltip keeps the full message) instead of
+        pushing the window past the screen.
         """
         title: QLabel = QLabel(_TITLE)
         font: QFont = QFont(title.font())
         font.setBold(True)
         font.setPointSize(max(9, font.pointSize() + 2))
         title.setFont(font)
+
+        # The running-job indicator: hidden at rest, its fixed size
+        # keeps the row's footprint constant either way.
+        self._job_spinner: _SpinnerLabel = _SpinnerLabel()
 
         # Off by default: the models run in full mode.
         self._mode_checkbox: QCheckBox = QCheckBox("Hydrology only")
@@ -1448,6 +1604,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
         layout.addWidget(title)
+        layout.addWidget(self._job_spinner)
         layout.addWidget(self._mode_checkbox)
         layout.addStretch(1)
         # The status label stretches with the middle stretch (both
@@ -1470,9 +1627,12 @@ class MainWindow(QMainWindow):
         """
         Build the thin strip along the window's bottom edge.
 
-        The strip carries the indeterminate progress bar and the
-        elapsed-time label; it is hidden except while a job (a run,
-        a gradient computation, or a line search) is in flight.
+        The strip carries the progress bar and the elapsed-time
+        label; it is hidden except while a job (a run, a gradient
+        computation, or a line search) is in flight.  The bar is
+        indeterminate at rest and becomes determinate while a job
+        reports its completed steps (`progress_step`); the job's
+        finish handlers restore the indeterminate rest state.
         Keeping the job indicators out of the header row means the
         header's width — and with it the window's minimum width —
         is the same whether or not a job is running, so switching
@@ -1480,8 +1640,10 @@ class MainWindow(QMainWindow):
         screen.
         """
         self._progress_bar: QProgressBar = QProgressBar()
-        # Range (0, 0): an indeterminate (animated) bar; the jobs
-        # report no reliable percentage of work remaining.
+        # Range (0, 0): the indeterminate (animated) rest state; a
+        # job's progress_step counts make the bar determinate (see
+        # `_on_progress_step`) and its finish handlers restore
+        # this state.
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setTextVisible(False)
         self._elapsed_label: QLabel = QLabel("")
@@ -1492,6 +1654,26 @@ class MainWindow(QMainWindow):
         strip_layout.addWidget(self._progress_bar, 1)
         strip_layout.addWidget(self._elapsed_label)
         self._progress_strip.hide()
+
+    def _on_progress_step(self, done: int, total: int) -> None:
+        """
+        Update the progress bar from a job's step count.
+
+        When the job reports a non-zero total step count, the bar
+        becomes determinate for it (its range matches the total and
+        its percentage is shown) and advances to the number of
+        completed steps; a job that reports no total leaves the bar
+        indeterminate.
+
+        Args:
+            done: The number of steps the job has completed.
+            total: The job's total step count (0 if it reports
+                none).
+        """
+        if total > 0 and self._progress_bar.maximum() != total:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setTextVisible(True)
+        self._progress_bar.setValue(done)
 
     def _build_figure_panel(self) -> FigurePanel:
         """Build the figure panel (its header carries the arrow buttons)."""
@@ -1793,6 +1975,10 @@ class MainWindow(QMainWindow):
         self._start_mode = mode
         self._run_started_at = time.perf_counter()
         self._progress_strip.show()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
+        self._job_spinner.set_spinning(True)
         self._run_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
@@ -1803,6 +1989,7 @@ class MainWindow(QMainWindow):
             self._run_generation, x, self._input_data, mode, self
         )
         worker.progress_line.connect(self._on_progress_line)
+        worker.progress_step.connect(self._on_progress_step)
         worker.finished_run.connect(self._on_finished_run)
         worker.finished.connect(self._on_worker_finished)
         worker.finished.connect(worker.deleteLater)
@@ -1847,6 +2034,10 @@ class MainWindow(QMainWindow):
         """
         self._elapsed_timer.stop()
         self._progress_strip.hide()
+        self._job_spinner.set_spinning(False)
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
 
         if not isinstance(payload, _RunOutcome):
             return
@@ -1962,6 +2153,10 @@ class MainWindow(QMainWindow):
 
         self._run_started_at = time.perf_counter()
         self._progress_strip.show()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
+        self._job_spinner.set_spinning(True)
         self._run_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
@@ -1977,6 +2172,7 @@ class MainWindow(QMainWindow):
             self,
         )
         worker.progress_line.connect(self._on_gradient_progress_line)
+        worker.progress_step.connect(self._on_progress_step)
         worker.finished_gradient.connect(self._on_finished_gradient)
         worker.finished.connect(self._on_worker_finished)
         worker.finished.connect(worker.deleteLater)
@@ -2005,6 +2201,10 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.stop()
         self._progress_strip.hide()
         self._run_started_at = None
+        self._job_spinner.set_spinning(False)
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
 
         if not isinstance(payload, _GradientOutcome):
             return
@@ -2148,6 +2348,10 @@ class MainWindow(QMainWindow):
 
         self._run_started_at = time.perf_counter()
         self._progress_strip.show()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
+        self._job_spinner.set_spinning(True)
         self._run_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
@@ -2167,6 +2371,7 @@ class MainWindow(QMainWindow):
         )
         worker: _LineSearchWorker = self._worker
         worker.progress_line.connect(self._on_line_search_progress_line)
+        worker.progress_step.connect(self._on_progress_step)
         worker.finished_line_search.connect(self._on_finished_line_search)
         worker.finished.connect(self._on_worker_finished)
         worker.finished.connect(worker.deleteLater)
@@ -2197,6 +2402,10 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.stop()
         self._progress_strip.hide()
         self._run_started_at = None
+        self._job_spinner.set_spinning(False)
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
         self._gradients_button.setEnabled(True)
         self._line_search_button.setEnabled(True)
 

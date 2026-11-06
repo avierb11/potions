@@ -2470,6 +2470,52 @@ def _only_csv(tmp_path: Path) -> Path:
     return csvs[0]
 
 
+# ------------------------------------------------------------------ #
+# _SpinnerLabel (standalone)
+# ------------------------------------------------------------------ #
+
+
+class TestSpinnerLabel:
+    """The header's running-job indicator."""
+
+    def test_spinner_label_cycles_frames(self, qapp: QApplication) -> None:
+        """
+        The indicator is hidden at rest and keeps a fixed 24 px
+        footprint; while spinning it shows and cycles its frames on
+        each timer tick, and stopping hides it again and clears the
+        frame.
+        """
+        label = gui_window._SpinnerLabel()
+        try:
+            # Hidden at rest, with the fixed square footprint.
+            assert label.isHidden()
+            assert label.text() == ""
+            assert label.minimumWidth() == gui_window._SPINNER_SIZE
+            assert label.maximumWidth() == gui_window._SPINNER_SIZE
+            assert label.minimumHeight() == gui_window._SPINNER_SIZE
+            assert label.maximumHeight() == gui_window._SPINNER_SIZE
+
+            # Spinning shows the current frame and advances it on
+            # each tick; the ~200 ms pump below spans at least two
+            # 100 ms periods, but the exact tick count depends on
+            # timer drift, so only "changed" is asserted.
+            label.set_spinning(True)
+            assert not label.isHidden()
+            first_frame: str = label.text()
+            assert first_frame in gui_window._SPINNER_FRAMES
+            _pump(gui_window._SPINNER_INTERVAL_MS + 50)
+            assert label.text() != first_frame
+            assert label.text() in gui_window._SPINNER_FRAMES
+
+            # Stopping hides the indicator and clears the frame.
+            label.set_spinning(False)
+            assert label.isHidden()
+            assert label.text() == ""
+        finally:
+            label.deleteLater()
+            _pump()
+
+
 class TestGradients:
     """The header's *Gradients* button: the finite-difference jobs."""
 
@@ -2669,6 +2715,102 @@ class TestGradients:
             assert len(calls) == 1
             assert win._gradients_button.isEnabled()
         finally:
+            _close_window(win)
+
+    def test_gradient_job_progress_step_counts(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A gradient job reports each completed point as a
+        (done, total) step count, so the bar is determinate and the
+        header's spinner spins while the job runs; both go back to
+        their rest state when the job finishes.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _gradient_window(
+            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        )
+        gate = threading.Event()
+        try:
+            # Let the window's startup run finish first, so the
+            # job's base point is handed in rather than rerun.
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert win._results_are_up_to_date()
+
+            # The job's own model calls block on a gate until the
+            # test has connected to the worker's progress_step
+            # signal: the worker is created by the click, so it
+            # cannot be connected in advance, and the gate keeps it
+            # from completing (and emitting a step for) a point
+            # before the connection.
+            def gated_fake(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                gate.wait(timeout=60)
+                return full_fake(x, _input_data)
+
+            monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
+            monkeypatch.setattr(
+                gui_window, "arr_to_hydro_results", gated_fake
+            )
+            calls.clear()
+
+            win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+
+            steps: list[tuple[int, int]] = []
+            spinner_up: list[bool] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+                spinner_up.append(not win._job_spinner.isHidden())
+
+            worker.progress_step.connect(on_step)
+            gate.set()
+
+            _wait_until(
+                lambda: win._gradient_state is not None
+                and win._worker is None
+            )
+            _pump()
+
+            # Every completed point is one step, in order, and the
+            # last step completes the bar.
+            assert len(steps) > 0
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1][0] == total
+
+            # The base was handed in, so the total is the deduped
+            # number of perturbed points: at most one point per
+            # parameter coincides with the base, and each
+            # parameter contributes at least one of its two.
+            assert len(free) <= total <= 2 * len(free)
+            assert len(calls) == total
+
+            # The spinner is up for every step and down after the
+            # job, and the bar is back to its indeterminate rest
+            # state with the strip hidden.
+            assert all(spinner_up)
+            assert win._job_spinner.isHidden()
+            assert win._progress_bar.maximum() == 0
+            assert not win._progress_bar.isTextVisible()
+            assert win._progress_strip.isHidden()
+        finally:
+            gate.set()
             _close_window(win)
 
 
