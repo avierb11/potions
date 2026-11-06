@@ -200,9 +200,9 @@ def _install_bounds_stub(
     """
     Replace `param_panel._BoundsDialog` with a recording stub.
 
-    Each constructed dialog is recorded (title, prefilled ends, and
-    hint) and `run()` returns `answer` (None stands in for a
-    cancelled dialog).
+    Each constructed dialog is recorded (title, prefilled ends,
+    hint, and the value the static option would pin) and `run()`
+    returns `answer` (None stands in for a cancelled dialog).
 
     Returns:
         The list of recorded dialog constructions.
@@ -216,9 +216,18 @@ def _install_bounds_stub(
             lo: float,
             hi: float,
             hint: str | None,
+            value: float,
             parent: object | None = None,
         ) -> None:
-            records.append({"title": title, "lo": lo, "hi": hi, "hint": hint})
+            records.append(
+                {
+                    "title": title,
+                    "lo": lo,
+                    "hi": hi,
+                    "hint": hint,
+                    "value": value,
+                }
+            )
 
         def run(self) -> tuple[float, float] | None:
             return answer
@@ -2126,6 +2135,78 @@ class TestParamPanel:
             assert isinstance(row, gui_param_panel._FreeCell)
             assert row._bounds == (0.5, 0.8)
             assert bounds == [(key, 0.5, 0.95), (key, 0.5, 0.8)]
+            assert values == [key, key]
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_bounds_dialog_static_option_pins_parameter(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A degenerate dialog result pins a free parameter at its
+        displayed value; a degenerate result from the unlock dialog
+        is a no-op; a real range frees the parameter again.
+        """
+        panel = self._make_panel(input_data)
+        try:
+            key: str = "proportion.1"
+            row = panel._rows[key]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            v: float = panel._values[key]
+            lo, hi = panel._bounds[key]
+            bounds: list[tuple[str, float, float]] = []
+            values: list[str] = []
+            panel.bounds_changed.connect(
+                lambda k, lo2, hi2: bounds.append((k, lo2, hi2))
+            )
+            panel.value_changed.connect(values.append)
+
+            # 1. A degenerate (equal) result from the range dialog
+            #    pins the parameter at its displayed value.
+            records = _install_bounds_stub(monkeypatch, (v, v))
+            line_edit = row._spin.lineEdit()
+            assert line_edit is not None
+            qapp.sendEvent(line_edit, _double_click_event())
+            assert len(records) == 1
+            assert records[0]["value"] == pytest.approx(v)
+            assert records[0]["lo"] == pytest.approx(lo)
+            assert records[0]["hi"] == pytest.approx(hi)
+            pinned = panel._rows[key]
+            assert isinstance(pinned, gui_param_panel._PinnedCell)
+            assert panel._bounds[key] == (v, v)
+            assert panel._values[key] == pytest.approx(v)
+            assert bounds == [(key, v, v)]
+            assert values == [key]
+
+            # 2. A degenerate result from the pinned cell's unlock
+            #    dialog is a no-op: the row stays pinned at the
+            #    same value.
+            records = _install_bounds_stub(monkeypatch, (v, v))
+            qapp.sendEvent(pinned._value, _double_click_event())
+            assert len(records) == 1
+            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
+            assert panel._bounds[key] == (v, v)
+            assert panel._values[key] == pytest.approx(v)
+            assert bounds == [(key, v, v)]
+            assert values == [key]
+
+            # 3. A real range from the unlock dialog converts the
+            #    cell back into a free cell, keeping the value.
+            lo2: float = v - 0.2
+            hi2: float = v + 0.2
+            records = _install_bounds_stub(monkeypatch, (lo2, hi2))
+            pinned = panel._rows[key]
+            qapp.sendEvent(pinned._value, _double_click_event())
+            assert len(records) == 1
+            free_cell = panel._rows[key]
+            assert isinstance(free_cell, gui_param_panel._FreeCell)
+            assert panel._bounds[key] == (lo2, hi2)
+            assert panel._values[key] == pytest.approx(v)
+            assert bounds == [(key, v, v), (key, lo2, hi2)]
             assert values == [key, key]
         finally:
             panel.deleteLater()

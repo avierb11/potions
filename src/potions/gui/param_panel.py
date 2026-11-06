@@ -426,18 +426,24 @@ class _ZoneHeader(QLabel):
 class _BoundsDialog(QDialog):
     """
     The range-edit dialog: two spin boxes prefilled with the
-    current lower and upper bounds, an optional hint line, and OK /
-    Cancel buttons.
+    current lower and upper bounds, an optional hint line, a "make
+    static" checkbox, and OK / Cancel buttons.
 
-    OK stays disabled until the two bounds form a strict range
-    (lower < upper); the check runs on every change of either spin
-    box.
+    With the checkbox unchecked, OK stays disabled until the two
+    bounds form a strict range (lower < upper); the check runs on
+    every change of either spin box.  Checking the box disables
+    both spin boxes and sets them to the parameter's current value
+    (the backed-up values are restored when the box is unchecked
+    again), so the accepted result is a degenerate range that pins
+    the parameter at that value.
 
     Args:
         title: The dialog's window title.
         lo: The current lower bound, prefilled in the lower spin box.
         hi: The current upper bound, prefilled in the upper spin box.
         hint: An optional gray hint line shown above the spin boxes.
+        value: The parameter's current value; the static option
+            pins the parameter at this value.
         parent: The parent widget; defaults to None.
     """
 
@@ -447,11 +453,14 @@ class _BoundsDialog(QDialog):
         lo: float,
         hi: float,
         hint: str | None,
+        value: float,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(340)
+        self._value: float = value
+        self._backed_up: tuple[float, float] = (lo, hi)
 
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -462,6 +471,11 @@ class _BoundsDialog(QDialog):
             hint_label.setWordWrap(True)
             hint_label.setStyleSheet("color: gray;")
             layout.addWidget(hint_label)
+
+        self._static_checkbox: QCheckBox = QCheckBox(
+            "Make value static and disable the range"
+        )
+        layout.addWidget(self._static_checkbox)
 
         rows: list[tuple[str, QDoubleSpinBox]] = []
         for caption, bound in (("Lower bound", lo), ("Upper bound", hi)):
@@ -492,6 +506,7 @@ class _BoundsDialog(QDialog):
 
         self._min_spin.valueChanged.connect(self._validate)
         self._max_spin.valueChanged.connect(self._validate)
+        self._static_checkbox.toggled.connect(self._on_static_toggled)
         self._validate(0.0)
 
     def run(self) -> tuple[float, float] | None:
@@ -499,16 +514,57 @@ class _BoundsDialog(QDialog):
         Show the dialog modally and collect the user's choice.
 
         Returns:
-            The (lower, upper) bounds the user accepted, or None
-            when the dialog was cancelled.
+            The (lower, upper) bounds the user accepted.  When the
+            static option is checked the result is degenerate
+            (the current value, twice) and pins the parameter;
+            otherwise it is the spin boxes' range.  None when the
+            dialog was cancelled.
         """
         if self.exec() == QDialog.DialogCode.Accepted:
+            if self._static_checkbox.isChecked():
+                return (self._value, self._value)
             return (self._min_spin.value(), self._max_spin.value())
         return None
 
+    def _on_static_toggled(self, checked: bool) -> None:
+        """
+        Freeze both spin boxes at the current value while the
+        static option is on; restore the backed-up values when it
+        is switched off again.
+        """
+        spins: list[QDoubleSpinBox] = [self._min_spin, self._max_spin]
+        if checked:
+            self._backed_up = (
+                self._min_spin.value(),
+                self._max_spin.value(),
+            )
+            for spin in spins:
+                spin.blockSignals(True)
+                spin.setValue(self._value)
+                spin.blockSignals(False)
+            for spin in spins:
+                spin.setEnabled(False)
+        else:
+            for spin, backed in zip(spins, self._backed_up, strict=True):
+                spin.blockSignals(True)
+                spin.setValue(backed)
+                spin.blockSignals(False)
+            for spin in spins:
+                spin.setEnabled(True)
+        self._validate(0.0)
+
     def _validate(self, _value: float) -> None:
-        """Enable OK only while the two bounds form a strict range."""
-        self._ok_button.setEnabled(self._min_spin.value() < self._max_spin.value())
+        """
+        Enable OK when the choice is usable: either a strict
+        (lower < upper) range, or the static option, which pins the
+        parameter and needs no range at all.
+        """
+        if self._static_checkbox.isChecked():
+            self._ok_button.setEnabled(True)
+            return
+        self._ok_button.setEnabled(
+            self._min_spin.value() < self._max_spin.value()
+        )
 
 
 class ThemedGroup(QWidget):
@@ -1385,34 +1441,52 @@ class ParamPanel(QScrollArea):
 
     def _on_bounds_edit(self, key: str) -> None:
         """
-        Open the range dialog for `key` and apply the user's choice
-        to both ends of the range.
+        Open the range dialog for `key` and apply the user's choice:
+        a strict range replaces the cell's bounds, while a degenerate
+        (static) one pins the parameter at its displayed value.
         """
         label: str = param_label(key, self._input_data.network.mineral_names)
         lo, hi = self._bounds[key]
         decimals: int = bound_decimals(lo, hi)
         hint: str = f"Current range: {lo:.{decimals}f} to {hi:.{decimals}f}."
         result: tuple[float, float] | None = _BoundsDialog(
-            f"Edit range — {label}", lo, hi, hint, self
+            f"Edit range — {label}", lo, hi, hint, self._values[key], self
         ).run()
         if result is None:
             return
         new_lo, new_hi = result
-        self._bounds[key] = (new_lo, new_hi)
 
         cell: _FreeCell | _PinnedCell = self._rows[key]
         if not isinstance(cell, _FreeCell):
             return
-        cell.set_bounds(new_lo, new_hi)
-        self._values[key] = cell.value()
-
-        self.bounds_changed.emit(key, new_lo, new_hi)
-        self.value_changed.emit(key)
+        if new_lo == new_hi:
+            # Static value: pin the parameter at the displayed value.
+            v: float = new_lo
+            self._bounds[key] = (v, v)
+            self._values[key] = v
+            # Convert exactly as the group builder does.
+            group: ThemedGroup = self._group_of(key)
+            pinned: _PinnedCell = _PinnedCell(
+                key, param_symbol(key), label, v
+            )
+            group.replace_widget(cell, pinned)
+            pinned.unlock_requested.connect(self._on_unlock_requested)
+            self._rows[key] = pinned
+            self.bounds_changed.emit(key, v, v)
+            self.value_changed.emit(key)
+        else:
+            self._bounds[key] = (new_lo, new_hi)
+            cell.set_bounds(new_lo, new_hi)
+            self._values[key] = cell.value()
+            self.bounds_changed.emit(key, new_lo, new_hi)
+            self.value_changed.emit(key)
 
     def _on_unlock_requested(self, key: str) -> None:
         """
         Open the range dialog for a pinned parameter and, if the user
-        accepts a range, convert the cell into a free cell in place.
+        accepts a strict range, convert the cell into a free cell in
+        place.  A degenerate (static) result is a no-op: the cell is
+        already pinned at that value.
         """
         label: str = param_label(key, self._input_data.network.mineral_names)
         value: float = self._values[key]
@@ -1425,11 +1499,13 @@ class ParamPanel(QScrollArea):
             "it adjustable; the current value is kept."
         )
         result: tuple[float, float] | None = _BoundsDialog(
-            f"Edit range — {label}", lo, hi, hint, self
+            f"Edit range — {label}", lo, hi, hint, value, self
         ).run()
         if result is None:
             return
         new_lo, new_hi = result
+        if new_lo == new_hi:
+            return
         self._bounds[key] = (new_lo, new_hi)
         self._values[key] = min(max(self._values[key], new_lo), new_hi)
 
