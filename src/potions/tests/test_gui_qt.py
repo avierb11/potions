@@ -3103,3 +3103,96 @@ class TestLineSearch:
             assert win._line_search_button.isEnabled()
         finally:
             _close_window(win)
+
+    def test_line_search_refused_while_a_job_is_in_flight(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The direct (menu) path: a line search invoked while a job
+        is in flight is refused with a status message, and the
+        in-flight job's outcome stays the final on-screen state;
+        with no job in flight, the same call starts the search.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, _hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        gate = threading.Event()
+
+        def gated_fake(
+            x: np.ndarray, _input_data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            # The gate blocks the model calls until the test
+            # releases it, so the run stays in flight while the
+            # refusal is asserted, and then finishes on demand.
+            gate.wait(timeout=60)
+            return full_fake(x, _input_data)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
+        monkeypatch.setattr(gui_window, "arr_to_hydro_results", gated_fake)
+        win = gui_window.MainWindow(input_data)
+        try:
+            # The window's startup run blocks on the gate: a model
+            # run in flight, the only job the window knows.
+            _wait_until(
+                lambda: win._worker is not None
+                and win._worker.isRunning()
+            )
+            assert isinstance(win._worker, gui_window._RunWorker)
+            run_id: int = id(win._worker)
+
+            # The direct path is guarded against the in-flight run:
+            # refused with a status message, the run's worker
+            # reference untouched, nothing adopted or started.
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            _pump()
+            assert win._worker is not None
+            assert id(win._worker) == run_id
+            assert win._worker.isRunning()
+            assert not isinstance(win._worker, gui_window._LineSearchWorker)
+            assert win._line_search_state is None
+            assert win._results is None
+            assert win._status_label.text() == (
+                "A job is already in flight: it cannot be interrupted, "
+                "so the line search was not started."
+            )
+            assert len(calls) == 0
+
+            # Releasing the gate lets the run finish; its outcome is
+            # the final on-screen state (up to date, and no line
+            # search was ever started to clobber it).
+            gate.set()
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert win._results_are_up_to_date()
+            assert win._line_search_state is None
+            assert win._figure_panel.page_count() == 3
+            assert re.fullmatch(
+                r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
+            ) is not None
+            assert len(calls) == 1
+            assert np.array_equal(calls[0], _midpoint_vector(input_data))
+
+            # With no job in flight, the same call starts the
+            # search: the base point's results are handed in, the
+            # worker computes the direction by its own central
+            # differences, and the 25 search points are run.
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            assert isinstance(win._worker, gui_window._LineSearchWorker)
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            assert len(calls) == 1 + 2 * len(free) + 25
+        finally:
+            gate.set()
+            _close_window(win)

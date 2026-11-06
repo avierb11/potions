@@ -2316,7 +2316,17 @@ class MainWindow(QMainWindow):
 
         The run indicators show the job's progress like a model
         run's; a job cannot be interrupted.
+
+        A job already in flight (a model run or a gradient job)
+        takes precedence: the search is refused with a status
+        message, since a job cannot be interrupted.
         """
+        if self._worker is not None and self._worker.isRunning():
+            self._status(
+                "A job is already in flight: it cannot be interrupted, "
+                "so the line search was not started."
+            )
+            return
         x: np.ndarray = self._current_x()
         bounds: dict[str, tuple[float, float]] = (
             self._param_panel.current_bounds()
