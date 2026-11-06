@@ -240,6 +240,49 @@ _INVALID_INDEX: Final[QModelIndex] = QModelIndex()
 
 
 # ==== Helpers ==== #
+def _objective_panel_size(
+    heading_size: QSize,
+    column_widths: list[int],
+    row_heights: list[int],
+    vertical_header_width: int,
+    horizontal_header_height: int,
+    frame_width: int,
+    margins: tuple[int, int, int, int],
+    spacing: int,
+) -> tuple[int, int]:
+    """
+    The fixed objective panel's size that exactly fits its contents.
+
+    The width is the wider of the heading's hint and the table's
+    full width (the row-header column, every column section, and
+    the frame on both sides); the height stacks the heading, the
+    table (the column-header row, every row section, and the
+    frame), the panel's contents margins, and the heading-to-table
+    spacing.  Holding the panel at exactly this size means neither
+    scrollbar can ever be needed.
+
+    Args:
+        heading_size: The heading label's size hint.
+        column_widths: The table's per-column section size hints.
+        row_heights: The table's per-row section size hints.
+        vertical_header_width: The row-header column's width.
+        horizontal_header_height: The column-header row's height.
+        frame_width: The table view's frame width, per side.
+        margins: The panel's contents margins (left, top, right,
+            bottom).
+        spacing: The panel's layout spacing between the heading
+            and the table.
+
+    Returns:
+        The panel's (width, height).
+    """
+    table_w: int = vertical_header_width + sum(column_widths) + 2 * frame_width
+    table_h: int = horizontal_header_height + sum(row_heights) + 2 * frame_width
+    panel_w: int = max(heading_size.width(), table_w) + margins[0] + margins[2]
+    panel_h: int = heading_size.height() + table_h + margins[1] + margins[3] + spacing
+    return (panel_w, panel_h)
+
+
 class _CapturingStream:
     """
     A stdout stand-in that mirrors writes to the real stdout and
@@ -1261,7 +1304,13 @@ class MainWindow(QMainWindow):
         row: QWidget = QWidget(self)
         row_layout: QHBoxLayout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.addWidget(self._objective_panel)
+        # The fixed-size panel is top-aligned: its contents start at
+        # the row's top and it never grows to fill the row's height.
+        row_layout.addWidget(
+            self._objective_panel,
+            0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+        )
         row_layout.addWidget(param_panel, 1)
         self._splitter.addWidget(self._figure_panel)
         self._splitter.addWidget(row)
@@ -1470,6 +1519,16 @@ class MainWindow(QMainWindow):
             QAbstractItemView.SelectionMode.NoSelection
         )
         self._objective_table.setShowGrid(False)
+        # The panel is sized exactly to the table's contents (see
+        # `_fit_objective_panel`), so the view never needs to
+        # scroll: the bar policies stay off so no bar space is ever
+        # reserved.
+        self._objective_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._objective_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         # The row headers (the metric labels) identify what each row
         # measures, so they stay visible.
         self._objective_table.verticalHeader().setSectionResizeMode(
@@ -1498,19 +1557,27 @@ class MainWindow(QMainWindow):
         its size drives the row's width: sizing it exactly to its
         contents (plus the panel's margins) keeps the window's
         width from growing with the table, and leaves the rest of
-        the row to the stretching parameter panel.
+        the row to the stretching parameter panel.  The size is the
+        table's own measurements (per-column and per-row section
+        size hints, both headers' size hints, and the frame width)
+        run through `_objective_panel_size`, so the scrollbars
+        (held off) never have work to do.
         """
-        margins: tuple[int, int, int, int] = _OBJECTIVE_PANEL_MARGINS
-        width: int = max(
-            self._objective_heading.sizeHint().width(),
-            self._objective_table.sizeHint().width(),
-        ) + margins[0] + margins[2]
-        height: int = (
-            self._objective_heading.sizeHint().height()
-            + self._objective_table.sizeHint().height()
-            + margins[1]
-            + margins[3]
-            + _OBJECTIVE_PANEL_SPACING
+        width, height = _objective_panel_size(
+            self._objective_heading.sizeHint(),
+            [
+                self._objective_table.horizontalHeader().sectionSizeHint(c)
+                for c in range(self._objective_model.columnCount())
+            ],
+            [
+                self._objective_table.verticalHeader().sectionSizeHint(r)
+                for r in range(self._objective_model.rowCount())
+            ],
+            self._objective_table.verticalHeader().sizeHint().width(),
+            self._objective_table.horizontalHeader().sizeHint().height(),
+            self._objective_table.frameWidth(),
+            _OBJECTIVE_PANEL_MARGINS,
+            _OBJECTIVE_PANEL_SPACING,
         )
         self._objective_panel.setFixedSize(width, height)
 

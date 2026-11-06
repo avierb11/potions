@@ -349,6 +349,79 @@ class TestMainWindowStartup:
         finally:
             _close_window(win)
 
+    def test_objective_panel_fits_content_without_scrollbars(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The objective table needs no scrollbars and sits top-aligned."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            # Both scrollbars are off: the view never needs to scroll.
+            assert (
+                win._objective_table.horizontalScrollBarPolicy()
+                == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            assert (
+                win._objective_table.verticalScrollBarPolicy()
+                == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            # The panel is fixed in size (setFixedSize pins its
+            # minimum to its maximum) to exactly what the table's
+            # own measurements demand, per the pure sizing function.
+            assert (
+                win._objective_panel.minimumWidth()
+                == win._objective_panel.maximumWidth()
+                > 0
+            )
+            assert (
+                win._objective_panel.minimumHeight()
+                == win._objective_panel.maximumHeight()
+                > 0
+            )
+            width, height = gui_window._objective_panel_size(
+                win._objective_heading.sizeHint(),
+                [
+                    win._objective_table.horizontalHeader().sectionSizeHint(c)
+                    for c in range(win._objective_model.columnCount())
+                ],
+                [
+                    win._objective_table.verticalHeader().sectionSizeHint(r)
+                    for r in range(win._objective_model.rowCount())
+                ],
+                win._objective_table.verticalHeader().sizeHint().width(),
+                win._objective_table.horizontalHeader().sizeHint().height(),
+                win._objective_table.frameWidth(),
+                gui_window._OBJECTIVE_PANEL_MARGINS,
+                gui_window._OBJECTIVE_PANEL_SPACING,
+            )
+            assert (
+                win._objective_panel.width(),
+                win._objective_panel.height(),
+            ) == (width, height)
+            # The zero-margin row layout top-aligns the panel.
+            assert win._objective_panel.y() == 0
+            # The heading is the panel's first child and is not
+            # hidden.  `isVisible()` is false on an offscreen
+            # window that was never `show()`-ed, so assert the
+            # widget's own flag (as the progress-strip assertion
+            # does).
+            assert not win._objective_heading.isHidden()
+        finally:
+            _close_window(win)
+
     def test_restores_full_state(
         self,
         qapp: QApplication,
