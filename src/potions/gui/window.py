@@ -495,6 +495,11 @@ class _GradientOutcome:
     with the matrix and the CSV path None (and the results None as
     well when the base point's own run failed).
 
+    A non-base point that failed does not fail the job: its column
+    of the matrix is all NaN (the missing value), and the counts
+    of the failed and the evaluated points ride on the outcome so
+    the window can report them in the completion status.
+
     Attributes:
         error: The failure, formatted as ``Name: message``; None
             on success.
@@ -510,6 +515,12 @@ class _GradientOutcome:
         csv_path: The path of the written matrix CSV; None on
             failure.
         elapsed_seconds: The wall-clock duration of the job.
+        failed_points: The number of the job's non-base points
+            that failed: their matrix columns are all NaN.  Always
+            zero on a failed job.
+        total_points: The number of points the job evaluated (the
+            deduplicated perturbed points, the base included when
+            it ran).  Always zero on a failed job.
     """
 
     error: str | None
@@ -519,6 +530,8 @@ class _GradientOutcome:
     mode: str
     csv_path: Path | None
     elapsed_seconds: float
+    failed_points: int = 0
+    total_points: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,10 +673,11 @@ class _GradientWorker(QThread):
         count (the base point when it was run, then each deduped
         perturbed point), for the window's progress bar.
 
-        A point that failed — including a failed pool initializer,
-        which fails every point its worker receives — fails the
-        whole job with the first failure's message, in the
-        points' input order.
+        A failed base point fails the whole job, since the
+        difference matrix needs its values; a failed non-base
+        point does not: its column of the matrix is all NaN (the
+        missing value) and the failure is counted, so the window
+        can report it in the completion status.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -671,9 +685,10 @@ class _GradientWorker(QThread):
 
         Returns:
             The success outcome: the difference matrix, the base
-            point's results, and the path of the written CSV; on
-            a failed point, the error outcome instead (with the
-            handed-in base results when there were any).
+            point's results, the counts of the failed and the
+            evaluated points, and the path of the written CSV; on
+            a failed base point, the error outcome instead (with
+            the handed-in base results when there were any).
         """
         total: int = len(self._steps) * 2
 
@@ -708,31 +723,47 @@ class _GradientWorker(QThread):
             self._csv_path,
             on_result=on_result,
         )
-        results: dict[tuple[float, ...], GuiRunResults] = {}
+        failed_points: int = 0
+        results: dict[tuple[float, ...], GuiRunResults | str] = {}
         if self._base_results is not None:
             results[self._key(self._base_x)] = self._base_results
         for point, payload in zip(points, payloads):
             if isinstance(payload, str):
-                return _GradientOutcome(
-                    error=payload,
-                    table=None,
-                    base_results=self._base_results,
-                    base_x=self._base_x,
-                    mode=self._mode,
-                    csv_path=None,
-                    elapsed_seconds=time.perf_counter() - started,
-                )
+                if self._key(point) == self._key(self._base_x):
+                    return _GradientOutcome(
+                        error=payload,
+                        table=None,
+                        base_results=self._base_results,
+                        base_x=self._base_x,
+                        mode=self._mode,
+                        csv_path=None,
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                failed_points += 1
             results[self._key(point)] = payload
-        base_results: GuiRunResults = results[self._key(self._base_x)]
+        base_payload: GuiRunResults | str = results[self._key(self._base_x)]
+        if not isinstance(base_payload, GuiRunResults):
+            raise ValueError(
+                f"The gradient job's base point failed ({base_payload}), "
+                "but the job should have stopped on that failure: "
+                "the difference matrix cannot be built without the "
+                "base point's values."
+            )
+        base_results: GuiRunResults = base_payload
 
         base_labels, _ = objective_vector(base_results)
+
+        def point_vector(point: np.ndarray) -> np.ndarray:
+            payload: GuiRunResults | str = results[self._key(point)]
+            if isinstance(payload, GuiRunResults):
+                return objective_vector(payload)[1]
+            return np.full(len(base_labels), np.nan)
+
         f_plus: list[np.ndarray] = []
         f_minus: list[np.ndarray] = []
         for step in self._steps:
-            _, up_vector = objective_vector(results[self._key(step.x_plus)])
-            _, down_vector = objective_vector(results[self._key(step.x_minus)])
-            f_plus.append(up_vector)
-            f_minus.append(down_vector)
+            f_plus.append(point_vector(step.x_plus))
+            f_minus.append(point_vector(step.x_minus))
 
         matrix: np.ndarray = gradient_matrix(f_plus, f_minus, self._steps)
         table: pd.DataFrame = pd.DataFrame(
@@ -749,6 +780,8 @@ class _GradientWorker(QThread):
             mode=self._mode,
             csv_path=csv_path,
             elapsed_seconds=time.perf_counter() - started,
+            failed_points=failed_points,
+            total_points=step_total,
         )
 
 
@@ -770,6 +803,14 @@ class _LineSearchOutcome:
     it needs the mode to tell whether the best point's results
     are up to date.
 
+    A failed search point does not fail the job: its entry in the
+    profile is NaN (the missing value), and the counts of the
+    failed and the evaluated points ride on the outcome so the
+    window can report them in the completion status.  A failed
+    base or direction point, by contrast, fails the whole job:
+    the search needs its base point and, when the direction is
+    computed, its direction points to even start.
+
     Attributes:
         error: The failure, formatted as ``Name: message``; None
             on success.
@@ -786,6 +827,13 @@ class _LineSearchOutcome:
         mode: The run mode the job's points ran in (`MODE_FULL` or
             `MODE_HYDRO`).
         elapsed_seconds: The wall-clock duration of the job.
+        failed_points: The number of the job's search points that
+            failed: their profile entries are NaN.  Always zero
+            on a failed job.
+        total_points: The number of points the job evaluated (the
+            base point when it ran, the direction points when the
+            direction was computed, and the search's points).
+            Always zero on a failed job.
     """
 
     error: str | None
@@ -797,6 +845,8 @@ class _LineSearchOutcome:
     metric: str
     mode: str
     elapsed_seconds: float
+    failed_points: int = 0
+    total_points: int = 0
 
 
 class _LineSearchWorker(QThread):
@@ -969,10 +1019,15 @@ class _LineSearchWorker(QThread):
         direction point when the direction is computed, then each
         of the search's points), for the window's progress bar.
 
-        A point that failed — including a failed pool
-        initializer, which fails every point its worker receives
-        — fails the whole job with the first failure's message,
-        in the points' input order.
+        A failed base or direction point — including a failed
+        pool initializer, which fails every point its worker
+        receives — fails the whole job with the first failure's
+        message, in the points' input order.  A failed search
+        point does not fail the job: its entry in the profile is
+        NaN (the missing value) and the failure is counted, so
+        the window can report it in the completion status; the
+        search for the best point skips NaN entries, and a job
+        whose search points all failed raises the error instead.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -980,9 +1035,10 @@ class _LineSearchWorker(QThread):
 
         Returns:
             The success outcome: the value profile, the best
-            point's vector and results, and the path of the
-            written CSV; on a failed point, the error outcome
-            instead.
+            point's vector and results, the counts of the failed
+            and the evaluated points, and the path of the written
+            CSV; on a failed base or direction point, the error
+            outcome instead.
 
         Raises:
             ValueError:
@@ -1084,13 +1140,16 @@ class _LineSearchWorker(QThread):
             on_result=on_search_result,
         )
 
+        failed_points: int = 0
         values: list[float] = []
-        point_results: list[GuiRunResults] = []
+        point_results: list[GuiRunResults | str] = []
         for payload in search_payloads:
-            if isinstance(payload, str):
-                return self._failed_outcome(payload, started)
             point_results.append(payload)
-            values.append(self._point_value(payload))
+            if isinstance(payload, str):
+                failed_points += 1
+                values.append(float("nan"))
+            else:
+                values.append(self._point_value(payload))
         values_array: np.ndarray = np.array(values, dtype=np.float64)
         if not np.isfinite(values_array).any():
             raise ValueError(
@@ -1099,7 +1158,14 @@ class _LineSearchWorker(QThread):
             )
         best_index: int = int(np.nanargmax(values_array))
         x_best: np.ndarray = self._base_x + t_points[best_index] * direction
-        best_results: GuiRunResults = point_results[best_index]
+        best_payload: GuiRunResults | str = point_results[best_index]
+        if not isinstance(best_payload, GuiRunResults):
+            raise ValueError(
+                f"The best search point's run failed ({best_payload}), "
+                "but the search should have skipped it: a NaN value "
+                "can never be the largest finite value."
+            )
+        best_results: GuiRunResults = best_payload
 
         columns: dict[str, np.ndarray] = {"value": values_array}
         for step in self._steps:
@@ -1119,6 +1185,8 @@ class _LineSearchWorker(QThread):
             metric=self._metric,
             mode=self._mode,
             elapsed_seconds=time.perf_counter() - started,
+            failed_points=failed_points,
+            total_points=step_total,
         )
 
     def _difference_direction(
@@ -2317,10 +2385,16 @@ class MainWindow(QMainWindow):
                 elapsed_seconds=outcome.elapsed_seconds,
             )
             self._refresh_from_results()
-            self._status(
+            message: str = (
                 f"Gradients finished in {outcome.elapsed_seconds:.1f} s — "
                 f"saved to {csv_path}."
             )
+            if outcome.failed_points > 0:
+                message += (
+                    f" {outcome.failed_points} of {outcome.total_points} "
+                    "points failed; their values are shown as missing."
+                )
+            self._status(message)
 
         # No job is in flight by the time this handler runs (the
         # worker's finished signal clears the reference after this
@@ -2552,13 +2626,19 @@ class MainWindow(QMainWindow):
             elapsed_seconds=outcome.elapsed_seconds,
         )
         self._refresh_from_results()
-        self._status(
+        message: str = (
             f"Line search finished in {outcome.elapsed_seconds:.1f} s: "
             f"best t = {best_t:.4f} ({outcome.target}: "
             f"{outcome.metric} = {best_value:.3f}); the best point's "
             f"parameters are in the panel and the profile was saved "
             f"to {outcome.csv_path}."
         )
+        if outcome.failed_points > 0:
+            message += (
+                f" {outcome.failed_points} of {outcome.total_points} "
+                "points failed; their values are shown as missing."
+            )
+        self._status(message)
         # The save button lights up only when the best point is
         # where the panel now sits and the job ran in the current
         # mode; the run button mirrors the same staleness.

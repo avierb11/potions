@@ -72,6 +72,13 @@ from ..gui.common import (
     param_label,
 )
 from ..gui.data import PlotSelection
+from ..gui.gradients import (
+    _Perturbation,
+    free_parameter_steps,
+    gradient_matrix,
+    objective_vector,
+)
+from ..gui.line_search import expand_direction, feasible_t_interval
 from ..gui.state import (
     MODE_FULL,
     MODE_HYDRO,
@@ -2736,13 +2743,18 @@ class TestGradients:
         finally:
             _close_window(win)
 
-    def test_failed_job(
+    def test_gradient_job_failed_point_becomes_nan(
         self,
         qapp: QApplication,
         input_data: gui_data.GuiInputData,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """
+        A pool point that fails does not fail the job: its column
+        of the difference matrix is all NaN (the missing value),
+        and the completion status counts the failure.
+        """
         free = _free_keys(input_data)
         calls: list[np.ndarray] = []
         plain_fake = _fake_results_factory(calls, input_data)
@@ -2751,6 +2763,7 @@ class TestGradients:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", plain_fake)
         win = gui_window.MainWindow(input_data)
+        gate = tmp_path / "job_gate"
         try:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
@@ -2767,32 +2780,157 @@ class TestGradients:
                 x: np.ndarray, _input_data: gui_data.GuiInputData
             ) -> gui_data.GuiRunResults:
                 if float(x[failing_index]) > base_value:
-                    raise RuntimeError("boom")
+                    raise ValueError("point failed")
                 return plain_fake(x, _input_data)
 
-            monkeypatch.setattr(gui_data, "arr_to_results", flaky)
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(flaky, gate),
+            )
 
             win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
+            _wait_until(
+                lambda: win._gradient_state is not None
+                and win._worker is None
+            )
+            _pump()
+            # The job's points ran in the pool (their `calls`
+            # appends never reach this process): only the
+            # in-process startup run is recorded, and the last
+            # step completes the bar.
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) <= total <= 2 * len(free)
+
+            assert win._gradient_state is not None
+            state: gui_window._GradientSnapshot = win._gradient_state
+            table: pd.DataFrame = state.table
+            # The failed point's column is all NaN (the missing
+            # value); every other column is fully finite.
+            assert np.isnan(table.values).any()
+            assert np.isnan(table[free[0]].values).all()
+            for key in free[1:]:
+                assert np.isfinite(table[key].values).all()
+
+            # The completion status keeps its exact wording and
+            # appends the failed-point count.
+            assert (
+                win._status_label.text()
+                == f"Gradients finished in {state.elapsed_seconds:.1f} s — "
+                f"saved to {state.csv_path}."
+                f" 1 of {total} points failed; their values are shown "
+                f"as missing."
+            )
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Gradients (full)"
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+            _only_csv(tmp_path)
+        finally:
+            gate.touch()
+            _close_window(win)
+
+    def test_gradient_job_fails_when_base_point_fails(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A failed base point still fails the whole job: the
+        matrix cannot be built without it, so the job reports
+        the failure and writes no matrix.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        plain_fake = _fake_results_factory(calls, input_data)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gui_window, "arr_to_results", plain_fake)
+        win = gui_window.MainWindow(input_data)
+        gate = tmp_path / "job_gate"
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            # Move free[0] to its upper bound, with the auto run
+            # off so the edit does not start a model run: the
+            # results go stale, so the job must run the base point
+            # itself.  The base's "+" perturbation clamps at the
+            # bound and coincides with the base, so it is
+            # deduplicated out of the pool points and only the
+            # base fails.
+            win._auto_run_checkbox.setChecked(False)
+            row = win._param_panel._rows[free[0]]
+            assert isinstance(row, gui_param_panel._FreeCell)
+            row._spin.setValue(win._param_panel.current_bounds()[free[0]][1])
+            assert not win._results_are_up_to_date()
+            base_x: np.ndarray = win._current_x()
+
+            def flaky(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                if np.array_equal(x, base_x):
+                    raise ValueError("point failed")
+                return plain_fake(x, _input_data)
+
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(flaky, gate),
+            )
+
+            win._on_gradients_clicked()
+            worker = win._worker
+            assert isinstance(worker, gui_window._GradientWorker)
+            gate.touch()
+
             _wait_until(
                 lambda: win._worker is None
                 and win._status_label.text().startswith("Gradients failed")
             )
             _pump()
             assert (
-                win._status_label.text() == "Gradients failed: "
-                "RuntimeError: boom"
+                win._status_label.text()
+                == "Gradients failed: ValueError: point failed"
             )
             assert win._gradient_state is None
             assert win._figure_panel.page_count() == 3
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            # The base never arrived, so the results stay stale:
+            # the save button stays down and the run button stays
+            # up.
+            assert not win._save_button.isEnabled()
+            assert win._run_button.isEnabled()
             assert win._gradients_button.isEnabled()
             # The job's points ran in the pool (their `calls`
             # appends never reach this process): only the
-            # in-process startup run is recorded.
+            # in-process startup run is recorded, and no matrix
+            # was written.
             assert len(calls) == 1
             assert list((tmp_path / "results").glob("gradients_*.csv")) == []
         finally:
+            gate.touch()
             _close_window(win)
 
     def test_no_free_parameters(
@@ -3100,6 +3238,211 @@ class TestLineSearch:
                 win._status_label.text(),
             ) is not None
         finally:
+            _close_window(win)
+
+    def test_line_search_job_failed_point_is_nan_in_profile(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A failed search point does not fail the job: its profile
+        row's value is NaN (the missing value), the best point is
+        chosen among the finite values, and the completion status
+        counts the failure.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        gate = tmp_path / "job_gate"
+        win = _gradient_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            # The fake shifts the streamflow objectives by 2 * x of
+            # free[0] alone, so the steepest ascent of Streamflow's
+            # KGE is the unit direction along free[0]'s axis and
+            # the best point is free[0]'s upper bound.
+            mid: float = win._param_panel.param_values()[free[0]]
+            high: float = win._param_panel.current_bounds()[free[0]][1]
+
+            # The window has no gradient job yet, so the worker
+            # computes its own direction: replay the same central
+            # differences with a separate fake (the precomputed
+            # points' calls must not land in `calls`) to
+            # precompute the 25 search points bit for bit.
+            pre_calls: list[np.ndarray] = []
+            pre_full, _pre_hydro = _gradient_fake_factory(
+                pre_calls, input_data, free[0], free[1]
+            )
+            base_x: np.ndarray = win._current_x()
+            bounds: dict[str, tuple[float, float]] = (
+                win._param_panel.current_bounds()
+            )
+            search_steps: list[_Perturbation] = free_parameter_steps(
+                base_x, bounds
+            )
+            f_plus: list[np.ndarray] = [
+                objective_vector(pre_full(step.x_plus, input_data))[1]
+                for step in search_steps
+            ]
+            f_minus: list[np.ndarray] = [
+                objective_vector(pre_full(step.x_minus, input_data))[1]
+                for step in search_steps
+            ]
+            assert win._results is not None
+            base_labels, _ = objective_vector(win._results)
+            row_index: int = base_labels.index("Streamflow: KGE")
+            matrix: np.ndarray = gradient_matrix(
+                f_plus, f_minus, search_steps
+            )
+            direction: np.ndarray = expand_direction(
+                matrix[row_index]
+                / float(np.linalg.norm(matrix[row_index])),
+                search_steps,
+                bounds,
+            )
+            interval = feasible_t_interval(
+                base_x, direction, search_steps, bounds
+            )
+            assert interval is not None
+            t_lo, t_hi = interval
+            t_points: np.ndarray = np.linspace(
+                t_lo, t_hi, gui_window._LINE_SEARCH_POINTS
+            )
+            search_points: list[np.ndarray] = [
+                base_x + t * direction for t in t_points
+            ]
+            failed_index: int = len(search_points) // 2
+
+            # The search's own pool phase is gated on its own file,
+            # re-patched for the search's workers: the fake raises
+            # for the one search point that equals the base vector
+            # (the midpoint of the symmetric interval) and
+            # delegates to the startup fake otherwise.
+            def flaky_full(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                if np.array_equal(x, search_points[failed_index]):
+                    raise ValueError("point failed")
+                return full_fake(x, _input_data)
+
+            def flaky_hydro(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                if np.array_equal(x, search_points[failed_index]):
+                    raise ValueError("point failed")
+                return hydro_fake(x, _input_data)
+
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(flaky_full, gate),
+            )
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_hydro_results",
+                _file_gated_fake(flaky_hydro, gate),
+            )
+
+            win._on_line_search_selected("Streamflow", "KGE", False)
+            worker = win._worker
+            assert isinstance(worker, gui_window._LineSearchWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            # The base point's results were handed in, the
+            # direction came from its own central differences
+            # (the first pool phase), then the 25 search points
+            # were run (the second): all the job's points ran in
+            # the pool, so only the in-process startup run is
+            # recorded, and the last step completes the bar.
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) + 25 <= total <= 2 * len(free) + 25
+
+            assert win._line_search_state is not None
+            state: gui_window._LineSearchSnapshot = win._line_search_state
+            profile: pd.DataFrame = state.profile
+            assert len(profile) == 25
+            values: np.ndarray = profile["value"].to_numpy(dtype=np.float64)
+            # The failed search point is NaN (the missing value),
+            # and every other point reports a finite value.
+            assert np.isnan(values[failed_index])
+            assert np.isfinite(values).sum() == len(profile) - 1
+
+            # The best point is chosen among the finite values:
+            # the objective is monotone in t, so it is the last
+            # point, free[0]'s upper bound, adopted into the
+            # panel.
+            best_index: int = int(np.nanargmax(values))
+            assert best_index == len(profile) - 1
+            assert float(profile.index[best_index]) == pytest.approx(
+                high - mid
+            )
+            assert (
+                win._param_panel.param_values()[free[0]]
+                == pytest.approx(high)
+            )
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+
+            # The completion status keeps its exact wording and
+            # appends the failed-point count.
+            best_t: float = float(profile.index[best_index])
+            best_value: float = float(values[best_index])
+            assert (
+                win._status_label.text()
+                == f"Line search finished in {state.elapsed_seconds:.1f} s: "
+                f"best t = {best_t:.4f} (Streamflow: KGE = {best_value:.3f}); "
+                f"the best point's parameters are in the panel and the "
+                f"profile was saved to {state.csv_path}."
+                f" 1 of {total} points failed; their values are shown "
+                f"as missing."
+            )
+
+            # The profile is written once and rides along as the
+            # figure panel's last page.
+            csvs: list[Path] = list(
+                (tmp_path / "results").glob("line_search_*.csv")
+            )
+            assert len(csvs) == 1
+            assert state.csv_path is not None
+            assert tmp_path / state.csv_path == csvs[0]
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Line search (full)"
+        finally:
+            gate.touch()
             _close_window(win)
 
     def test_reuses_gradient_snapshot(
