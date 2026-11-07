@@ -212,6 +212,7 @@ def _full_state(
     input_data: gui_data.GuiInputData,
     save_history: bool = False,
     mode: str = MODE_FULL,
+    objective_terms: list[str] | None = None,
 ) -> GuiState:
     """A complete gui_state matching the loaded input data."""
     bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
@@ -228,6 +229,7 @@ def _full_state(
         splitter_sizes=[300, 600],
         save_history=save_history,
         mode=mode,
+        objective_terms=objective_terms,
     )
 
 
@@ -514,12 +516,12 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 2
-        assert state.to_dict()["version"] == 2
+        assert GUI_STATE_VERSION == 3
+        assert state.to_dict()["version"] == 3
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 2
+        assert raw["version"] == 3
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         param_values = _as_dict(raw, "param_values")
         assert param_values["proportion.1"] == 0.7
@@ -554,6 +556,9 @@ class TestGuiStateRoundTrip:
         # The version-1 inner horizontal pair (table, params) is
         # dropped; the main vertical sections keep their sizes.
         assert restored.splitter_sizes == [300, 600]
+        # Version 1 predates the field: a v1-era file restores
+        # with no objective selection.
+        assert restored.objective_terms is None
 
     def test_optional_fields_none(self, input_data: gui_data.GuiInputData) -> None:
         state = _full_state(input_data)
@@ -570,6 +575,7 @@ class TestGuiStateRoundTrip:
         assert restored.csv_path is None
         assert restored.window_geometry is None
         assert restored.splitter_sizes is None
+        assert restored.objective_terms is None
 
     def test_version_key_omitted_means_current(
         self, input_data: gui_data.GuiInputData
@@ -625,6 +631,19 @@ class TestGuiStateRoundTrip:
         del raw["mode"]
         assert GuiState.from_dict(raw).mode == MODE_FULL
 
+    def test_state_v3_objective_terms_roundtrip(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        state = _full_state(input_data, objective_terms=["Streamflow: KGE"])
+        raw: dict[str, object] = state.to_dict()
+        assert raw["objective_terms"] == ["Streamflow: KGE"]
+        assert GuiState.from_dict(raw) == state
+
+        bare = _full_state(input_data)
+        raw = bare.to_dict()
+        assert raw["objective_terms"] is None
+        assert GuiState.from_dict(raw) == bare
+
 
 class TestFromDictErrors:
     """Each malformed gui_state field produces its documented message."""
@@ -637,7 +656,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3]).",
             ),
             (
                 {"csv_path": 12},
@@ -762,6 +781,38 @@ class TestFromDictErrors:
         restored = GuiState.from_dict(raw)
         assert restored.selection.time_series == list(TIME_SERIES_OPTIONS)
 
+    def test_state_from_dict_objective_terms_validation(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Absent or null terms restore as unset; wrong types error."""
+        raw: dict[str, object] = self._base(input_data)
+        del raw["objective_terms"]
+        assert GuiState.from_dict(raw).objective_terms is None
+
+        raw = self._base(input_data)
+        raw["objective_terms"] = None
+        assert GuiState.from_dict(raw).objective_terms is None
+
+        raw = self._base(input_data)
+        raw["objective_terms"] = "Streamflow: KGE"
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json 'objective_terms' must be a list of "
+            "objective terms, got 'Streamflow: KGE'."
+        )
+
+        raw = self._base(input_data)
+        raw["objective_terms"] = [1]
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json 'objective_terms' must be a list of "
+            "objective terms, got [1]."
+        )
+
 
 class TestReadGuiState:
     """File-level reads: absent, malformed, and valid."""
@@ -782,7 +833,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3]).\n"
         )
 
     def test_top_level_not_object(
@@ -803,7 +854,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 2,")
+        assert text.startswith("{\n  \"version\": 3,")
         assert text.endswith("\n")
 
 
@@ -2334,6 +2385,79 @@ class TestGradientFigure:
         array = image.get_array()
         assert isinstance(array, np.ma.MaskedArray)
         assert array.mask.tolist() == [[True, True]]
+
+
+class TestLineSearchFigure:
+    """The line search's profile page, single term and sum of terms."""
+
+    def test_line_search_figure_single_term(self) -> None:
+        values: list[float] = [0.2, 0.8, 1.0, 0.6, 0.4]
+        profile: pd.DataFrame = pd.DataFrame(
+            {
+                "value": values,
+                "Streamflow: KGE": values,
+            },
+            index=np.linspace(0.0, 10.0, 5),
+        )
+        fig = gui_plots.make_line_search_figure(
+            profile, ["Streamflow: KGE"], "the note"
+        )
+        ax = fig.axes[0]
+        assert ax.get_title() == "Line search — Streamflow: KGE"
+        assert ax.get_ylabel() == "KGE"
+        lines = _lines(ax)
+        assert [line.get_label() for line in lines] == [
+            "Streamflow: KGE",
+            "best",
+        ]
+        assert lines[1].get_marker() == "o"
+        assert np.asarray(lines[1].get_xdata()).tolist() == [5.0]
+        assert np.asarray(lines[1].get_ydata()).tolist() == [1.0]
+        assert [t.get_text() for t in fig.legends[0].get_texts()] == [
+            "Streamflow: KGE",
+            "best",
+        ]
+        assert "the note" in [t.get_text() for t in fig.texts]
+
+    def test_line_search_figure_sum_of_terms(self) -> None:
+        kge: list[float] = [0.2, 0.8, 1.0, 0.6, 0.4]
+        nse: list[float] = [0.1, 0.5, 0.9, 0.3, 0.2]
+        profile: pd.DataFrame = pd.DataFrame(
+            {
+                "value": [a + b for a, b in zip(kge, nse)],
+                "Streamflow: KGE": kge,
+                "Streamflow: NSE": nse,
+            },
+            index=np.linspace(0.0, 10.0, 5),
+        )
+        fig = gui_plots.make_line_search_figure(
+            profile, ["Streamflow: KGE", "Streamflow: NSE"], "the note"
+        )
+        ax = fig.axes[0]
+        assert ax.get_title() == "Line search — sum of 2 objectives"
+        assert ax.get_ylabel() == "combined value"
+        lines = _lines(ax)
+        assert [line.get_label() for line in lines] == [
+            "Streamflow: KGE",
+            "Streamflow: NSE",
+            "sum",
+            "best",
+        ]
+        assert lines[2].get_linewidth() == 2
+        # The sum is the test's own per-row addition, so compare
+        # at the precision the addition carries, not bitwise.
+        assert np.asarray(lines[2].get_ydata()).tolist() == pytest.approx(
+            [0.3, 1.3, 1.9, 0.9, 0.6]
+        )
+        assert np.asarray(lines[3].get_xdata()).tolist() == [5.0]
+        assert np.asarray(lines[3].get_ydata()).tolist() == [1.9]
+        assert [t.get_text() for t in fig.legends[0].get_texts()] == [
+            "Streamflow: KGE",
+            "Streamflow: NSE",
+            "sum",
+            "best",
+        ]
+        assert "the note" in [t.get_text() for t in fig.texts]
 
 
 # ------------------------------------------------------------------ #

@@ -82,7 +82,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
 from io import TextIOBase
 from pathlib import Path
 from typing import Any, Final
@@ -95,8 +94,10 @@ from potions.hydro_model import HydrologicalModel
 from potions.reactive_transport.rt_zone import WaterVolumeError
 from potions.result_saving import save_hydro_run, save_model_run
 from PySide6.QtCore import (
+    QAbstractItemModel,
     QAbstractTableModel,
     QCoreApplication,
+    QEvent,
     QObject,
     QModelIndex,
     QPersistentModelIndex,
@@ -107,18 +108,22 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QFont
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QHeaderView,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStyle,
+    QStyleOptionButton,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QTableView,
     QHBoxLayout,
     QVBoxLayout,
@@ -233,6 +238,10 @@ _LINE_SEARCH_POINTS: Final[int] = 25
 _LINE_SEARCH_METRICS: Final[frozenset[str]] = frozenset(
     {"KGE", "LogKGE", "NSE", "LogNSE"}
 )
+
+# The width of the checkbox inset the objective table's delegate
+# draws in each cell's left edge (px).
+_CHECKBOX_INSET: Final[int] = 24
 
 # The figure panel's minimum height (px): even a restored state or a
 # manual drag can then never squash the plot into a sliver.
@@ -791,17 +800,18 @@ class _LineSearchOutcome:
     """
     The outcome of one finished line search job.
 
-    A successful job carries the objective's value profile (one
-    row per evaluated point: the step ``t`` as index, the
-    objective's value and every free parameter's value as
-    columns), the best point's parameter vector and results (so
-    the window can adopt them), and the path of the CSV the
-    profile was written to; a failed job carries the error
-    instead, with the rest None.  The objective's target, metric,
-    and the job's mode ride on every outcome: the window shows
-    them in the completion status line and the page's title, and
-    it needs the mode to tell whether the best point's results
-    are up to date.
+    A successful job carries the searched objectives' value
+    profile (one row per evaluated point: the step ``t`` as
+    index, the searched value — the equal-weighted sum of the
+    selected terms — and one column per selected term, plus
+    every free parameter's value, as columns), the best point's
+    parameter vector and results (so the window can adopt them),
+    and the path of the CSV the profile was written to; a failed
+    job carries the error instead, with the rest None.  The
+    selected terms and the job's mode ride on every outcome: the
+    window shows them in the completion status line and the
+    page's title, and it needs the mode to tell whether the best
+    point's results are up to date.
 
     A failed search point does not fail the job: its entry in the
     profile is NaN (the missing value), and the counts of the
@@ -821,9 +831,9 @@ class _LineSearchOutcome:
         best_results: The best point's results; None on failure.
         csv_path: The path of the written profile CSV; None on
             failure.
-        target: The objective's target (measured series) name.
-        metric: The objective's metric (the display label, e.g.
-            ``KGE``).
+        terms: The objective terms the job searched, as
+            ``"target: metric"`` labels, in the objective
+            table's row order.
         mode: The run mode the job's points ran in (`MODE_FULL` or
             `MODE_HYDRO`).
         elapsed_seconds: The wall-clock duration of the job.
@@ -841,8 +851,7 @@ class _LineSearchOutcome:
     x_best: np.ndarray | None
     best_results: GuiRunResults | None
     csv_path: Path | None
-    target: str
-    metric: str
+    terms: list[str]
     mode: str
     elapsed_seconds: float
     failed_points: int = 0
@@ -853,14 +862,15 @@ class _LineSearchWorker(QThread):
     """
     One line search job on a worker thread.
 
-    The job follows the steepest ascent of one objective function
-    from the base point: when the direction was not handed in, it
-    is computed by the same central differences as the gradient
-    job (for the one selected row), and the objective is then
-    evaluated at a fixed number of points on the ascent line, all
-    inside the current parameter bounds.  The point with the
-    largest finite value is the best one (the searched metrics all
-    have 1 as their optimal value, so maximizing finds it).
+    The job follows the steepest ascent of the equal-weighted sum
+    of the selected objective terms from the base point: when the
+    direction was not handed in, it is computed by the same
+    central differences as the gradient job (summing the selected
+    terms' rows), and the sum is then evaluated at a fixed number
+    of points on the ascent line, all inside the current
+    parameter bounds.  The point with the largest finite value is
+    the best one (the searched metrics all have 1 as their
+    optimal value, so maximizing the sum finds the best point).
 
     Every point — the base point when it was not handed in, the
     direction's perturbation points when the direction is
@@ -883,9 +893,9 @@ class _LineSearchWorker(QThread):
             parameter vector's key order.
         direction: The ascent direction, or None to compute it by
             central differences.
-        target: The objective's target (measured series) name.
-        metric: The objective's metric (the display label, e.g.
-            ``KGE``).
+        terms: The objective terms to search, as
+            ``"target: metric"`` labels, in the objective
+            table's row order.
         mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
             points run in.
         csv_path: The path of the input CSV each pool worker
@@ -906,8 +916,7 @@ class _LineSearchWorker(QThread):
         base_x: np.ndarray,
         steps: list[_Perturbation],
         direction: np.ndarray | None,
-        target: str,
-        metric: str,
+        terms: list[str],
         mode: str,
         csv_path: str,
         bounds: dict[str, tuple[float, float]],
@@ -918,8 +927,7 @@ class _LineSearchWorker(QThread):
         self._base_x: np.ndarray = base_x
         self._steps: list[_Perturbation] = steps
         self._direction: np.ndarray | None = direction
-        self._target: str = target
-        self._metric: str = metric
+        self._terms: list[str] = terms
         self._mode: str = mode
         self._csv_path: str = csv_path
         self._bounds: dict[str, tuple[float, float]] = bounds
@@ -946,8 +954,7 @@ class _LineSearchWorker(QThread):
                 x_best=None,
                 best_results=None,
                 csv_path=None,
-                target=self._target,
-                metric=self._metric,
+                terms=list(self._terms),
                 mode=self._mode,
                 elapsed_seconds=time.perf_counter() - started,
             )
@@ -955,19 +962,28 @@ class _LineSearchWorker(QThread):
             sys.stdout = real_stdout
         self.finished_line_search.emit(outcome)
 
-    def _point_value(self, results: GuiRunResults) -> float:
+    def _point_values(self, results: GuiRunResults) -> np.ndarray:
         """
-        The job's objective value at one point's results, or NaN.
+        The job's selected objectives' values at one point's
+        results, one entry per term.
+
+        Args:
+            results: One point's model results.
 
         Returns:
-            The objective's value, or NaN when the run did not
-            report it.
+            One value per selected term, in the terms' order; an
+            entry is NaN when the run did not report that term.
         """
         labels, vector = objective_vector(results)
-        try:
-            return float(vector[labels.index(f"{self._target}: {self._metric}")])
-        except ValueError:
-            return float("nan")
+        return np.array(
+            [
+                float(vector[labels.index(term)])
+                if term in labels
+                else float("nan")
+                for term in self._terms
+            ],
+            dtype=np.float64,
+        )
 
     def _failed_outcome(
         self, error: str, started: float
@@ -986,8 +1002,7 @@ class _LineSearchWorker(QThread):
             x_best=None,
             best_results=None,
             csv_path=None,
-            target=self._target,
-            metric=self._metric,
+            terms=list(self._terms),
             mode=self._mode,
             elapsed_seconds=time.perf_counter() - started,
         )
@@ -1002,17 +1017,18 @@ class _LineSearchWorker(QThread):
         first runs the direction's points — every free parameter
         perturbed up and down by 1% of its range (clamped to the
         range's ends), deduplicated against the base point like
-        the gradient job — and the direction is then the selected
-        objective's row of their difference matrix, normalized to
-        unit length and expanded to the parameter vector's space
-        (a pinned parameter's component stays zero).
+        the gradient job — and the direction is then the sum of
+        the selected objectives' rows of their difference
+        matrix, normalized to unit length and expanded to the
+        parameter vector's space (a pinned parameter's component
+        stays zero).
 
-        The search then evaluates the objective at
-        `_LINE_SEARCH_POINTS` further pool points on the ascent
-        line ``x + t * direction``, ``t`` equally spaced across
-        the interval that keeps every parameter inside its
-        bounds, and the point with the largest finite value is
-        the best.
+        The search then evaluates the sum of the selected
+        objectives at `_LINE_SEARCH_POINTS` further pool points
+        on the ascent line ``x + t * direction``, ``t`` equally
+        spaced across the interval that keeps every parameter
+        inside its bounds, and the point with the largest finite
+        value is the best.
 
         Each completed point is reported as a (done, total) step
         count (the base point when it was run, then each
@@ -1042,8 +1058,8 @@ class _LineSearchWorker(QThread):
 
         Raises:
             ValueError:
-                Raised when the selected objective has no finite
-                value at the base point, when its differences
+                Raised when the base point did not report every
+                selected objective, when their summed differences
                 carry no direction, or when no point on the
                 ascent line lies inside the current bounds (or
                 reports a value).
@@ -1141,20 +1157,31 @@ class _LineSearchWorker(QThread):
         )
 
         failed_points: int = 0
-        values: list[float] = []
+        term_values: list[list[float]] = []
         point_results: list[GuiRunResults | str] = []
         for payload in search_payloads:
             point_results.append(payload)
             if isinstance(payload, str):
                 failed_points += 1
-                values.append(float("nan"))
+                term_values.append([float("nan")] * len(self._terms))
             else:
-                values.append(self._point_value(payload))
-        values_array: np.ndarray = np.array(values, dtype=np.float64)
+                term_values.append(
+                    [float(value) for value in self._point_values(payload)]
+                )
+        all_term_values: np.ndarray = np.array(term_values, dtype=np.float64)
+        # A point's value is the sum of the selected objectives'
+        # values: a point whose run failed or that missed a term
+        # carries a missing value (its missing term keeps the sum
+        # missing).
+        values_array: np.ndarray = np.where(
+            np.isfinite(all_term_values).all(axis=1),
+            np.sum(all_term_values, axis=1),
+            float("nan"),
+        )
         if not np.isfinite(values_array).any():
             raise ValueError(
                 f"Every point on the ascent line failed to report a "
-                f"value for {self._target}: {self._metric}."
+                f"value for {', '.join(self._terms)}."
             )
         best_index: int = int(np.nanargmax(values_array))
         x_best: np.ndarray = self._base_x + t_points[best_index] * direction
@@ -1168,6 +1195,10 @@ class _LineSearchWorker(QThread):
         best_results: GuiRunResults = best_payload
 
         columns: dict[str, np.ndarray] = {"value": values_array}
+        # One column per selected term, in the terms' order (the
+        # objective table's row order).
+        for column_index, term in enumerate(self._terms):
+            columns[term] = all_term_values[:, column_index]
         for step in self._steps:
             position: int = list(self._bounds).index(step.key)
             columns[step.key] = self._base_x[position] + t_points * direction[
@@ -1181,8 +1212,7 @@ class _LineSearchWorker(QThread):
             x_best=x_best,
             best_results=best_results,
             csv_path=csv_path,
-            target=self._target,
-            metric=self._metric,
+            terms=list(self._terms),
             mode=self._mode,
             elapsed_seconds=time.perf_counter() - started,
             failed_points=failed_points,
@@ -1196,8 +1226,8 @@ class _LineSearchWorker(QThread):
     ) -> np.ndarray:
         """
         The normalized steepest-ascent direction of the job's
-        objective, from its direction points' central
-        differences.
+        selected objectives' equal-weighted sum, from its
+        direction points' central differences.
 
         The direction's points — every free parameter perturbed
         up and down by 1% of its range (clamped to the range's
@@ -1206,14 +1236,14 @@ class _LineSearchWorker(QThread):
         phase; their results, together with the base point's,
         are `results`.  This method reads them only, so it runs
         no points and reports no progress of its own.  The
-        direction is the selected objective's row of the
-        difference matrix, normalized to unit length and expanded
-        to the parameter vector's space (a pinned parameter's
-        component stays zero).
+        direction is the sum of the selected objectives' rows of
+        the difference matrix, normalized to unit length and
+        expanded to the parameter vector's space (a pinned
+        parameter's component stays zero).
 
         Args:
             base_results: The base point's results (its objective
-                vector carries the row's label).
+                vector carries the selected terms' labels).
             results: The first phase's results, keyed by each
                 point's value tuple (the base point's included).
 
@@ -1223,21 +1253,20 @@ class _LineSearchWorker(QThread):
 
         Raises:
             ValueError:
-                Raised when the base point did not report the
-                selected objective, when its differences are not
-                all finite, or when they are all zero (no
-                direction).
+                Raised when the base point did not report every
+                selected objective, when the selected objectives'
+                summed differences are not all finite, or when
+                they are all zero (no direction).
         """
         base_labels, _ = objective_vector(base_results)
-        try:
-            row_index: int = base_labels.index(
-                f"{self._target}: {self._metric}"
-            )
-        except ValueError:
+        missing: list[str] = [
+            term for term in self._terms if term not in base_labels
+        ]
+        if missing:
             raise ValueError(
-                f"The base point did not report the selected objective "
-                f"{self._target}: {self._metric}."
-            ) from None
+                "The base point did not report every selected "
+                f"objective: {', '.join(self._terms)}."
+            )
         f_plus: list[np.ndarray] = []
         f_minus: list[np.ndarray] = []
         for step in self._steps:
@@ -1249,21 +1278,22 @@ class _LineSearchWorker(QThread):
             f_minus.append(down_vector)
 
         matrix: np.ndarray = gradient_matrix(f_plus, f_minus, self._steps)
-        row: np.ndarray = matrix[row_index]
-        if not np.isfinite(row).all():
+        rows: list[int] = [base_labels.index(term) for term in self._terms]
+        summed: np.ndarray = np.sum(matrix[rows], axis=0)
+        if not np.isfinite(summed).all():
             raise ValueError(
-                f"The selected objective {self._target}: {self._metric} "
-                "has a missing difference at the base point, so its "
-                "direction cannot be computed."
+                "The selected objectives have a missing difference at "
+                f"the base point, so the direction cannot be computed: "
+                f"{', '.join(self._terms)}."
             )
-        norm: float = float(np.linalg.norm(row))
+        norm: float = float(np.linalg.norm(summed))
         if norm == 0.0:
             raise ValueError(
-                f"The selected objective {self._target}: {self._metric} "
-                "is flat at the base point: its differences are all "
-                "zero, so the line search has no direction."
+                "The selected objectives are flat at the base point: "
+                "their summed differences are all zero, so the line "
+                f"search has no direction: {', '.join(self._terms)}."
             )
-        return expand_direction(row / norm, self._steps, self._bounds)
+        return expand_direction(summed / norm, self._steps, self._bounds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1279,12 +1309,12 @@ class _LineSearchSnapshot:
 
     Attributes:
         profile: The value profile (the point's step ``t`` as
-            index, the objective's value and every free
-            parameter's value as columns).
-        target: The objective's target (measured series) name,
-            shown in the page's title.
-        metric: The objective's metric (the display label, e.g.
-            ``KGE``), shown in the page's title.
+            index, the searched value and one column per
+            selected term, plus every free parameter's value, as
+            columns).
+        terms: The objective terms the job searched, as
+            ``"target: metric"`` labels, shown in the page's
+            title.
         mode: The run mode the job's points ran in (`MODE_FULL` or
             `MODE_HYDRO`), shown in the page's title.
         csv_path: The path of the written profile CSV, quoted in
@@ -1294,8 +1324,7 @@ class _LineSearchSnapshot:
     """
 
     profile: pd.DataFrame
-    target: str
-    metric: str
+    terms: list[str]
     mode: str
     csv_path: Path
     elapsed_seconds: float
@@ -1309,7 +1338,13 @@ class _ObjectiveTableModel(QAbstractTableModel):
 
     Cells render their values at three decimals with a placeholder
     for a missing or NaN value; the row and column headers are the
-    table's own (metric labels and target names).
+    table's own (metric labels and target names).  The cells also
+    carry the checkboxes that pick the line search's objectives:
+    the model stores the checked terms (None for an unset
+    selection, which searches every selectable term) and the
+    selection's delegate and viewport filter (a left press on a
+    selectable cell toggles its term) keep it and the view in
+    sync.
 
     Args:
         parent: The parent object; defaults to None.
@@ -1320,6 +1355,11 @@ class _ObjectiveTableModel(QAbstractTableModel):
         self._table: pd.DataFrame = build_objective_table(
             pd.Series(dtype=float), None
         )
+        # The checked objective terms, as ``"target: metric"``
+        # labels; None for an unset selection (no checkbox
+        # checked, the search falls back to every selectable
+        # term).
+        self._selected: frozenset[str] | None = None
 
     def set_table(self, table: pd.DataFrame) -> None:
         """
@@ -1331,6 +1371,83 @@ class _ObjectiveTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._table = table
         self.endResetModel()
+
+    def set_selected(self, terms: frozenset[str] | None) -> None:
+        """
+        Remember the checked cells and repaint the view.
+
+        Args:
+            terms: The checked objective terms, as
+                ``"target: metric"`` labels; None for an unset
+                selection (no checkbox checked).
+        """
+        self._selected = terms
+        if self._table.empty:
+            return
+        first: QModelIndex = self.index(0, 0)
+        last: QModelIndex = self.index(
+            self.rowCount() - 1, self.columnCount() - 1
+        )
+        # The signal, not the shadowed protected method, is the
+        # callable binding in PySide6.
+        self.dataChanged.emit(first, last)
+
+    def term_at(self, index: QModelIndex) -> str:
+        """
+        The objective term of one cell.
+
+        Args:
+            index: A valid cell index of the table.
+
+        Returns:
+            The cell's term, the column's target name and the
+            row's metric label joined as ``"target: metric"``.
+        """
+        return f"{self._table.columns[index.column()]}: {self._table.index[index.row()]}"
+
+    def is_selectable(self, term: str) -> bool:
+        """
+        Whether one objective term can be checked.
+
+        A term is selectable when its metric is one the line
+        search can optimize and its cell carries a finite value in
+        the current table.
+
+        Args:
+            term: The objective term, ``"target: metric"``.
+
+        Returns:
+            True when the term is a searchable metric with a
+            finite value in the table's cell; False otherwise
+            (malformed term, unknown cell, unsearchable metric, or
+            a missing value).
+        """
+        parts: list[str] = term.split(": ", 1)
+        if len(parts) != 2:
+            return False
+        target, metric = parts
+        if metric not in _LINE_SEARCH_METRICS:
+            return False
+        try:
+            cell: float = float(self._table.loc[metric, target])
+        except KeyError:
+            return False
+        return bool(np.isfinite(cell))
+
+    def is_selected(self, term: str) -> bool:
+        """
+        Whether one objective term is currently checked.
+
+        Args:
+            term: The objective term, ``"target: metric"``.
+
+        Returns:
+            True when the term is in the checked selection; an
+            unset selection checks no term.
+        """
+        if self._selected is None:
+            return False
+        return term in self._selected
 
     def rowCount(
         self, parent: QModelIndex | QPersistentModelIndex = _INVALID_INDEX
@@ -1382,6 +1499,115 @@ class _ObjectiveTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             return str(self._table.columns[section])
         return str(self._table.index[section])
+
+
+class _ObjectiveSelectionDelegate(QStyledItemDelegate):
+    """
+    The objective table's item delegate: draws each cell's checkbox
+    in the cell's left inset.
+
+    The checkbox is the cell's selectable state, not the cell's
+    content: a selectable term (a searchable metric with a finite
+    value) shows an enabled checkbox that is checked when the term
+    is in the model's selection, and a non-selectable term shows a
+    disabled (greyed) unchecked one, so the user can tell at a
+    glance which cells the line search can search.
+
+    Args:
+        parent: The parent object (the table's view); defaults to
+            None.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+
+    def sizeHint(
+        self, option: QStyleOptionViewItem, index: QModelIndex
+    ) -> QSize:
+        """The base size hint, widened by the checkbox inset."""
+        hint: QSize = super().sizeHint(option, index)
+        return QSize(hint.width() + _CHECKBOX_INSET, hint.height())
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
+        """Draw the cell, then the checkbox in its left inset."""
+        super().paint(painter, option, index)
+        model: QAbstractItemModel | None = index.model()
+        if not isinstance(model, _ObjectiveTableModel) or not index.isValid():
+            return
+        term: str = model.term_at(index)
+        checkbox: QStyleOptionButton = QStyleOptionButton()
+        # The checkbox occupies the cell's left inset, vertically
+        # centered.
+        checkbox.rect = QRect(
+            option.rect.left(),
+            option.rect.center().y() - 8,
+            _CHECKBOX_INSET,
+            16,
+        )
+        if model.is_selectable(term):
+            # State_Enabled keeps the box drawn at full contrast.
+            checkbox.state = (
+                QStyle.StateFlag.State_On
+                if model.is_selected(term)
+                else QStyle.StateFlag.State_Off
+            ) | QStyle.StateFlag.State_Enabled
+        else:
+            # Without State_Enabled the style draws the unchecked
+            # box greyed out.
+            checkbox.state = QStyle.StateFlag.State_Off
+        QApplication.style().drawControl(
+            QStyle.ControlElement.CE_CheckBox,
+            checkbox,
+            painter,
+        )
+
+
+class _ObjectiveSelectionFilter(QObject):
+    """
+    The objective table's viewport event filter: a left mouse press
+    on a selectable cell toggles that cell's objective term.
+
+    The filter watches only the table's viewport (cell positions
+    are the viewport's own), maps the press position to a cell,
+    and emits the cell's term when the cell is selectable; presses
+    on non-selectable cells, on the headers, and releases emit
+    nothing.
+
+    Signals:
+        toggled: Emitted with the term whose cell was pressed, as
+            ``"target: metric"``.
+
+    Args:
+        table: The objective table whose viewport is watched.
+        parent: The parent object; defaults to None.
+    """
+
+    toggled = Signal(str)
+
+    def __init__(self, table: QTableView, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._table: QTableView = table
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            isinstance(event, QMouseEvent)
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            index: QModelIndex = self._table.indexAt(event.pos())
+            model: QAbstractItemModel | None = index.model()
+            if (
+                index.isValid()
+                and isinstance(model, _ObjectiveTableModel)
+                and model.is_selectable(model.term_at(index))
+            ):
+                self.toggled.emit(model.term_at(index))
+        return False
 
 
 class _StatusLabel(QLabel):
@@ -1579,6 +1805,11 @@ class MainWindow(QMainWindow):
         # (None while no line search has finished); the figure
         # panel draws it as an extra page.
         self._line_search_state: _LineSearchSnapshot | None = None
+        # The objective table cells the user checked as line search
+        # objectives (as ``"target: metric"`` terms); None for an
+        # unset selection, which searches every selectable term.
+        # Restored from a saved run; never set by a run's results.
+        self._objective_terms: frozenset[str] | None = None
 
         self.setWindowTitle(_TITLE)
         self.resize(*_INITIAL_SIZE)
@@ -1734,19 +1965,24 @@ class MainWindow(QMainWindow):
         self._line_search_button: QPushButton = QPushButton("Line search")
         self._line_search_button.clicked.connect(self._on_line_search_clicked)
         self._line_search_button.setToolTip(
-            "Follow the steepest ascent of one objective function "
-            "from the current parameters: pick an objective from "
-            "the menu, and the job evaluates it at 25 points on "
-            "the ascent line, all inside the current parameter "
-            "bounds, and adopts the point with the best value "
-            "(the searchable metrics have 1 as their optimal "
-            "value, so the search maximizes the metric).  When a "
-            "gradient job has already run at these parameters its "
-            "matrix supplies the direction; otherwise the "
-            "direction is computed by the same central "
-            "differences.  The value profile is written to a CSV "
-            "in the results directory and drawn as an extra page "
-            "of the figure panel."
+            "Follow the steepest ascent of the selected objective "
+            "functions' equal-weighted sum from the current "
+            "parameters: check the cells of the objective table to "
+            "select any combination of its KGE, LogKGE, NSE, or "
+            "LogNSE values, and the job evaluates the sum at 25 "
+            "points on the ascent line, all inside the current "
+            "parameter bounds, and adopts the point with the best "
+            "value (the searchable metrics have 1 as their optimal "
+            "value, so the search maximizes the sum; if no cell "
+            "has ever been checked, every selectable term is "
+            "searched, but unchecking every checked cell refuses "
+            "the search).  "
+            "When a gradient job has already run at these "
+            "parameters its matrix supplies the direction; "
+            "otherwise the direction is computed by the same "
+            "central differences.  The value profile is written to "
+            "a CSV in the results directory and drawn as an extra "
+            "page of the figure panel."
         )
 
         self._reset_button: QPushButton = QPushButton("Reset bounds")
@@ -1875,6 +2111,23 @@ class MainWindow(QMainWindow):
         self._objective_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
+        # The cells' checkboxes draw on top of the values: the
+        # delegate paints them in each cell's left inset, and the
+        # viewport's event filter turns a left press on a
+        # selectable cell into a toggle of its term (the window
+        # stores the checked terms and the model repaints them).
+        self._objective_table.setItemDelegate(
+            _ObjectiveSelectionDelegate(self._objective_table)
+        )
+        self._objective_selection_filter: _ObjectiveSelectionFilter = (
+            _ObjectiveSelectionFilter(self._objective_table, self)
+        )
+        self._objective_table.viewport().installEventFilter(
+            self._objective_selection_filter
+        )
+        self._objective_selection_filter.toggled.connect(
+            self._on_objective_toggled
+        )
 
         self._objective_heading: QLabel = QLabel("<b>Objective functions</b>")
         self._objective_heading.setToolTip(METRIC_NOTES)
@@ -1905,6 +2158,7 @@ class MainWindow(QMainWindow):
             self._objective_heading.sizeHint(),
             [
                 self._objective_table.horizontalHeader().sectionSizeHint(c)
+                + _CHECKBOX_INSET
                 for c in range(self._objective_model.columnCount())
             ],
             [
@@ -2003,9 +2257,19 @@ class MainWindow(QMainWindow):
         parameter), the checkbox selection, the saved run mode, and
         the run's saved results, and marks them as the last run so
         *Save run* is immediately available; this method then adds
-        the saved-window bits: the status note, the window geometry
+        the saved-window bits: the checked objective terms (only the
+        checked ones: the table cells re-check themselves against
+        the restored results), the status note, the window geometry
         and splitter sizes, and the *Save run history* checkbox.
         """
+        # The checked cells are restored before the shared apply, so
+        # the results refresh that follows intersects them with the
+        # restored table's selectable cells.
+        self._objective_terms = (
+            frozenset(saved.objective_terms)
+            if saved.objective_terms is not None
+            else None
+        )
         self._apply_history_entry(
             saved.param_values,
             saved.param_bounds,
@@ -2413,17 +2677,121 @@ class MainWindow(QMainWindow):
     # ==== Line search ==== #
     def _on_line_search_clicked(self) -> None:
         """
-        Show the line search's menu from the *Line search* button.
+        Start a line search of the checked objectives from the
+        *Line search* button.
 
-        The menu lists every objective function for which the
-        current results report a finite value, among the metrics
-        the search can optimize (the ones with 1 as their optimal
-        value: KGE, LogKGE, NSE, and LogNSE); picking one starts a
-        line search of that objective.  A job already in flight
-        takes precedence: the click is ignored, since a job cannot
-        be interrupted.
+        The search's objectives are the cells of the objective
+        table the user checked (any combination of its KGE, LogKGE,
+        NSE, and LogNSE values); nothing checked means every
+        selectable cell.  A job already in flight takes precedence:
+        a click during a job's run is ignored silently, since a job
+        cannot be interrupted and the search itself reports the
+        refusal with a message.
         """
         if self._worker is not None and self._worker.isRunning():
+            return
+        self._start_line_search(self._objective_terms or frozenset())
+
+    def _on_objective_toggled(self, term: str) -> None:
+        """
+        Toggle one objective table cell's term in the line search's
+        selection.
+
+        The viewport's event filter emits the term of the
+        selectable cell a left press landed on: the first check of
+        the session turns an unset selection into that single term,
+        and each further check toggles the term's membership.  The
+        selection is the user's — no re-run is triggered.
+
+        Args:
+            term: The pressed cell's term, ``"target: metric"``.
+        """
+        if not self._objective_model.is_selectable(term):
+            return
+        if self._objective_terms is None:
+            terms: frozenset[str] = frozenset({term})
+        else:
+            terms = self._objective_terms ^ {term}
+        self._objective_terms = terms
+        self._objective_model.set_selected(terms)
+
+    def _selectable_objective_terms(self) -> frozenset[str]:
+        """
+        The objective terms the line search can search now.
+
+        The selectable cells of the current objective table (a
+        searchable metric with a finite value), narrowed to the run
+        mode: a hydro run models streamflow only, so only the
+        streamflow terms are selectable in hydro mode.
+
+        Returns:
+            The selectable terms, as ``"target: metric"`` labels.
+        """
+        prefix: str = (
+            "Streamflow:" if self._current_mode() == MODE_HYDRO else ""
+        )
+        terms: set[str] = set()
+        for row in range(self._objective_model.rowCount()):
+            for column in range(self._objective_model.columnCount()):
+                index: QModelIndex = self._objective_model.index(row, column)
+                term: str = self._objective_model.term_at(index)
+                if term.startswith(prefix) and self._objective_model.is_selectable(
+                    term
+                ):
+                    terms.add(term)
+        return frozenset(terms)
+
+    def _sync_objective_selection(self, selectable: frozenset[str]) -> None:
+        """
+        Keep the checked terms a subset of the selectable ones.
+
+        An explicit selection is intersected with the terms
+        selectable now, so a term that leaves the table (a mode
+        switch) or loses its finite value (a new run's results)
+        drops out of it, while an unset selection stays unset; the
+        model's checkboxes repaint either way.
+
+        Args:
+            selectable: The objective terms selectable now.
+        """
+        if self._objective_terms is not None:
+            self._objective_terms &= selectable
+        self._objective_model.set_selected(self._objective_terms)
+
+    def _start_line_search(self, terms: frozenset[str]) -> None:
+        """
+        Start a line search of the selected objectives'
+        equal-weighted sum.
+
+        The search follows the steepest ascent of the sum of the
+        selected objective terms from the current parameters: when
+        a gradient job has already finished at these parameters (in
+        the same mode, with the same free parameters) and its table
+        reports every selected term, its matrix supplies the
+        direction (the summed rows, un-normalized) for free;
+        otherwise the direction is computed by the same central
+        differences as the gradient job, summing the selected
+        terms' rows.  The sum is then evaluated at 25 points on the
+        ascent line, all inside the current parameter bounds, and
+        the point with the best (largest) value is adopted.
+
+        The search's objectives are the checked cells of the
+        objective table; an unset selection (nothing checked)
+        searches every selectable cell.  The run indicators show
+        the job's progress like a model run's; a job cannot be
+        interrupted.
+
+        The refusals, in order: a job already in flight (a model
+        run or a gradient job) takes precedence and is reported
+        with a message, since a job cannot be interrupted; an
+        empty table has no values to search yet; no selectable
+        term is checked; no free parameter to search.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            self._status(
+                "A job is already in flight: it cannot be interrupted, "
+                "so the line search was not started."
+            )
             return
         table: pd.DataFrame = self._objective_model._table
         if table.empty:
@@ -2431,62 +2799,17 @@ class MainWindow(QMainWindow):
                 "No objective values to search yet: run the model first."
             )
             return
-        candidates: list[tuple[str, str]] = [
-            (str(target), str(metric))
-            for target in table.columns
-            for metric in table.index
-            if metric in _LINE_SEARCH_METRICS
-            and np.isfinite(table.loc[metric, target])
-        ]
-        if not candidates:
-            self._status(
-                "No search objective is available: run the model first."
-            )
-            return
-        menu: QMenu = QMenu(self)
-        for target, metric in candidates:
-            action: QAction = menu.addAction(f"{target}: {metric}")
-            action.triggered.connect(
-                partial(self._on_line_search_selected, target, metric)
-            )
-        menu.exec(
-            self._line_search_button.mapToGlobal(
-                self._line_search_button.rect().bottomLeft()
-            )
+        # An unset selection searches every selectable term; a set
+        # one searches exactly the checked terms.
+        effective: frozenset[str] = (
+            terms
+            if self._objective_terms is not None
+            else self._selectable_objective_terms()
         )
-
-    def _on_line_search_selected(
-        self, target: str, metric: str, _checked: bool
-    ) -> None:
-        """Start a line search of the objective picked from the menu."""
-        self._start_line_search(target, metric)
-
-    def _start_line_search(self, target: str, metric: str) -> None:
-        """
-        Start a line search of one objective function.
-
-        The search follows the steepest ascent of the objective
-        from the current parameters: when a gradient job has
-        already finished at these parameters (in the same mode,
-        with the same free parameters), its matrix supplies the
-        direction for free; otherwise the direction is computed by
-        the same central differences as the gradient job, for the
-        one selected row.  The objective is then evaluated at 25
-        points on the ascent line, all inside the current
-        parameter bounds, and the point with the best (largest)
-        value is adopted.
-
-        The run indicators show the job's progress like a model
-        run's; a job cannot be interrupted.
-
-        A job already in flight (a model run or a gradient job)
-        takes precedence: the search is refused with a status
-        message, since a job cannot be interrupted.
-        """
-        if self._worker is not None and self._worker.isRunning():
+        if not effective:
             self._status(
-                "A job is already in flight: it cannot be interrupted, "
-                "so the line search was not started."
+                "No objectives are selected: check at least one cell of "
+                "the objective table."
             )
             return
         x: np.ndarray = self._current_x()
@@ -2497,6 +2820,14 @@ class MainWindow(QMainWindow):
         if not steps:
             self._status("No free parameters to search.")
             return
+        # The selected terms in the objective table's row order —
+        # the order the worker evaluates and reports them in.
+        terms_list: list[str] = [
+            f"{target}: {metric}"
+            for metric in table.index
+            for target in table.columns
+            if f"{target}: {metric}" in effective
+        ]
         direction: np.ndarray | None = None
         snapshot: _GradientSnapshot | None = self._gradient_state
         if (
@@ -2506,11 +2837,16 @@ class MainWindow(QMainWindow):
             and len(snapshot.table.columns) == len(steps)
         ):
             try:
-                row: np.ndarray = snapshot.table.loc[
-                    f"{target}: {metric}"
-                ].to_numpy(dtype=np.float64)
-                direction = expand_direction(row, steps, bounds)
+                rows: list[np.ndarray] = [
+                    snapshot.table.loc[term].to_numpy(dtype=np.float64)
+                    for term in terms_list
+                ]
+                direction = expand_direction(
+                    np.sum(np.vstack(rows), axis=0), steps, bounds
+                )
             except KeyError:
+                # A selected term the snapshot's table lacks:
+                # compute the direction fresh instead.
                 direction = None
         base_results: GuiRunResults | None = (
             self._results
@@ -2528,13 +2864,18 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
         self._line_search_button.setEnabled(False)
-        self._status(f"Line search in progress: {target}: {metric} …")
+        if len(terms_list) == 1:
+            self._status(f"Line search in progress: {terms_list[0]} …")
+        else:
+            self._status(
+                f"Line search in progress: "
+                f"{len(terms_list)} selected objectives …"
+            )
         self._worker = _LineSearchWorker(
             x,
             steps,
             direction,
-            target,
-            metric,
+            terms_list,
             self._current_mode(),
             self._csv_path or str(DEFAULT_CSV_PATH),
             bounds,
@@ -2622,19 +2963,28 @@ class MainWindow(QMainWindow):
         self._last_run_mode = outcome.mode
         self._line_search_state = _LineSearchSnapshot(
             profile=outcome.profile,
-            target=outcome.target,
-            metric=outcome.metric,
+            terms=list(outcome.terms),
             mode=outcome.mode,
             csv_path=outcome.csv_path,
             elapsed_seconds=outcome.elapsed_seconds,
         )
         self._refresh_from_results()
+        if len(outcome.terms) == 1:
+            best_text: str = (
+                f"({outcome.terms[0]} = {best_value:.3f}); the best "
+                f"point's parameters are in the panel and the profile "
+                f"was saved to {outcome.csv_path}."
+            )
+        else:
+            best_text = (
+                f"(sum of {len(outcome.terms)} objectives = "
+                f"{best_value:.3f}); the best point's parameters are "
+                f"in the panel and the profile was saved to "
+                f"{outcome.csv_path}."
+            )
         message: str = (
             f"Line search finished in {outcome.elapsed_seconds:.1f} s: "
-            f"best t = {best_t:.4f} ({outcome.target}: "
-            f"{outcome.metric} = {best_value:.3f}); the best point's "
-            f"parameters are in the panel and the profile was saved "
-            f"to {outcome.csv_path}."
+            f"best t = {best_t:.4f} {best_text}"
         )
         if outcome.failed_points > 0:
             message += (
@@ -2993,13 +3343,16 @@ class MainWindow(QMainWindow):
         The parameter panel hides or shows its reactive-transport
         parts, the window takes the new mode's tint, the results on
         screen are stale in the new mode (the run button reflects
-        that), and with auto-run on a debounced re-run follows so
-        the figures match the mode.
+        that), the line search's selection is kept a subset of the
+        mode's selectable terms (the checkboxes repaint), and with
+        auto-run on a debounced re-run follows so the figures match
+        the mode.
         """
         mode: str = self._current_mode()
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
         self._set_mode_tint(mode)
         self._update_run_button()
+        self._sync_objective_selection(self._selectable_objective_terms())
         if self._auto_run_checkbox.isChecked():
             self._debounce_timer.start()
 
@@ -3060,7 +3413,9 @@ class MainWindow(QMainWindow):
         blocks the save, since its output would be stale).  A
         full-mode run saves the ``hydro`` and ``rt`` bundle pair
         and a hydrology-only run the flat hydrology bundle; the
-        state file records the run mode.  Every figure currently
+        state file records the run mode and the checked objective
+        cells (restored, then intersected with the restored
+        table's selectable cells).  Every figure currently
         loaded in the figure panel (the mode's own figures, and the
         gradient and line search pages when those jobs have
         finished) is saved as a PNG into a ``figures`` subfolder of
@@ -3134,6 +3489,11 @@ class MainWindow(QMainWindow):
             ],
             save_history=self._save_history_checkbox.isChecked(),
             mode=self._current_mode(),
+            objective_terms=(
+                list(self._objective_terms)
+                if self._objective_terms is not None
+                else None
+            ),
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(
@@ -3261,14 +3621,23 @@ class MainWindow(QMainWindow):
         # extra page, like the gradient matrix.
         if self._line_search_state is not None:
             search: _LineSearchSnapshot = self._line_search_state
-            note = (
-                f"Steepest ascent of {search.target}: {search.metric}, "
-                f"{_LINE_SEARCH_POINTS} points within the current "
-                f"bounds; saved to {search.csv_path}."
-            )
+            if len(search.terms) == 1:
+                note = (
+                    f"Steepest ascent of {search.terms[0]}, "
+                    f"{_LINE_SEARCH_POINTS} points within the current "
+                    f"bounds; saved to {search.csv_path}."
+                )
+            else:
+                note = (
+                    f"Steepest ascent of {len(search.terms)} "
+                    f"equal-weighted objectives "
+                    f"({', '.join(search.terms)}), "
+                    f"{_LINE_SEARCH_POINTS} points within the current "
+                    f"bounds; saved to {search.csv_path}."
+                )
             mode_label = "hydro" if search.mode == MODE_HYDRO else "full"
             search_fig: Figure = make_line_search_figure(
-                search.profile, search.target, search.metric, note
+                search.profile, search.terms, note
             )
             figures = figures + (
                 (f"Line search ({mode_label})", search_fig),
@@ -3276,6 +3645,11 @@ class MainWindow(QMainWindow):
 
         self._figure_panel.set_figures(figures)
         self._objective_model.set_table(table)
+        # The new table's selectable cells define what the line
+        # search can search: keep the checked terms a subset of
+        # them (a term that lost its finite value drops out) and
+        # repaint the checkboxes.
+        self._sync_objective_selection(self._selectable_objective_terms())
         # The objective panel is fixed in size; re-fit it after the
         # table's contents (and thus its size hint) changed.
         self._fit_objective_panel()

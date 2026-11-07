@@ -48,7 +48,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayoutItem,
-    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -416,6 +415,7 @@ class TestMainWindowStartup:
                 win._objective_heading.sizeHint(),
                 [
                     win._objective_table.horizontalHeader().sectionSizeHint(c)
+                    + gui_window._CHECKBOX_INSET
                     for c in range(win._objective_model.columnCount())
                 ],
                 [
@@ -3111,28 +3111,31 @@ class TestGradients:
 
 
 # ------------------------------------------------------------------ #
-# The header's *Line search* button: the steepest-ascent jobs
+# The objective table's checkbox selection: the search objective
 # ------------------------------------------------------------------ #
 
 
-class TestLineSearch:
-    """The header's *Line search* button: the steepest-ascent jobs."""
+class TestObjectiveSelection:
+    """Checking objective-table cells picks the line search objective."""
 
-    def test_menu_lists_finite_line_search_metrics(
+    def test_objective_selection_toggles(
         self,
         qapp: QApplication,
         input_data: gui_data.GuiInputData,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The menu lists every finite objective with an optimizable metric."""
-        free = _free_keys(input_data)
+        """
+        Clicking a selectable cell toggles its term in the
+        window's selection and in the model; a non-selectable
+        term is ignored.
+        """
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
-            calls, input_data, free[0], free[1]
-        )
-        win = _gradient_window(
-            input_data, tmp_path, monkeypatch, full_fake, hydro_fake
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
         )
         try:
             _wait_until(
@@ -3140,39 +3143,83 @@ class TestLineSearch:
             )
             _pump()
 
-            executed: list[QMenu] = []
+            viewport = win._objective_table.viewport()
+            index = win._objective_model.index(0, 0)
+            event = QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(win._objective_table.visualRect(index).center()),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            qapp.sendEvent(viewport, event)
+            _pump()
+            assert win._objective_terms == frozenset({"Streamflow: KGE"})
+            assert win._objective_model.is_selected("Streamflow: KGE")
 
-            class _FakeLineSearchMenu(QMenu):
-                """The window's menu: its exec is recorded, never opened."""
+            qapp.sendEvent(viewport, event)
+            _pump()
+            assert win._objective_terms == frozenset()
+            assert not win._objective_model.is_selected("Streamflow: KGE")
 
-                # The PySide6 stubs misdeclare exec's return type as
-                # QAction; Qt 6's QMenu::exec returns an int.
-                def exec(self, *args: object) -> int:  # type: ignore[override]
-                    executed.append(self)
-                    return 0
-
-            # A class-attribute patch cannot shadow the C-level method,
-            # but the window resolves QMenu from its own module globals,
-            # so the subclass stands in for the menu the click builds.
-            monkeypatch.setattr(gui_window, "QMenu", _FakeLineSearchMenu)
-            win._on_line_search_clicked()
-            assert len(executed) == 1
-            action_texts: list[str] = [
-                action.text() for action in executed[0].actions()
-            ]
-            # Every finite cell of the table whose metric the search
-            # can optimize: each target's four optimizable metrics,
-            # in the table's column and row order.
-            assert action_texts == [
-                f"{target}: {metric}"
-                for target in ("Streamflow", "DOC", "DIC", "Ca++")
-                for metric in ("KGE", "LogKGE", "NSE", "LogNSE")
-            ]
-            # Showing the menu starts no job.
-            assert win._worker is None
-            assert win._line_search_state is None
+            win._objective_terms = None
+            win._on_objective_toggled("DOC: R\u00b2")
+            assert win._objective_terms is None
         finally:
             _close_window(win)
+
+    def test_mode_switch_keeps_explicit_selection_intersected(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Switching the run mode intersects an explicit selection
+        with the mode's selectable set and repaints the
+        checkboxes; switching back keeps the surviving term
+        selected while the dropped term is present but unchecked.
+        """
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            win._auto_run_checkbox.setChecked(False)
+
+            win._on_objective_toggled("Streamflow: KGE")
+            win._on_objective_toggled("DOC: KGE")
+            assert win._objective_terms == frozenset(
+                {"Streamflow: KGE", "DOC: KGE"}
+            )
+
+            win._mode_checkbox.setChecked(True)
+            assert win._objective_terms == frozenset({"Streamflow: KGE"})
+            assert win._objective_model.is_selected("Streamflow: KGE")
+            assert not win._objective_model.is_selected("DOC: KGE")
+
+            win._mode_checkbox.setChecked(False)
+            assert win._objective_terms == frozenset({"Streamflow: KGE"})
+            assert not win._objective_model.is_selected("DOC: KGE")
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# The header's *Line search* button: the steepest-ascent jobs
+# ------------------------------------------------------------------ #
+
+
+class TestLineSearch:
+    """The header's *Line search* button: the steepest-ascent jobs."""
 
     def test_full_mode_job(
         self,
@@ -3210,7 +3257,10 @@ class TestLineSearch:
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             worker = win._worker
             assert isinstance(worker, gui_window._LineSearchWorker)
 
@@ -3403,7 +3453,10 @@ class TestLineSearch:
                 _file_gated_fake(flaky_hydro, gate),
             )
 
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             worker = win._worker
             assert isinstance(worker, gui_window._LineSearchWorker)
 
@@ -3566,7 +3619,10 @@ class TestLineSearch:
                 _file_gated_fake(hydro_fake, search_gate),
             )
 
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             search_worker = win._worker
             assert isinstance(search_worker, gui_window._LineSearchWorker)
 
@@ -3617,6 +3673,300 @@ class TestLineSearch:
                 "Line search (full)",
             ]
         finally:
+            _close_window(win)
+
+    def test_line_search_sum_of_two_objectives(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Two checked cells search the sum of the two objectives:
+        the profile carries a column per term and their sum in
+        the value column, and the page and the status report on
+        the sum.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        gate = tmp_path / "search_gate"
+        win = _gradient_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            terms: frozenset[str] = frozenset(
+                {"Streamflow: KGE", "Streamflow: NSE"}
+            )
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
+            worker = win._worker
+            assert isinstance(worker, gui_window._LineSearchWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            assert len(free) + 25 <= total <= 2 * len(free) + 25
+
+            state = win._line_search_state
+            assert state is not None
+            assert state.mode == MODE_FULL
+            assert state.terms == ["Streamflow: KGE", "Streamflow: NSE"]
+            profile: pd.DataFrame = state.profile
+            assert len(profile) == 25
+            assert profile.columns.tolist()[:3] == [
+                "value",
+                "Streamflow: KGE",
+                "Streamflow: NSE",
+            ]
+            assert np.array_equal(
+                profile["value"],
+                profile["Streamflow: KGE"] + profile["Streamflow: NSE"],
+            )
+
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Line search (full)"
+            figure: Figure = win._figure_panel._canvases[-1].figure
+            lines = _lines(figure.axes[0])
+            assert [line.get_label() for line in lines] == [
+                "Streamflow: KGE",
+                "Streamflow: NSE",
+                "sum",
+                "best",
+            ]
+            assert lines[2].get_linewidth() == 2
+            assert [t.get_text() for t in figure.legends[0].get_texts()] == [
+                "Streamflow: KGE",
+                "Streamflow: NSE",
+                "sum",
+                "best",
+            ]
+            assert re.fullmatch(
+                r"Line search finished in \d+(?:\.\d+)? s: "
+                r"best t = [\d.]+ \(sum of 2 objectives = [\d.]+\); "
+                r"the best point's parameters are in the panel and the "
+                r"profile was saved to .*line_search_\d{8}_\d{6}\.csv\.",
+                win._status_label.text(),
+            ) is not None
+        finally:
+            gate.touch()
+            _close_window(win)
+
+    def test_line_search_in_hydro_mode(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The same checkbox selection searches in hydro mode: the
+        pool runs the hydro objectives and the page and the
+        status report the hydro search.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        win = _make_window(input_data, tmp_path, monkeypatch, full_fake)
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            # No auto run after the mode switch: the search's
+            # points are the only pool work, held on the file
+            # gate until the test releases them.
+            win._auto_run_checkbox.setChecked(False)
+            win._mode_checkbox.setChecked(True)
+            file_gate = tmp_path / "job_gate"
+
+            def marking_hydro_fake(
+                x: np.ndarray, _input_data: gui_data.GuiInputData
+            ) -> gui_data.GuiRunResults:
+                (tmp_path / f"hydro_{float(x.sum()):.6f}").touch()
+                return hydro_fake(x, _input_data)
+
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_hydro_results",
+                _file_gated_fake(marking_hydro_fake, file_gate),
+            )
+            monkeypatch.setattr(
+                gui_data,
+                "arr_to_results",
+                _file_gated_fake(full_fake, file_gate),
+            )
+
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
+            assert isinstance(
+                win._worker, gui_window._LineSearchWorker
+            )
+
+            file_gate.touch()
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            markers: list[Path] = sorted(tmp_path.glob("hydro_*"))
+            assert markers
+
+            state = win._line_search_state
+            assert state is not None
+            assert state.mode == MODE_HYDRO
+            assert state.terms == ["Streamflow: KGE"]
+            profile: pd.DataFrame = state.profile
+            assert np.allclose(profile["value"], 0.9 + 2.0 * profile[free[0]])
+
+            # Hydro mode's own pages are the streamflow figure and
+            # the water-storage figure: two, plus the search page.
+            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel._titles[-1] == "Line search (hydro)"
+            assert re.fullmatch(
+                r"Line search finished in \d+(?:\.\d+)? s: "
+                r"best t = [\d.]+ \(Streamflow: KGE = [\d.]+\); "
+                r"the best point's parameters are in the panel and the "
+                r"profile was saved to .*line_search_\d{8}_\d{6}\.csv\.",
+                win._status_label.text(),
+            ) is not None
+        finally:
+            file_gate.touch()
+            _close_window(win)
+
+    def test_line_search_recomputes_direction_when_snapshot_lacks_term(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        When the saved gradient snapshot lacks a selected term, the
+        search recomputes the direction from the base point's own
+        differences instead of reusing the snapshot's rows.
+        """
+        free = _free_keys(input_data)
+        calls: list[np.ndarray] = []
+        full_fake, hydro_fake = _gradient_fake_factory(
+            calls, input_data, free[0], free[1]
+        )
+        gate = tmp_path / "search_gate"
+        win = _gradient_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            full_fake,
+            hydro_fake,
+            gate_path=gate,
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            assert len(calls) == 1
+
+            # A snapshot that lacks the selected term, with a csv
+            # file that exists so only the term lookup can fail.
+            results_dir: Path = tmp_path / "results"
+            results_dir.mkdir(exist_ok=True)
+            csv_path: Path = results_dir / "gradients_fake.csv"
+            csv_path.touch()
+            win._gradient_state = gui_window._GradientSnapshot(
+                table=pd.DataFrame(
+                    [[0.0] * len(free)],
+                    index=["Streamflow: KGE"],
+                    columns=free,
+                ),
+                base_x=win._current_x(),
+                mode=MODE_FULL,
+                csv_path=csv_path,
+                elapsed_seconds=0.0,
+            )
+
+            terms: frozenset[str] = frozenset({"DOC: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
+            worker = win._worker
+            assert isinstance(worker, gui_window._LineSearchWorker)
+
+            steps: list[tuple[int, int]] = []
+
+            def on_step(done: int, total: int) -> None:
+                steps.append((done, total))
+
+            worker.progress_step.connect(on_step)
+            gate.touch()
+
+            _wait_until(
+                lambda: win._line_search_state is not None
+                and win._worker is None
+            )
+            _pump()
+            assert len(calls) == 1
+            assert steps
+            assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
+            assert len({total for _done, total in steps}) == 1
+            total: int = steps[0][1]
+            assert steps[-1] == (total, total)
+            # The base point's results were handed in and the
+            # midpoint base dedups against nothing, so the
+            # direction's central differences run for every free
+            # parameter, then the 25 search points follow.
+            assert total == 2 * len(free) + 25
+
+            state = win._line_search_state
+            assert state is not None
+            assert state.mode == MODE_FULL
+            assert state.terms == ["DOC: KGE"]
+            assert re.fullmatch(
+                r"Line search finished in \d+(?:\.\d+)? s: "
+                r"best t = [\d.]+ \(DOC: KGE = [\d.]+\); "
+                r"the best point's parameters are in the panel and the "
+                r"profile was saved to .*line_search_\d{8}_\d{6}\.csv\.",
+                win._status_label.text(),
+            ) is not None
+        finally:
+            gate.touch()
             _close_window(win)
 
     def test_empty_objective_table(
@@ -3679,7 +4029,10 @@ class TestLineSearch:
                 }
 
             monkeypatch.setattr(win._param_panel, "current_bounds", no_free)
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             _pump()
             assert (
                 win._status_label.text() == "No free parameters to search."
@@ -3699,7 +4052,7 @@ class TestLineSearch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
-        The direct (menu) path: a line search invoked while a job
+        The direct path: a line search invoked while a job
         is in flight is refused with a status message, and the
         in-flight job's outcome stays the final on-screen state;
         with no job in flight, the same call starts the search.
@@ -3751,7 +4104,10 @@ class TestLineSearch:
             # The direct path is guarded against the in-flight run:
             # refused with a status message, the run's worker
             # reference untouched, nothing adopted or started.
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             _pump()
             assert win._worker is not None
             assert id(win._worker) == run_id
@@ -3787,7 +4143,10 @@ class TestLineSearch:
             # the worker computes the direction and the search
             # points itself in the pool.
             file_gate.touch()
-            win._on_line_search_selected("Streamflow", "KGE", False)
+            terms = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            win._start_line_search(terms)
             assert isinstance(win._worker, gui_window._LineSearchWorker)
             _wait_until(
                 lambda: win._line_search_state is not None

@@ -739,28 +739,29 @@ def make_gradient_figure(table: pd.DataFrame, note: str) -> Figure:
 
 def make_line_search_figure(
     profile: pd.DataFrame,
-    target: str,
-    metric: str,
+    terms: list[str],
     note: str,
 ) -> Figure:
     """
     The line search's value profile, as a page of the figure panel.
 
-    The page draws the searched objective's value at every
-    evaluated point of the ascent line: the profile's ``value``
-    column against the step ``t`` on the horizontal axis, one
-    marker per point.  The point with the largest finite value is
+    The page draws the searched value at every evaluated point of
+    the ascent line, against the step ``t`` on the horizontal axis,
+    one marker per point.  With one searched term, it draws the
+    profile's ``value`` column (the term's value) and labels the
+    title and the vertical axis after the term; with several, it
+    draws each term's value in the terms' order, the searched sum
+    (the ``value`` column) in bold, and labels the vertical axis
+    after the sum.  The point with the largest finite value is
     marked in red as the best one, and the job's note is printed
     under the panel.
 
     Args:
         profile: The value profile, one row per evaluated point:
-            the step ``t`` as index, the objective's value in the
-            ``value`` column.
-        target: The objective's target (measured series) name, for
-            the title.
-        metric: The objective's metric display label, for the
-            title and the vertical axis.
+            the step ``t`` as index, the searched value in the
+            ``value`` column, and one column per searched term.
+        terms: The searched objective terms, as ``"target:
+            metric"`` labels, in the profile's column order.
         note: The caption printed under the panel (the search and
             the path of the saved CSV).
 
@@ -775,7 +776,31 @@ def make_line_search_figure(
     values: np.ndarray = profile["value"].to_numpy(dtype=np.float64)
     best_index: int = int(np.nanargmax(values))
 
-    ax.plot(t, values, color="k", linewidth=1, marker="o", markersize=3)
+    if len(terms) == 1:
+        metric: str = terms[0].rsplit(": ", 1)[1]
+        ax.plot(
+            t,
+            values,
+            color="k",
+            linewidth=1,
+            marker="o",
+            markersize=3,
+            label=terms[0],
+        )
+        ax.set_title(f"Line search — {terms[0]}")
+        ax.set_ylabel(metric)
+    else:
+        for term in terms:
+            ax.plot(
+                t,
+                profile[term].to_numpy(dtype=np.float64),
+                marker="o",
+                markersize=3,
+                label=term,
+            )
+        ax.plot(t, values, color="k", linewidth=2, label="sum")
+        ax.set_title(f"Line search — sum of {len(terms)} objectives")
+        ax.set_ylabel("combined value")
     ax.plot(
         [t[best_index]],
         [values[best_index]],
@@ -784,10 +809,23 @@ def make_line_search_figure(
         markersize=7,
         label="best",
     )
-    ax.set_title(f"Line search — {target}: {metric}")
     ax.set_xlabel("t")
-    ax.set_ylabel(metric)
-    ax.legend(loc="best")
+    # The figure, not the axis, carries the legend: the panel's
+    # pages read the figure's legends, and in this matplotlib the
+    # axes' own legend does not register there.
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        # A figure-level legend must give an explicit location
+        # (there is no "best" for the whole figure); the time
+        # series page's anchor above the axes is the house
+        # pattern.
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=len(labels),
+        )
 
     fig.text(
         0.01,

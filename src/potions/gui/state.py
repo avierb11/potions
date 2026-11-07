@@ -58,7 +58,7 @@ from potions.gui.data import (
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 2
+GUI_STATE_VERSION: Final[int] = 3
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -71,9 +71,12 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one and version 1 (the two-splitter layout, whose
-# splitter sizes are mapped onto the current one).
-_ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset({1, GUI_STATE_VERSION})
+# the current one (3), version 2 (the last version this GUI has
+# written), and version 1 (the two-splitter layout, whose splitter
+# sizes are mapped onto the current one).
+_ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
+    {1, 2, GUI_STATE_VERSION}
+)
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
 # same second, a counter suffix.
@@ -112,6 +115,11 @@ class GuiState:
             `MODE_HYDRO`); an absent field in a state file means a
             state saved before the mode existed, which restores
             full mode.
+        objective_terms: The cells of the objective table the session
+            had checked, as ``"<target>: <metric>"`` labels; None
+            when the session made no explicit selection (an unset
+            selection searches every selectable term) or the state
+            predates the selection.
     """
 
     csv_path: str | None
@@ -122,6 +130,7 @@ class GuiState:
     splitter_sizes: list[int] | None
     save_history: bool = False
     mode: str = MODE_FULL
+    objective_terms: list[str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -159,6 +168,11 @@ class GuiState:
             ),
             "save_history": self.save_history,
             "mode": self.mode,
+            "objective_terms": (
+                list(self.objective_terms)
+                if self.objective_terms is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -201,6 +215,7 @@ class GuiState:
             splitter_sizes=_optional_splitter_sizes(data),
             save_history=_optional_save_history(data),
             mode=_optional_mode(data),
+            objective_terms=_optional_objective_terms(data),
         )
 
 
@@ -496,6 +511,34 @@ def _optional_mode(data: dict[str, object]) -> str:
     return raw
 
 
+def _optional_objective_terms(data: dict[str, object]) -> list[str] | None:
+    """
+    The optional ``objective_terms`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's list of objective terms, or None when it is
+        absent or null (a state saved before the selection existed
+        restores an unset selection, which searches every
+        selectable term).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            list of strings.
+    """
+    raw: object = data.get("objective_terms")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(t, str) for t in raw):
+        raise ValueError(
+            f"gui_state.json 'objective_terms' must be a list of "
+            f"objective terms, got {raw!r}."
+        )
+    return list(raw)
+
+
 def _not_number(value: object) -> bool:
     """Whether a JSON value is not a (non-boolean) number."""
     return not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -729,6 +772,11 @@ class SavedRun:
             run carried no reactive-transport results).
         restore_note: A note for the status bar explaining how the
             state was restored; None for a full gui_state.json restore.
+        objective_terms: The cells of the objective table the run's
+            gui_state selected, as ``"<target>: <metric>"`` labels;
+            None for a run saved before the selection existed or
+            without a state file (its search falls back to every
+            selectable term).
     """
 
     results: GuiRunResults
@@ -740,6 +788,7 @@ class SavedRun:
     save_history: bool
     mode: str
     restore_note: str | None
+    objective_terms: list[str] | None
 # =============== #
 
 
@@ -750,8 +799,9 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
 
     When the run carries a ``gui_state.json`` (a run saved by this
     GUI), the parameter values, the user-edited bounds, the plot
-    selections, the run mode, and the save-history toggle are
-    restored exactly.  Otherwise (a run saved by an
+    selections, the run mode, the save-history toggle, and the
+    objective-table selection are restored exactly.  Otherwise (a run
+    saved by an
     older version of the GUI or by the command-line tools) the
     parameter values are recovered best-effort from the saved
     ``parameters.csv`` files: the values in that CSV are 4-decimal, so
@@ -792,6 +842,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             save_history=state.save_history,
             mode=state.mode,
             restore_note=None,
+            objective_terms=state.objective_terms,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -812,6 +863,8 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         # only run.
         mode=MODE_HYDRO if results.rt is None else MODE_FULL,
         restore_note=note,
+        # A stateless run never recorded an objective selection.
+        objective_terms=None,
     )
 
 
