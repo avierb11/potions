@@ -117,6 +117,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   derived measurement. Unknown `meas_river_conc` columns (neither a network
   species nor a declared derived measurement) raise `ModelInputError`
   before the simulation starts.
+- **GUI: selectable line-search objectives**: the objective table fits its
+  content with no scrollbars, sits top-aligned, and each cell carries a
+  checkbox for selecting line-search objectives; the line search optimizes
+  the equal-weighted sum of every selected objective (e.g. NSE + LogNSE +
+  KGE across Q, DOC, DIC, Ca++).
+- **GUI: static parameters in the range dialog**: the range dialog can make
+  a value static and disable the range (the parameter becomes pinned;
+  double-click the pinned cell to give it a range again).
+- **GUI: per-job progress in the header**: a header spinner and a
+  determinate progress bar show each job's completed points as it runs.
+- **GUI: parallel point evaluation**: gradient and line-search points are
+  evaluated in parallel in a `multiprocessing.Pool` using all CPUs by
+  default; a failed point is shown as a missing value instead of failing
+  the whole job.
+- **GUI: mode-tinted window background**: the window background tints light
+  blue in hydrology-only mode and warm in reactive-transport mode.
 
 ### Changed
 
@@ -206,6 +222,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mineral block are no longer miscounted as mineral concentrations.
 - `reaction_network` species masks now correctly cover the aqueous + mineral
   species and are consistent with the 4-parameters-per-mineral scheme.
+- **GUI: a line search could race a job in flight**: starting a line search
+  while a job (a model run or a gradient job) was still running was not
+  refused; when that job finished, its older outcome could clobber the
+  line search's newer, already-adopted results, so the simulation appeared
+  to revert to stale results. A line search started while a job is in
+  flight is now refused with a status message — a job cannot be
+  interrupted, so the two kinds of job no longer race.
 
 ### Performance
 
