@@ -308,6 +308,7 @@ class TestLoadInputData:
         assert bounds["proportion.1"] == (0.25, 0.95)
         assert bounds["snow_hs.tt"] == (-1.0, 1.0)
         assert bounds["surface_hs.max_water"] == (150.0, 1500.0)
+        assert bounds["ground_hs.max_water"] == (100.0, 5000.0)
         assert bounds["ground_hs.alpha"] == (1.0, 1.0)
         assert bounds["ground_rp.k_a[1]"] == (-15.0, -5.0)
 

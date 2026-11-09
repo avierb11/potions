@@ -44,11 +44,14 @@ from PySide6.QtGui import QAction, QCloseEvent, QFont, QImage, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLayoutItem,
+    QPushButton,
     QSizePolicy,
     QStyleOptionViewItem,
     QVBoxLayout,
@@ -2433,6 +2436,33 @@ class TestParamPanel:
             panel.deleteLater()
             _pump()
 
+    def test_symbol_double_click_requests_edit(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Double-clicking the symbol label opens the range dialog too:
+        the label, like the line edit, swallows the click before it
+        can reach the cell's double-click handler, so it is watched
+        for one as well.
+        """
+        panel = self._make_panel(input_data)
+        try:
+            key: str = "proportion.1"
+            row = panel._rows[key]
+            assert isinstance(row, gui_param_panel._FreeCell)
+
+            records = _install_bounds_stub(monkeypatch, (0.5, 0.95))
+            qapp.sendEvent(row._symbol, _double_click_event())
+            assert len(records) == 1
+            assert records[0]["lo"] == pytest.approx(0.25)
+            assert records[0]["hi"] == pytest.approx(0.95)
+        finally:
+            panel.deleteLater()
+            _pump()
+
     def test_bounds_dialog_static_option_pins_parameter(
         self,
         qapp: QApplication,
@@ -2662,6 +2692,52 @@ class TestParamPanel:
                 panel._plots_group.replace_widget(QWidget(), QWidget())
         finally:
             panel.deleteLater()
+            _pump()
+
+
+# ------------------------------------------------------------------ #
+# The range dialog's own buttons (standalone)
+# ------------------------------------------------------------------ #
+
+
+class TestBoundsDialog:
+    """The range dialog's own buttons: OK accepts, Cancel rejects."""
+
+    def test_ok_accepts_and_cancel_rejects(self, qapp: QApplication) -> None:
+        """
+        Clicking OK accepts the dialog and clicking Cancel rejects
+        it, so a modal run returns Accepted after the former and a
+        cancelled result after the latter; the button box is wired to
+        the dialog explicitly, since it does not do so itself.
+        """
+        dialog = gui_param_panel._BoundsDialog(
+            "Edit range — Test parameter",
+            0.25,
+            0.95,
+            "Current range: 0.25000 to 0.95000.",
+            0.6,
+        )
+        try:
+            events: list[str] = []
+            dialog.accepted.connect(lambda: events.append("accepted"))
+            dialog.rejected.connect(lambda: events.append("rejected"))
+
+            dialog._ok_button.click()
+            assert dialog.result() == QDialog.DialogCode.Accepted
+            assert events == ["accepted"]
+
+            box: QDialogButtonBox | None = dialog.findChild(
+                QDialogButtonBox
+            )
+            assert box is not None
+            cancel: QPushButton = box.button(
+                QDialogButtonBox.StandardButton.Cancel
+            )
+            cancel.click()
+            assert dialog.result() == QDialog.DialogCode.Rejected
+            assert events == ["accepted", "rejected"]
+        finally:
+            dialog.deleteLater()
             _pump()
 
 

@@ -81,7 +81,7 @@ LATERAL_THREE_LAYER_CONFIGS: Final[dict[str, pt.RtZoneConfiguration]] = {
 _LAYER_MAX_WATER_BOUNDS: Final[dict[str, tuple[float, float]]] = {
     "snow": (5000.0, 5000.0),
     "surface": (150.0, 1500.0),
-    "ground": (100.0, 1000.0),
+    "ground": (100.0, 5000.0),
 }
 
 # The East River per-layer kinetic bounds, in the order the model

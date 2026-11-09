@@ -202,6 +202,10 @@ class _FreeCell(QWidget):
             # cell's double-click handler, so the line edit is
             # watched for one (see `eventFilter`).
             self._line_edit.installEventFilter(self)
+        # The symbol label swallows double-clicks the same way
+        # (its selectable text eats the click), so it is watched
+        # too (see `eventFilter`).
+        self._symbol.installEventFilter(self)
 
         self.set_bounds(*bounds)
 
@@ -257,9 +261,9 @@ class _FreeCell(QWidget):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         """
-        Open the range dialog when the spin box's line edit is
-        double-clicked (a click there never reaches the cell's
-        double-click handler).
+        Open the range dialog when the spin box's line edit or the
+        symbol label is double-clicked (a click in either never
+        reaches the cell's double-click handler).
 
         Args:
             watched: The object the event was delivered to.
@@ -270,8 +274,8 @@ class _FreeCell(QWidget):
         """
         if (
             watched is self._line_edit
-            and event.type() == QEvent.Type.MouseButtonDblClick
-        ):
+            or watched is self._symbol
+        ) and event.type() == QEvent.Type.MouseButtonDblClick:
             self.edit_requested.emit(self._key)
         return False
 
@@ -503,6 +507,11 @@ class _BoundsDialog(QDialog):
         self._ok_button: QPushButton = buttons.button(
             QDialogButtonBox.StandardButton.Ok
         )
+
+        # The button box does not wire itself to its parent dialog,
+        # so the standard buttons are connected explicitly.
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
 
         self._min_spin.valueChanged.connect(self._validate)
         self._max_spin.valueChanged.connect(self._validate)
