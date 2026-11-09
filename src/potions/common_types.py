@@ -443,9 +443,41 @@ class HydroModelResults:
         return {zone: self.zone(zone) for zone in self._effective_zone_names()}
 
 
+@dataclass(frozen=True)
+class RtZoneResults:
+    """One zone's views of a reactive-transport run.
+
+    ``species`` is a renamed view of the zone's ``{species}_{zone}``
+    columns — one column per network species, including mineral and
+    exchange species. ``mineral_rates`` is a renamed view of the
+    zone's ``{mineral}_rate_{zone}`` columns, or None when the zone
+    performs no mineral reactions. Both views share the stored frame's
+    data: mutating a column through this object mutates the stored
+    frame, and vice versa.
+    """
+
+    zone: str
+    species: DataFrame
+    mineral_rates: DataFrame | None
+
+
 @dataclass
 class RtModelResults:
     """A type containing the results of a reactive transport model run.
+
+    The flat `simulation` frame is the sole storage: every named
+    accessor is a cheap view over it (a renamed sub-frame), and
+    `to_dataframe()` returns the stored frame by identity.
+
+    Unlike a hydrology frame, an RT frame is not self-describing: no
+    column pattern alone recovers the zone names, so the per-zone and
+    per-species accessors require `zone_names` to be recorded. An RT
+    model declares an RT zone for every model zone, so these equal the
+    hydrology model's zone names in layer-major order. Zone names are
+    treated as opaque labels: if one zone name were a suffix of another
+    zone name after an underscore (e.g. zones `b` and `a_b`), the
+    per-zone partitioning would be ambiguous; model structures should
+    avoid such name pairs.
 
     Attributes:
         simulation (DataFrame): A DataFrame with the time series of each
@@ -459,11 +491,184 @@ class RtModelResults:
         saved_dir (Optional[str]): The directory this run was saved to
             (`"results/run_<timestamp>"` by default); None if saving was
             disabled.
+        zone_names (list[str]): The model's zone names in layer-major
+            (structure) order — for an RT model these equal the
+            hydrology model's zone names. Records the frame's zone
+            layout for the per-zone and per-species accessors; empty
+            when the results were built by hand or unpickled from a
+            file written before this field existed, in which case those
+            accessors raise `ValueError`.
     """
 
     simulation: DataFrame
     objective_functions: Optional[DataFrame]
     saved_dir: Optional[str] = None
+    zone_names: list[str] = field(default_factory=list)
+
+    def _effective_zone_names(self) -> list[str]:
+        """The recorded zone names, or a diagnostic error.
+
+        An RT frame cannot be parsed for zone names the way a
+        hydrology frame can, so a results object that records none
+        cannot be partitioned by zone.
+
+        Returns:
+            The recorded zone names in frame order.
+
+        Raises:
+            ValueError:
+                Raised when no zone names are recorded.
+        """
+        if not self.zone_names:
+            raise ValueError(
+                "These reactive-transport results do not record zone "
+                "names, so the simulation frame cannot be partitioned "
+                "by zone. Results of a model run record them "
+                "automatically; set `zone_names` when building "
+                "RtModelResults by hand."
+            )
+        return self.zone_names
+
+    def _zone_columns(self, zone: str) -> list[str]:
+        """The zone's species columns: `_{zone}`-suffixed, excluding
+        `*_rate_{zone}` columns, in frame order.
+        """
+        suffix = f"_{zone}"
+        rate_suffix = f"_rate_{zone}"
+        return [
+            c
+            for c in self.simulation.columns
+            if c.endswith(suffix) and not c.endswith(rate_suffix)
+        ]
+
+    def _zone_rate_columns(self, zone: str) -> list[str]:
+        """The zone's mineral-rate columns: `*_rate_{zone}`, in frame
+        order.
+        """
+        rate_suffix = f"_rate_{zone}"
+        return [c for c in self.simulation.columns if c.endswith(rate_suffix)]
+
+    @property
+    def river(self) -> DataFrame:
+        """The simulated river concentrations: all `*_riv` columns, in
+        frame order (one per network species and declared derived
+        measurement).
+
+        No zone names are needed: the `_riv` suffix identifies these
+        columns unambiguously.
+        """
+        columns = [c for c in self.simulation.columns if c.endswith("_riv")]
+        return self.simulation[columns]
+
+    @property
+    def mineral_rates(self) -> DataFrame:
+        """All mineral reaction rates: the `*_rate_*` columns, in frame
+        order (one per mineral reacting in each reactive zone).
+        """
+        columns = [c for c in self.simulation.columns if "_rate_" in c]
+        return self.simulation[columns]
+
+    def species(self, name: str) -> DataFrame:
+        """One species' concentrations over time, one column per zone.
+
+        Args:
+            name: The species name; the frame's `{name}_{zone}` columns
+                are gathered and relabeled to the zone names.
+
+        Returns:
+            A view of the stored frame with one column per recorded
+            zone.
+
+        Raises:
+            ValueError:
+                Raised when no zone names are recorded, or when a
+                recorded zone has no `{name}_{zone}` column in the
+                frame.
+        """
+        zone_names = self._effective_zone_names()
+        columns = [f"{name}_{zone}" for zone in zone_names]
+        missing = [c for c in columns if c not in self.simulation.columns]
+        if missing:
+            raise ValueError(
+                f"Column(s) {missing} not found in the reactive-transport "
+                f"simulation frame for species '{name}'."
+            )
+        return self.simulation[columns].rename(
+            columns={f"{name}_{zone}": zone for zone in zone_names}
+        )
+
+    def zone(self, name: str) -> RtZoneResults:
+        """One zone's species concentrations and mineral rates.
+
+        Args:
+            name: The name of the zone to gather.
+
+        Returns:
+            An `RtZoneResults` whose `species` frame holds the zone's
+            `{species}_{name}` columns relabeled to species names, and
+            whose `mineral_rates` frame holds the zone's
+            `{mineral}_rate_{name}` columns relabeled to mineral names
+            (None when the zone performs no mineral reactions).
+
+        Raises:
+            ValueError:
+                Raised when no zone names are recorded, when `name` is
+                not one of the results' zones, or when the frame
+                carries no species columns of the zone.
+        """
+        zone_names = self._effective_zone_names()
+        if name not in zone_names:
+            raise ValueError(
+                f"Unknown zone '{name}': not a zone of these results. "
+                f"Known zones: {zone_names}"
+            )
+        species_columns = self._zone_columns(name)
+        if not species_columns:
+            raise ValueError(
+                f"No species columns found in the reactive-transport "
+                f"simulation frame for zone '{name}'."
+            )
+        species_frame = self.simulation[species_columns].rename(
+            columns={c: c[: -len(f"_{name}")] for c in species_columns}
+        )
+        rate_columns = self._zone_rate_columns(name)
+        if rate_columns:
+            mineral_rates: DataFrame | None = (
+                self.simulation[rate_columns].rename(
+                    columns={
+                        c: c[: -len(f"_rate_{name}")] for c in rate_columns
+                    }
+                )
+            )
+        else:
+            mineral_rates = None
+        return RtZoneResults(name, species_frame, mineral_rates)
+
+    @property
+    def zones(self) -> dict[str, RtZoneResults]:
+        """One `RtZoneResults` view per recorded zone, keyed by zone name."""
+        return {zone: self.zone(zone) for zone in self._effective_zone_names()}
+
+    def to_dataframe(self) -> DataFrame:
+        """The stored flat simulation frame, returned by identity.
+
+        The named accessors are views over this frame and it is the
+        sole storage, so a mutation made through a view is visible
+        here.
+        """
+        return self.simulation
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        """Restore state from a pickle, tolerating pre-`zone_names` files.
+
+        A results pickle written before `zone_names` existed carries no
+        such key; it is defaulted to the empty list (the "not recorded"
+        state) so those files still unpickle. Pickles written after the
+        field was added carry the key and are restored unchanged.
+        """
+        state = dict(state)
+        state.setdefault("zone_names", [])
+        self.__dict__.update(state)
 
 
 @dataclass

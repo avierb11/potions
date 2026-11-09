@@ -306,3 +306,121 @@ def test_hydro_recorded_zone_missing_column_raises(
 def test_hydro_unknown_zone_raises(hydro_results: HydroModelResults) -> None:
     with pytest.raises(ValueError, match="not a zone of these results"):
         hydro_results.zone("no_such_zone")
+
+
+# ==== RtModelResults named views ==== #
+
+# Every species appears in every zone (an RT model declares an RT zone
+# for every model zone); DOC and DOC2 prove the per-species accessor
+# builds exact columns rather than prefix-matching.
+RT_ZONES: list[str] = ["wet_hs", "wet_rp", "dry_rp"]
+RT_SPECIES: list[str] = ["DOC", "DOC2", "Ca++"]
+RT_MINERALS: list[str] = ["Calcite(s)"]
+RT_REACTIVE: list[str] = ["wet_rp", "dry_rp"]  # wet_hs does not react
+
+
+def _rt_sim(index: pd.DatetimeIndex) -> DataFrame:
+    """A flat reactive-transport frame with every kind of column."""
+    data: dict[str, np.ndarray] = {}
+    for zone in RT_ZONES:
+        for species in RT_SPECIES:
+            data[f"{species}_{zone}"] = np.full(len(index), 1.0, float)
+        if zone in RT_REACTIVE:
+            for mineral in RT_MINERALS:
+                data[f"{mineral}_rate_{zone}"] = np.full(len(index), 2.0, float)
+    for species in RT_SPECIES:
+        data[f"{species}_riv"] = np.full(len(index), 3.0, float)
+    data["DIC_riv"] = np.full(len(index), 4.0, float)  # a derived measurement
+    return DataFrame(data, index=index)
+
+
+def _rt_results(zone_names: list[str] | None = None) -> RtModelResults:
+    index = pd.DatetimeIndex(
+        [pd.Timestamp("2020-01-01") + pd.Timedelta(days=i) for i in range(3)]
+    )
+    if zone_names is None:
+        return RtModelResults(
+            simulation=_rt_sim(index),
+            objective_functions=None,
+        )
+    return RtModelResults(
+        simulation=_rt_sim(index),
+        objective_functions=None,
+        zone_names=zone_names,
+    )
+
+
+def test_rt_river_frame_is_all_riv_columns() -> None:
+    frame = _rt_results(zone_names=list(RT_ZONES)).river
+    assert list(frame.columns) == ["DOC_riv", "DOC2_riv", "Ca++_riv", "DIC_riv"]
+
+
+def test_rt_mineral_rates_frame_is_all_rate_columns() -> None:
+    frame = _rt_results(zone_names=list(RT_ZONES)).mineral_rates
+    assert list(frame.columns) == [
+        f"{m}_rate_{z}" for z in RT_REACTIVE for m in RT_MINERALS
+    ]
+
+
+def test_rt_species_frame_relabels_across_zones() -> None:
+    frame = _rt_results(zone_names=list(RT_ZONES)).species("DOC")
+    assert list(frame.columns) == RT_ZONES
+    np.testing.assert_array_equal(
+        frame["dry_rp"].to_numpy(),
+        _rt_results(list(RT_ZONES)).simulation["DOC_dry_rp"].to_numpy(),
+    )
+
+
+def test_rt_zone_view_species_and_mineral_rates() -> None:
+    results = _rt_results(zone_names=list(RT_ZONES))
+    view = results.zone("wet_rp")
+    assert view.zone == "wet_rp"
+    assert list(view.species.columns) == RT_SPECIES
+    assert view.mineral_rates is not None
+    assert list(view.mineral_rates.columns) == RT_MINERALS
+    # The non-reactive zone has no rate columns: the view says so; it
+    # does not fabricate zeros.
+    assert results.zone("wet_hs").mineral_rates is None
+
+
+def test_rt_zones_dict_covers_recorded_zones() -> None:
+    results = _rt_results(zone_names=list(RT_ZONES))
+    assert list(results.zones) == RT_ZONES
+
+
+def test_rt_to_dataframe_is_stored_frame() -> None:
+    results = _rt_results(zone_names=list(RT_ZONES))
+    assert results.to_dataframe() is results.simulation
+
+
+def test_rt_zone_accessors_require_zone_names() -> None:
+    results = _rt_results()  # default: zone_names == []
+    with pytest.raises(ValueError, match="zone names"):
+        _ = results.species("DOC")
+    with pytest.raises(ValueError, match="zone names"):
+        _ = results.zone("wet_rp")
+    with pytest.raises(ValueError, match="zone names"):
+        _ = results.zones
+
+
+def test_rt_unknown_zone_raises() -> None:
+    with pytest.raises(ValueError, match="not a zone of these results"):
+        _rt_results(zone_names=list(RT_ZONES)).zone("no_such_zone")
+
+
+def test_rt_recorded_zone_missing_column_raises() -> None:
+    with pytest.raises(ValueError, match="DOC_ghost"):
+        _rt_results(zone_names=RT_ZONES + ["ghost"]).species("DOC")
+
+
+def test_rt_setstate_defaults_missing_zone_names() -> None:
+    # A pickle written before zone_names existed: its __dict__ lacks
+    # the key. Replaying the unpickle contract on such a state must not
+    # raise, and must leave the accessor in the "not recorded" state.
+    results = _rt_results(zone_names=list(RT_ZONES))
+    state = dict(results.__dict__)
+    del state["zone_names"]
+    loaded = RtModelResults.__new__(RtModelResults)
+    RtModelResults.__setstate__(loaded, state)
+    assert loaded.zone_names == []
+    pd.testing.assert_frame_equal(loaded.simulation, results.simulation)
