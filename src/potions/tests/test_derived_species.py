@@ -285,3 +285,42 @@ def test_derived_species_without_network_raises() -> None:
                 DerivedSpecies(name="DIC", components=DIC_COMPONENTS)
             ],
         )
+
+
+# ===================== Named views of a real run ===================== #
+
+
+def test_results_record_zone_names(results: ModelResults) -> None:
+    assert results.hydro.zone_names == ["snow", "surface", "ground"]
+    assert results.reactive_transport.zone_names == ["snow", "surface", "ground"]
+
+
+def test_rt_views_of_a_real_run(
+    results: ModelResults, network: ReactionNetwork
+) -> None:
+    rt = results.reactive_transport
+    expected_river: list[str] = [
+        f"{s}_riv" for s in network.species_names
+    ] + ["DIC_riv"]
+    assert list(rt.river.columns) == expected_river
+
+    ground = rt.zone("ground")
+    assert list(ground.species.columns) == list(network.species_names)
+    assert ground.mineral_rates is not None
+    assert list(ground.mineral_rates.columns) == [
+        m.name for m in network.mineral
+    ]
+
+    # The snow zone runs no mineral reactions: no rate columns exist,
+    # so the view reports None rather than fabricating zeros.
+    assert rt.zone("snow").mineral_rates is None
+
+
+def test_hydro_views_of_a_real_run(results: ModelResults) -> None:
+    hydro = results.hydro
+    assert list(hydro.lateral.columns) == hydro.zone_names
+    np.testing.assert_array_equal(
+        hydro.zone("surface").storage.to_numpy(),
+        hydro.simulation["s_surface"].to_numpy(),
+    )
+    assert hydro.to_dataframe() is hydro.simulation

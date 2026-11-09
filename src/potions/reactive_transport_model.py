@@ -1549,6 +1549,7 @@ class ReactiveTransportModel(HydrologicalModel):
         rt_sim_res: RtModelResults = RtModelResults(
             simulation=res_df,
             objective_functions=obj_df,
+            zone_names=list(zone_names),
         )
 
         # Save the run's results and parameters (on by default; see result_saving).

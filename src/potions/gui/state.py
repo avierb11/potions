@@ -932,6 +932,38 @@ def _read_rt_objectives(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path, index_col=0)
 
 
+def _zone_names_from_hydro_sim(hydro_sim: pd.DataFrame) -> list[str]:
+    """
+    Recover the ordered zone names from a saved hydrology simulation frame.
+
+    The flat frame carries one ``s_{zone}`` storage column per zone in
+    model (layer-major) order, and no other column uses that prefix, so
+    the prefix alone identifies every zone.  A reactive-transport run
+    uses the same zone names (an RT model must declare an RT zone for
+    every model zone), so the same list serves both reconstructed
+    result objects.
+
+    Args:
+        hydro_sim: The loaded hydrology simulation frame.
+
+    Returns:
+        The zone names in the order the frame stores them.
+
+    Raises:
+        ValueError: Raised when the frame carries no ``s_`` storage
+            columns, so no zone names can be recovered.
+    """
+    names: list[str] = [
+        c[len("s_"):] for c in hydro_sim.columns if c.startswith("s_")
+    ]
+    if not names:
+        raise ValueError(
+            "The loaded hydrology simulation frame carries no `s_` "
+            "storage columns, so its zone names cannot be recovered."
+        )
+    return names
+
+
 def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResults:
     """
     Rebuild the model results from a run's saved simulation CSVs.
@@ -948,7 +980,9 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResul
     saved run was made with; the record is part of the package) and
     the saved simulation frame; the reactive-transport results reuse
     the hydrology frame's date index, as the model does when it runs
-    the two models in sequence.
+    the two models in sequence. Both results record the zone names
+    recovered from the hydrology frame, so their per-zone accessors
+    keep working on a loaded run.
 
     Args:
         run_dir: The run directory to read the simulation CSVs from.
@@ -983,17 +1017,21 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResul
         )
         rt_objectives = None
 
+    zone_names = _zone_names_from_hydro_sim(hydro_sim)
+
     hydro_results: pt.HydroModelResults = pt.HydroModelResults(
         forcing=input_data.forc,
         simulation=hydro_sim,
         objective_functions=hydro_objectives,
         saved_dir=str(run_dir),
+        zone_names=zone_names,
     )
     if rt_sim is not None:
         rt_results: pt.RtModelResults | None = pt.RtModelResults(
             simulation=rt_sim,
             objective_functions=rt_objectives,
             saved_dir=str(run_dir),
+            zone_names=zone_names,
         )
     else:
         rt_results = None

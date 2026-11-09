@@ -45,11 +45,19 @@ def _make_forcing(num_steps: int = NUM_STEPS) -> ForcingData:
     return ForcingData(precip=const(2.0), temp=const(15.0), pet=const(1.0))
 
 
-def _make_rt_results(sim_df: DataFrame) -> RtModelResults:
+def _make_rt_results(
+    sim_df: DataFrame, zone_names: list[str] | None = None
+) -> RtModelResults:
     """A minimal, hand-built RT result object (fast, no Newton solve needed)."""
+    if zone_names is None:
+        return RtModelResults(
+            simulation=sim_df,
+            objective_functions=None,
+        )
     return RtModelResults(
         simulation=sim_df,
         objective_functions=None,
+        zone_names=zone_names,
     )
 
 
@@ -90,6 +98,7 @@ def test_run_hydro_model_saves(tmp_path: Path) -> None:
     )
 
     assert res.saved_dir is not None
+    assert res.zone_names == model.zone_names
     run_dir = Path(res.saved_dir)
     assert run_dir.parent == tmp_path / "out"
     assert run_dir.name.startswith("run_")
@@ -164,7 +173,7 @@ def test_save_rt_run_writes_pickle(tmp_path: Path) -> None:
             ]
         ),
     )
-    rt_res = _make_rt_results(sim_df)
+    rt_res = _make_rt_results(sim_df, zone_names=list(model.zone_names))
 
     out = save_rt_run(model, rt_res, str(tmp_path / "out"))
     pkl_path = out / "results.pkl"
@@ -173,6 +182,7 @@ def test_save_rt_run_writes_pickle(tmp_path: Path) -> None:
     with pkl_path.open("rb") as fh:
         loaded = pickle.load(fh)
     assert loaded.simulation.equals(rt_res.simulation)
+    assert loaded.zone_names == rt_res.zone_names
 
     info = json.loads((out / "run_info.json").read_text())
     assert info.get("results_pickle_saved") is True

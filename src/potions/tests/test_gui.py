@@ -137,6 +137,7 @@ def _synthetic_results(
             {name: 0.9 * (i + 1) for i, name in enumerate(METRIC_NAMES)},
             dtype=float,
         ),
+        zone_names=list(ZONE_ORDER),
     )
     rt: pt.RtModelResults = pt.RtModelResults(
         simulation=_synthetic_rt_sim(
@@ -150,6 +151,7 @@ def _synthetic_results(
             index=METRIC_NAMES,
         ).T,
         saved_dir=None,
+        zone_names=list(ZONE_ORDER),
     )
     return hydro, rt
 
@@ -1004,6 +1006,17 @@ class TestLoadSavedRunFullState:
         pd.testing.assert_frame_equal(
             rt.simulation,
             source_rt.simulation,
+            check_exact=False,
+        )
+
+        # The zone layout round-trips: the reconstruction recovers it
+        # from the hydrology frame's storage columns, so the per-zone
+        # accessors keep working on the loaded run.
+        assert hydro.zone_names == ZONE_ORDER
+        assert rt.zone_names == ZONE_ORDER
+        pd.testing.assert_frame_equal(
+            hydro.storage,
+            source_hydro.storage,
             check_exact=False,
         )
 
@@ -2486,6 +2499,7 @@ def _marker_results(
         forcing=input_data.forc,
         simulation=_synthetic_hydro_sim(index),
         objective_functions=pd.Series(values, index=METRIC_NAMES, dtype=float),
+        zone_names=list(ZONE_ORDER),
     )
     if hydro_only:
         return gui_data.GuiRunResults(hydro, None)
@@ -2501,6 +2515,7 @@ def _marker_results(
             index=METRIC_NAMES,
         ).T,
         saved_dir=None,
+        zone_names=list(ZONE_ORDER),
     )
     return gui_data.GuiRunResults(hydro, rt)
 

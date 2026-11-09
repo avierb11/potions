@@ -1517,7 +1517,10 @@ class HydrologicalModel:
 
         # Create the object and save
         res = HydroModelResults(
-            simulation=model_res, objective_functions=obj_val_ser, forcing=forc
+            simulation=model_res,
+            objective_functions=obj_val_ser,
+            forcing=forc,
+            zone_names=list(zone_names),
         )
 
         # Save the run's results and parameters (on by default; see result_saving).
