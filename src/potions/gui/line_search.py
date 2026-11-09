@@ -6,11 +6,13 @@ one objective function from the current parameters: the direction
 (the chosen objective's row of the last gradient job's difference
 matrix, or the gradient computed by the same central differences
 as the *Gradients* job) defines the straight ascent line
-``x + t * direction``, and this module answers the three questions
-that line raises: how a direction computed in the free
-parameters' space becomes the parameter vector's space, which
-values of ``t`` keep every parameter inside its current bounds,
-and where the job's value profile gets written.
+``x + t * direction``, and this module answers the questions that
+line raises: how a direction computed in the free parameters'
+space becomes the parameter vector's space, how that direction is
+projected so its steps never leave the current bounds, which
+values of ``t`` keep every parameter inside those bounds and form
+the search's grid of steps (always including the base point), and
+where the job's value profile gets written.
 """
 
 from __future__ import annotations
@@ -78,6 +80,112 @@ def feasible_t_interval(
     if t_lo >= t_hi or not (np.isfinite(t_lo) and np.isfinite(t_hi)):
         return None
     return (t_lo, t_hi)
+
+
+def project_direction(
+    x: np.ndarray,
+    direction: np.ndarray,
+    steps: list[_Perturbation],
+    bounds: dict[str, tuple[float, float]],
+) -> np.ndarray:
+    """
+    The ascent direction with every out-of-bounds component dropped.
+
+    An ascent direction computed at a base point can point out of
+    the bounds for a parameter that sits exactly on a bound: for
+    such a parameter, stepping outward leaves the bounds
+    immediately, so the interval of feasible steps collapses to the
+    base point itself.  This zeroes out each component that points
+    out of the bound its base value sits on (a negative component at
+    the lower bound, a positive one at the upper bound) and
+    renormalizes the surviving vector to unit length, so the search
+    only ever moves along directions that stay feasible near the
+    base point.
+
+    A component is treated as pointing out of a bound when the base
+    value sits within a small relative tolerance of that bound
+    (`1e-9` times the parameter's range), to absorb float error
+    around a value that lands exactly on a bound.
+
+    Args:
+        x: The base parameter vector, in the bounds' key order.
+        direction: The ascent direction, in the parameter
+            vector's order.
+        steps: The free parameters' perturbations; their keys name
+            the parameters whose components may need dropping.
+        bounds: The current bounds of every parameter, in the
+            parameter vector's key order.
+
+    Returns:
+        The projected direction as a unit-length parameter vector.
+
+    Raises:
+        ValueError:
+            Raised when no component survives the projection: every
+            free parameter that can move sits on the bound its
+            component points out of, so the search has no feasible
+            direction to follow.
+    """
+    positions: dict[str, int] = {key: pos for pos, key in enumerate(bounds)}
+    blocked: list[str] = []
+    projected: np.ndarray = np.array(direction, dtype=np.float64, copy=True)
+    for step in steps:
+        position: int = positions[step.key]
+        component: float = float(projected[position])
+        if component == 0.0:
+            continue
+        (low, high) = bounds[step.key]
+        base: float = float(x[position])
+        tolerance: float = 1e-9 * (high - low)
+        if component < 0.0 and base - low <= tolerance:
+            projected[position] = 0.0
+            blocked.append(step.key)
+        elif component > 0.0 and high - base <= tolerance:
+            projected[position] = 0.0
+            blocked.append(step.key)
+    norm: float = float(np.linalg.norm(projected))
+    if norm == 0.0:
+        if blocked:
+            raise ValueError(
+                "The line search has no feasible direction: the ascent "
+                "direction points out of the current bounds at every "
+                f"free parameter that can move ({', '.join(blocked)})."
+            )
+        raise ValueError(
+            "The line search has no feasible direction: the ascent "
+            "direction carries no component along any free parameter."
+        )
+    return projected / norm
+
+
+def search_t_points(
+    t_lo: float,
+    t_hi: float,
+    n: int,
+) -> np.ndarray:
+    """
+    The equally spaced steps of the line search's grid.
+
+    The grid spans the feasible interval ``[t_lo, t_hi]`` with
+    ``n`` equally spaced points.  A plain linspace over an
+    asymmetric interval generally does not land exactly on
+    ``t = 0`` (the base point), which the search must always
+    evaluate; the point nearest to zero is therefore snapped to
+    exactly zero, so the grid always includes the base point while
+    keeping ``n`` points across the whole interval.
+
+    Args:
+        t_lo: The interval's lower end, the smallest feasible step.
+        t_hi: The interval's upper end, the largest feasible step.
+        n: The number of grid points.
+
+    Returns:
+        The grid of ``n`` steps, strictly increasing, with the
+        point nearest to zero set to exactly 0.0.
+    """
+    points: np.ndarray = np.linspace(t_lo, t_hi, n)
+    points[int(np.argmin(np.abs(points)))] = 0.0
+    return points
 
 
 def expand_direction(

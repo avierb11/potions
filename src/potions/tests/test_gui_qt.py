@@ -3452,6 +3452,100 @@ class TestObjectiveSelection:
 
 
 # ------------------------------------------------------------------ #
+# The line search's pure helpers: the feasible-direction projection
+# and the snapped search grid
+# ------------------------------------------------------------------ #
+
+
+class TestLineSearchHelpers:
+    """The pure helpers the line search's worker relies on."""
+
+    def test_project_direction_zeroes_outward_bound_components(
+        self,
+    ) -> None:
+        """
+        A component pointing out of a bound the base point sits on
+        is dropped, and the surviving vector is renormalized to
+        unit length: inward and unblocked components keep their
+        direction.
+        """
+        from ..gui.line_search import project_direction
+
+        bounds: dict[str, tuple[float, float]] = {
+            "a": (0.0, 1.0),
+            "b": (0.0, 2.0),
+            "c": (0.5, 1.5),
+            "d": (0.0, 3.0),
+            "e": (0.0, 1.0),
+        }
+        # `a` sits on its lower bound and points down (blocked),
+        # `c` sits on its upper bound and points up (blocked),
+        # `e` sits on its lower bound but points in (kept).
+        base_x: np.ndarray = np.array([0.0, 1.0, 1.5, 2.0, 0.0])
+        raw: np.ndarray = np.array([-1.0, 2.0, 3.0, 4.0, 1.0])
+        expected: np.ndarray = np.array([0.0, 2.0, 0.0, 4.0, 1.0])
+        expected = expected / float(np.linalg.norm(expected))
+        projected: np.ndarray = project_direction(
+            base_x,
+            raw,
+            free_parameter_steps(base_x, bounds),
+            bounds,
+        )
+        np.testing.assert_allclose(projected, expected)
+        assert float(np.linalg.norm(projected)) == pytest.approx(1.0)
+
+    def test_project_direction_fails_when_no_component_survives(
+        self,
+    ) -> None:
+        """
+        When every free parameter sits on the bound its component
+        points out of, the projection is the zero vector: the
+        search has no direction to follow, and the failure names
+        the blocked parameters.
+        """
+        from ..gui.line_search import project_direction
+
+        bounds: dict[str, tuple[float, float]] = {
+            "a": (0.0, 1.0),
+            "b": (0.5, 1.5),
+        }
+        base_x: np.ndarray = np.array([0.0, 1.5])
+        raw: np.ndarray = np.array([-1.0, 1.0])
+        with pytest.raises(ValueError) as excinfo:
+            project_direction(
+                base_x,
+                raw,
+                free_parameter_steps(base_x, bounds),
+                bounds,
+            )
+        message: str = str(excinfo.value)
+        assert "no feasible direction" in message
+        assert "a" in message
+        assert "b" in message
+
+    def test_search_t_points_snaps_the_nearest_point_to_zero(
+        self,
+    ) -> None:
+        """
+        The grid is equally spaced across the feasible interval with
+        the nearest point snapped to ``t = 0``: a grid that would
+        miss the base point exactly still evaluates it, and the
+        snapped grid stays strictly increasing.
+        """
+        from ..gui.line_search import search_t_points
+
+        symmetric: np.ndarray = search_t_points(-1.0, 1.0, 5)
+        np.testing.assert_allclose(
+            symmetric, np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+        )
+        snapped: np.ndarray = search_t_points(-1.0, 2.0, 5)
+        np.testing.assert_allclose(
+            snapped, np.array([-1.0, 0.0, 0.5, 1.25, 2.0])
+        )
+        assert (np.diff(snapped) > 0).all()
+
+
+# ------------------------------------------------------------------ #
 # The header's *Line search* button: the steepest-ascent jobs
 # ------------------------------------------------------------------ #
 
@@ -3653,19 +3747,26 @@ class TestLineSearch:
             )
             assert interval is not None
             t_lo, t_hi = interval
-            t_points: np.ndarray = np.linspace(
+            from ..gui.line_search import search_t_points
+
+            # The same grid the worker builds: a linspace over the
+            # feasible interval with the point nearest the base
+            # snapped onto it (a no-op for this symmetric interval).
+            t_points: np.ndarray = search_t_points(
                 t_lo, t_hi, gui_window._LINE_SEARCH_POINTS
             )
             search_points: list[np.ndarray] = [
                 base_x + t * direction for t in t_points
             ]
-            failed_index: int = len(search_points) // 2
+            # The point that fails is a non-base grid point: the
+            # base point (t = 0) is no longer run in the pool, so it
+            # cannot be the one that fails.
+            failed_index: int = 5
 
             # The search's own pool phase is gated on its own file,
             # re-patched for the search's workers: the fake raises
-            # for the one search point that equals the base vector
-            # (the midpoint of the symmetric interval) and
-            # delegates to the startup fake otherwise.
+            # for the one flagged search point and delegates to the
+            # startup fake otherwise.
             def flaky_full(
                 x: np.ndarray, _input_data: gui_data.GuiInputData
             ) -> gui_data.GuiRunResults:
@@ -3777,6 +3878,290 @@ class TestLineSearch:
             assert win._figure_panel._titles[-1] == "Line search (full)"
         finally:
             gate.touch()
+            _close_window(win)
+
+    def test_worker_reuses_the_base_results_at_the_zero_step(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The grid point at ``t = 0`` is the base point itself: the
+        worker reuses the handed-in base results for that profile
+        row instead of running the point in the pool, and every
+        other grid point is pooled exactly once.
+        """
+        monkeypatch.chdir(tmp_path)
+        bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
+        base_x: np.ndarray = _midpoint_vector(input_data)
+        steps: list[_Perturbation] = free_parameter_steps(base_x, bounds)
+        free = _free_keys(input_data)
+        keys: list[str] = list(bounds)
+        direction: np.ndarray = np.zeros(len(keys))
+        direction[keys.index(free[0])] = 0.6
+        direction[keys.index(free[1])] = 0.8
+        hydro, rt = _synthetic_results(input_data)
+        base_results: gui_data.GuiRunResults = gui_data.GuiRunResults(
+            hydro, rt
+        )
+
+        received: list[np.ndarray] = []
+
+        def pool_fake(
+            points: list[np.ndarray],
+            _mode: str,
+            _csv_path: str,
+            workers: int | None = None,
+            on_result: (
+                Callable[[int, gui_data.GuiRunResults | str], None] | None
+            ) = None,
+        ) -> list[gui_data.GuiRunResults | str]:
+            payloads: list[gui_data.GuiRunResults | str] = []
+            for index, point in enumerate(points):
+                received.append(np.array(point))
+                point_hydro, point_rt = _synthetic_results(input_data)
+                point_hydro.objective_functions = (
+                    point_hydro.objective_functions + 0.1
+                )
+                payload: gui_data.GuiRunResults = gui_data.GuiRunResults(
+                    point_hydro, point_rt
+                )
+                payloads.append(payload)
+                if on_result is not None:
+                    on_result(index, payload)
+            return payloads
+
+        monkeypatch.setattr(gui_window, "map_model_runs", pool_fake)
+        worker: gui_window._LineSearchWorker = gui_window._LineSearchWorker(
+            base_x,
+            steps,
+            direction,
+            ["Streamflow: KGE"],
+            MODE_FULL,
+            str(gui_data.DEFAULT_CSV_PATH),
+            bounds,
+            base_results,
+        )
+        try:
+            outcome = worker._compute(0.0)
+
+            assert outcome.error is None
+            assert outcome.profile is not None
+            profile: pd.DataFrame = outcome.profile
+            assert len(profile) == 25
+            t_values: np.ndarray = profile.index.to_numpy(
+                dtype=np.float64
+            )
+            zero_row: int = int(np.argmin(np.abs(t_values)))
+            # The zero step sits exactly on the grid.
+            assert t_values[zero_row] == 0.0
+            values: np.ndarray = profile["value"].to_numpy(
+                dtype=np.float64
+            )
+            # The zero row carries the base results' value (the
+            # synthetic KGE), every pooled point the shifted one.
+            assert values[zero_row] == pytest.approx(0.9)
+            for row in range(len(t_values)):
+                if row != zero_row:
+                    assert values[row] == pytest.approx(1.0)
+            # The pool saw exactly the non-base points, once each.
+            assert len(received) == 24
+            for point in received:
+                assert not np.array_equal(point, base_x)
+        finally:
+            worker.deleteLater()
+            _pump()
+
+    def test_no_improvement_keeps_the_base_results(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A profile whose best value equals the base value (the search
+        found no improvement) is kept as the figure panel's page
+        without adopting anything: the panel, the results, and the
+        last-run vector stay where they are, and the completion
+        status says the parameters are unchanged.
+        """
+        from ..gui.line_search import write_line_search_csv
+
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+
+            before_values: dict[str, float] = (
+                win._param_panel.param_values()
+            )
+            assert win._results is not None
+            before_results: gui_data.GuiRunResults = win._results
+            before_x: np.ndarray | None = win._last_run_x
+            base_x: np.ndarray = win._current_x()
+
+            # A profile that peaks at the base point: its best
+            # value is the base value, so the search found no
+            # improvement.
+            t_points: np.ndarray = np.linspace(-0.5, 0.5, 25)
+            t_points[int(np.argmin(np.abs(t_points)))] = 0.0
+            values: np.ndarray = 0.9 - 0.01 * np.abs(t_points)
+            profile: pd.DataFrame = pd.DataFrame(
+                {"value": values, "Streamflow: KGE": values},
+                index=t_points,
+            )
+            csv_path: Path = write_line_search_csv(profile)
+            alt_hydro, alt_rt = _synthetic_results(input_data)
+            outcome = gui_window._LineSearchOutcome(
+                error=None,
+                profile=profile,
+                x_best=base_x,
+                best_results=gui_data.GuiRunResults(alt_hydro, alt_rt),
+                csv_path=csv_path,
+                terms=["Streamflow: KGE"],
+                mode=win._current_mode(),
+                elapsed_seconds=3.0,
+                failed_points=0,
+                total_points=25,
+            )
+            win._on_finished_line_search(outcome)
+
+            # The base point's results stay on screen, and the
+            # profile is the figure panel's last page.
+            assert win._param_panel.param_values() == before_values
+            assert win._results is before_results
+            assert win._last_run_x is before_x
+            assert win._last_run_mode == MODE_FULL
+
+            assert win._line_search_state is not None
+            state: gui_window._LineSearchSnapshot = win._line_search_state
+            assert state.profile is profile
+            assert state.csv_path == csv_path
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Line search (full)"
+
+            assert win._line_search_button.isEnabled()
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._status_label.text() == (
+                "Line search finished in 3.0 s: no improvement found "
+                "(the best value equals the base value); the "
+                "parameters are unchanged and the profile was saved "
+                f"to {csv_path}."
+            )
+        finally:
+            _close_window(win)
+
+    def test_improvement_is_still_adopted(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A profile whose best value beats the base value keeps the
+        existing adoption: the best point's parameters and results
+        move into the window, and the completion status reports the
+        best step and value.
+        """
+        from ..gui.line_search import write_line_search_csv
+
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+
+            before_values: dict[str, float] = (
+                win._param_panel.param_values()
+            )
+            base_x: np.ndarray = win._current_x()
+            free = _free_keys(input_data)
+            keys: list[str] = list(win._param_panel.current_bounds())
+            x_best: np.ndarray = np.array(base_x)
+            x_best[keys.index(free[0])] += 0.001
+
+            # A profile that keeps rising with t: its best point
+            # beats the base point's value.
+            t_points: np.ndarray = np.linspace(-0.5, 0.5, 25)
+            t_points[int(np.argmin(np.abs(t_points)))] = 0.0
+            values: np.ndarray = 0.9 + 0.01 * t_points
+            profile: pd.DataFrame = pd.DataFrame(
+                {"value": values, "Streamflow: KGE": values},
+                index=t_points,
+            )
+            csv_path: Path = write_line_search_csv(profile)
+            alt_hydro, alt_rt = _synthetic_results(input_data)
+            alt_results: gui_data.GuiRunResults = gui_data.GuiRunResults(
+                alt_hydro, alt_rt
+            )
+            outcome = gui_window._LineSearchOutcome(
+                error=None,
+                profile=profile,
+                x_best=x_best,
+                best_results=alt_results,
+                csv_path=csv_path,
+                terms=["Streamflow: KGE"],
+                mode=win._current_mode(),
+                elapsed_seconds=3.0,
+                failed_points=0,
+                total_points=25,
+            )
+            win._on_finished_line_search(outcome)
+
+            after_values: dict[str, float] = (
+                win._param_panel.param_values()
+            )
+            for key in before_values:
+                expected: float = (
+                    before_values[key] + 0.001
+                    if key == free[0]
+                    else before_values[key]
+                )
+                assert after_values[key] == pytest.approx(expected)
+
+            assert win._results is alt_results
+            last_x: np.ndarray | None = win._last_run_x
+            assert last_x is not None
+            assert np.array_equal(last_x, x_best)
+            assert win._last_run_mode == MODE_FULL
+
+            assert win._line_search_state is not None
+            state: gui_window._LineSearchSnapshot = win._line_search_state
+            assert state.profile is profile
+            assert state.csv_path == csv_path
+            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel._titles[-1] == "Line search (full)"
+
+            assert win._line_search_button.isEnabled()
+            assert win._save_button.isEnabled()
+            assert not win._run_button.isEnabled()
+            assert win._status_label.text() == (
+                f"Line search finished in 3.0 s: best t = 0.5000 "
+                f"(Streamflow: KGE = 0.905); the best point's "
+                f"parameters are in the panel and the profile was "
+                f"saved to {csv_path}."
+            )
+        finally:
             _close_window(win)
 
     def test_reuses_gradient_snapshot(
@@ -3893,12 +4278,11 @@ class TestLineSearch:
             profile: pd.DataFrame = win._line_search_state.profile
             assert len(profile) == 25
             # The snapshot's row is the raw difference, 2.0 along
-            # free[0]'s axis, so the farthest step covers half the
-            # remaining distance — yet the endpoint is the same
-            # upper bound the unit direction reaches.
-            assert float(profile.index.max()) == pytest.approx(
-                (high - mid) / 2
-            )
+            # free[0]'s axis; the search renormalizes it to a unit
+            # direction, so the farthest step spans the whole
+            # remaining distance to the bound — the same upper
+            # bound the point lands on either way.
+            assert float(profile.index.max()) == pytest.approx(high - mid)
             assert (
                 win._param_panel.param_values()[free[0]]
                 == pytest.approx(high)

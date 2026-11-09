@@ -152,6 +152,8 @@ from potions.gui.gradients import (
 from potions.gui.line_search import (
     expand_direction,
     feasible_t_interval,
+    project_direction,
+    search_t_points,
     write_line_search_csv,
 )
 from potions.gui.model_pool import map_model_runs
@@ -874,10 +876,15 @@ class _LineSearchWorker(QThread):
     the best one (the searched metrics all have 1 as their
     optimal value, so maximizing the sum finds the best point).
 
-    Every point — the base point when it was not handed in, the
-    direction's perturbation points when the direction is
-    computed, and the search's points — is modelled in a worker
-    pool.
+    When the direction is computed, its perturbation points are
+    modelled in a worker pool, then the search's grid is built: a
+    fixed number of points, equally spaced over the interval of
+    steps that keeps every parameter inside the current bounds,
+    with the point nearest the base point snapped onto it.  The
+    base point itself is not run again: its profile row reuses the
+    results already on screen (the handed-in base results, or the
+    job's own base run), and the pool runs only the other points
+    of the grid.
 
     Signals:
         finished_line_search: Emitted with the job's outcome.
@@ -1025,17 +1032,28 @@ class _LineSearchWorker(QThread):
         parameter vector's space (a pinned parameter's component
         stays zero).
 
-        The search then evaluates the sum of the selected
-        objectives at `_LINE_SEARCH_POINTS` further pool points
-        on the ascent line ``x + t * direction``, ``t`` equally
-        spaced across the interval that keeps every parameter
-        inside its bounds, and the point with the largest finite
-        value is the best.
+        The direction is then projected onto the feasible cone: a
+        component that points out of a bound the base point sits
+        on is dropped, and the surviving vector is renormalized,
+        so the search only ever moves along a direction that stays
+        inside the current bounds (a direction whose components are
+        all blocked this way fails the job).  The search then
+        evaluates the sum of the selected objectives at
+        `_LINE_SEARCH_POINTS` points on the ascent line
+        ``x + t * direction``, ``t`` equally spaced across the
+        interval that keeps every parameter inside its bounds, with
+        the point nearest the base point snapped onto it: the base
+        point's row reuses the results the job already has for it
+        (the handed-in base results, or the job's own base run)
+        instead of being re-run, and the pool runs only the other
+        points.  The point with the largest finite value is the
+        best.
 
         Each completed point is reported as a (done, total) step
-        count (the base point when it was run, then each
-        direction point when the direction is computed, then each
-        of the search's points), for the window's progress bar.
+        count, for the window's progress bar: the base point when
+        it was run, then each direction point when the direction is
+        computed, then the search's pool points as they complete
+        and the base point's row once the pool has finished.
 
         A failed base or direction point — including a failed
         pool initializer, which fails every point its worker
@@ -1044,8 +1062,11 @@ class _LineSearchWorker(QThread):
         point does not fail the job: its entry in the profile is
         NaN (the missing value) and the failure is counted, so
         the window can report it in the completion status; the
-        search for the best point skips NaN entries, and a job
-        whose search points all failed raises the error instead.
+        search for the best point skips NaN entries, so a job
+        whose pool points all failed still reports the base
+        row's value, which is the t = 0 row reusing the base
+        results; the error is raised only when no grid row — the
+        base row included — reports a value.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -1062,9 +1083,13 @@ class _LineSearchWorker(QThread):
             ValueError:
                 Raised when the base point did not report every
                 selected objective, when their summed differences
-                carry no direction, or when no point on the
-                ascent line lies inside the current bounds (or
-                reports a value).
+                carry no direction, when the ascent direction
+                points out of the current bounds at every free
+                parameter that can move (no feasible direction),
+                or when no point on the ascent line lies inside
+                the current bounds, or when no point of the
+                search grid — the base row included — reports a
+                value.
         """
         total: int = len(self._steps) * 2
 
@@ -1124,6 +1149,14 @@ class _LineSearchWorker(QThread):
             direction: np.ndarray = self._direction
         else:
             direction = self._difference_direction(base_results, results)
+        # Project the direction onto the feasible cone before the
+        # interval is computed: a component that points out of a
+        # bound the base point sits on would otherwise collapse the
+        # feasible interval onto the base point, so the search
+        # could never move.
+        direction = project_direction(
+            self._base_x, direction, self._steps, self._bounds
+        )
 
         interval: tuple[float, float] | None = feasible_t_interval(
             self._base_x, direction, self._steps, self._bounds
@@ -1135,34 +1168,72 @@ class _LineSearchWorker(QThread):
                 "parameter bounds."
             )
         t_lo, t_hi = interval
-        t_points: np.ndarray = np.linspace(t_lo, t_hi, _LINE_SEARCH_POINTS)
-        search_points: list[np.ndarray] = [
-            self._base_x + t * direction for t in t_points
-        ]
+        t_points: np.ndarray = search_t_points(t_lo, t_hi, _LINE_SEARCH_POINTS)
         search_labels: list[str] = [f"t = {t:.4f}" for t in t_points]
+        # The grid point that lands exactly on the base point (t = 0)
+        # is not re-run in the pool: its profile row reuses the
+        # results the job already has for the base point.
+        zero_positions: set[int] = {
+            index for index, t in enumerate(t_points) if t == 0.0
+        }
+        pool_positions: list[int] = [
+            index
+            for index in range(len(t_points))
+            if index not in zero_positions
+        ]
+        pool_points: list[np.ndarray] = [
+            self._base_x + t_points[index] * direction for index in pool_positions
+        ]
 
-        def on_search_result(
+        def on_pool_result(
             index: int, payload: GuiRunResults | str
         ) -> None:
             nonlocal done
             done += 1
+            position: int = pool_positions[index]
             self.progress_line.emit(
-                f"Line search run {done}/{total}: {search_labels[index]}"
+                f"Line search run {done}/{total}: {search_labels[position]}"
             )
             self.progress_step.emit(done, step_total)
 
-        search_payloads: list[GuiRunResults | str] = map_model_runs(
-            search_points,
-            self._mode,
-            self._csv_path,
-            on_result=on_search_result,
+        pool_payloads: list[GuiRunResults | str] = (
+            map_model_runs(
+                pool_points,
+                self._mode,
+                self._csv_path,
+                on_result=on_pool_result,
+            )
+            if pool_points
+            else []
         )
+
+        # One entry per grid point, in the grid's order: the base
+        # results' values fill the t = 0 row, the pool's payloads
+        # (in the pool's input order) fill the rest.
+        point_results: list[GuiRunResults | str] = []
+        for _t in t_points:
+            point_results.append(base_results)
+        # The loop variable differs from the profile loop's
+        # position: mypy's no-redef rule bars one function scope
+        # defining a local name twice, loop variable included.
+        for pool_index, grid_position in enumerate(pool_positions):
+            point_results[grid_position] = pool_payloads[pool_index]
+        # The base point's row was not run in the pool, so its
+        # progress step is reported once the pool has finished.
+        # The loop variable differs from the splice loop's: mypy's
+        # no-redef rule bars one function scope defining a local
+        # name twice, loop variable included.
+        for zero_position in sorted(zero_positions):
+            done += 1
+            self.progress_line.emit(
+                f"Line search run {done}/{total}: "
+                f"{search_labels[zero_position]}"
+            )
+            self.progress_step.emit(done, step_total)
 
         failed_points: int = 0
         term_values: list[list[float]] = []
-        point_results: list[GuiRunResults | str] = []
-        for payload in search_payloads:
-            point_results.append(payload)
+        for payload in point_results:
             if isinstance(payload, str):
                 failed_points += 1
                 term_values.append([float("nan")] * len(self._terms))
@@ -2791,9 +2862,19 @@ class MainWindow(QMainWindow):
         direction (the summed rows, un-normalized) for free;
         otherwise the direction is computed by the same central
         differences as the gradient job, summing the selected
-        terms' rows.  The sum is then evaluated at 25 points on the
-        ascent line, all inside the current parameter bounds, and
-        the point with the best (largest) value is adopted.
+        terms' rows.  The direction is then projected onto the
+        feasible cone (a component that points out of a bound the
+        base point sits on is dropped), and the sum is evaluated at
+        25 points on the ascent line, all inside the current
+        parameter bounds, with the grid's point nearest the base
+        point snapped onto it (its row reuses the base results
+        rather than re-running the point).  The point with the
+        best (largest) value is adopted when it strictly beats the
+        base point's value, or when the base value is missing
+        (possible only when the direction was handed in); when the
+        base value is finite and the best does not beat it, the
+        search found no improvement, leaves the parameters
+        unchanged, and says so in the status line.
 
         The search's objectives are the checked cells of the
         objective table; an unset selection (nothing checked)
@@ -2925,12 +3006,20 @@ class MainWindow(QMainWindow):
 
         A failed job is reported in the status bar and leaves the
         figures on screen unchanged.  A finished job's profile is
-        kept as the figure panel's extra page, its best point's
-        parameters and results are adopted into the window (the
-        panel is restored to the best point's values and the
-        figures and table refresh), and its completion is reported
-        in the status bar with the best step, the best value, and
-        the path of the written CSV.
+        always kept as the figure panel's extra page, and its
+        completion is reported in the status bar with the path of
+        the written CSV.  When the best point's value strictly
+        beats the base point's value (the t = 0 row) — or the base
+        value is missing, possible only on the
+        handed-in-direction path since the computed path validates
+        the base first — the best point's parameters and results
+        are adopted into the window (the panel is restored to the
+        best point's values and the figures and table refresh),
+        and the status reports the best step and value.  When the
+        base value is finite and the best does not exceed it,
+        nothing is adopted: the parameters and the results on
+        screen stay exactly as they were, and the status says no
+        improvement was found.
         """
         self._elapsed_timer.stop()
         self._progress_strip.hide()
@@ -2969,6 +3058,60 @@ class MainWindow(QMainWindow):
         best_index: int = int(np.nanargmax(values))
         best_t: float = float(outcome.profile.index[best_index])
         best_value: float = float(values[best_index])
+        # The base point's value is the value at the t = 0 row.  The
+        # search found no improvement when the best value does not
+        # strictly beat it: the searched metrics all have 1 as their
+        # optimal value, so a best that equals the base means the
+        # search could not do better than where it started.
+        t_values: np.ndarray = outcome.profile.index.to_numpy(
+            dtype=np.float64
+        )
+        zero_mask: np.ndarray = t_values == 0.0
+        base_value: float | None = (
+            float(values[int(zero_mask.argmax())])
+            if zero_mask.any()
+            else None
+        )
+
+        # The finished profile is kept as the figure panel's page in
+        # both outcomes, so it is set before the adoption decision.
+        self._line_search_state = _LineSearchSnapshot(
+            profile=outcome.profile,
+            terms=list(outcome.terms),
+            mode=outcome.mode,
+            csv_path=outcome.csv_path,
+            elapsed_seconds=outcome.elapsed_seconds,
+        )
+        if (
+            base_value is not None
+            and np.isfinite(base_value)
+            and best_value <= base_value
+        ):
+            # No improvement: the parameters and the results on
+            # screen stay exactly as they were; only the profile
+            # page and the written CSV are recorded, and the
+            # completion says the parameters are unchanged.
+            self._refresh_from_results()
+            # If branches share the function's scope in Python, so
+            # this local cannot reuse the adoption branch's name
+            # (mypy's no-redef rule); the distinct name says which
+            # branch's status it carries.
+            no_improvement_message: str = (
+                f"Line search finished in {outcome.elapsed_seconds:.1f} s: "
+                "no improvement found (the best value equals the base "
+                "value); the parameters are unchanged and the profile "
+                f"was saved to {outcome.csv_path}."
+            )
+            if outcome.failed_points > 0:
+                no_improvement_message += (
+                    f" {outcome.failed_points} of {outcome.total_points} "
+                    "points failed; their values are shown as missing."
+                )
+            self._status(no_improvement_message)
+            up_to_date = self._results_are_up_to_date()
+            self._save_button.setEnabled(up_to_date)
+            self._run_button.setEnabled(not up_to_date)
+            return
 
         bounds: dict[str, tuple[float, float]] = (
             self._param_panel.current_bounds()
@@ -2981,13 +3124,6 @@ class MainWindow(QMainWindow):
         self._results = outcome.best_results
         self._last_run_x = outcome.x_best
         self._last_run_mode = outcome.mode
-        self._line_search_state = _LineSearchSnapshot(
-            profile=outcome.profile,
-            terms=list(outcome.terms),
-            mode=outcome.mode,
-            csv_path=outcome.csv_path,
-            elapsed_seconds=outcome.elapsed_seconds,
-        )
         self._refresh_from_results()
         if len(outcome.terms) == 1:
             best_text: str = (
