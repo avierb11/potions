@@ -3,6 +3,8 @@ import pandas as pd
 import pytest
 from pandas import DataFrame, Series
 
+import potions as pt
+
 from ..common_types import (
     ForcingData,
     HydroModelResults,
@@ -11,6 +13,7 @@ from ..common_types import (
     LapseRateParameters,
     RtModelResults,
     RtZoneConfiguration,
+    RtZoneResults,
 )
 
 
@@ -424,3 +427,19 @@ def test_rt_setstate_defaults_missing_zone_names() -> None:
     RtModelResults.__setstate__(loaded, state)
     assert loaded.zone_names == []
     pd.testing.assert_frame_equal(loaded.simulation, results.simulation)
+
+
+# ==== ModelResults.rt alias and package exports ==== #
+
+
+def test_model_results_rt_alias() -> None:
+    hydro = _hydro_results(list(HYDRO_ZONES))
+    rt = _rt_results(list(RT_ZONES))
+    results = pt.ModelResults(hydro, rt)
+    assert results.rt is results.reactive_transport is rt
+
+
+def test_package_exports_zone_result_types() -> None:
+    assert pt.HydroZoneResults is HydroZoneResults
+    assert pt.RtZoneResults is RtZoneResults
+    assert "HydroZoneResults" in pt.__all__ and "RtZoneResults" in pt.__all__

@@ -676,6 +676,17 @@ class ModelResults:
     hydro: HydroModelResults
     reactive_transport: RtModelResults
 
+    @property
+    def rt(self) -> RtModelResults:
+        """Alias for :attr:`reactive_transport`, matching the attribute
+        name used by ``gui.data.GuiRunResults``.
+
+        Returns the reactive-transport results, which may be
+        ``None``-substituted by callers that hold a hydro-only run in
+        this field's slot.
+        """
+        return self.reactive_transport
+
 
 @dataclass(frozen=True)
 class RtZoneConfiguration:
