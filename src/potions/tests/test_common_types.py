@@ -1,11 +1,15 @@
 import numpy as np
+import pandas as pd
 import pytest
-from pandas import Series
+from pandas import DataFrame, Series
 
 from ..common_types import (
     ForcingData,
+    HydroModelResults,
     HydroModelStep,
+    HydroZoneResults,
     LapseRateParameters,
+    RtModelResults,
     RtZoneConfiguration,
 )
 
@@ -103,3 +107,202 @@ def test_rt_zone_configuration() -> None:
     cfg = RtZoneConfiguration(do_reactions=True, do_speciation=False)
     assert cfg.do_reactions is True
     assert cfg.do_speciation is False
+
+
+# ==== HydroModelResults named views ==== #
+
+# Deliberately not East River names, and underscored: the accessors must
+# treat a zone name as an opaque label, never split it on underscores.
+HYDRO_ZONES: list[str] = ["wet_hs", "wet_rp", "dry_rp"]
+
+
+def _hydro_sim(index: pd.DatetimeIndex) -> DataFrame:
+    """A flat hydrology frame with every per-zone column, each distinct."""
+    prefixes: list[str] = [
+        "s_",
+        "q_forc_",
+        "q_vap_",
+        "q_lat_",
+        "q_vert_",
+        "q_in_",
+        "q_lat_ext_",
+        "q_vert_ext_",
+    ]
+    data: dict[str, np.ndarray] = {}
+    for prefix in prefixes:
+        for i, zone in enumerate(HYDRO_ZONES):
+            data[f"{prefix}{zone}"] = np.full(len(index), 10 * i + len(prefix), float)
+    data["streamflow_sim"] = np.arange(len(index), dtype=float)
+    data["meas_streamflow_mmd"] = np.arange(len(index), dtype=float) + 100.0
+    data["prop_q_wet_rp"] = np.full(len(index), 0.3, float)
+    data["prop_q_dry_rp"] = np.full(len(index), 0.7, float)
+    return DataFrame(data, index=index)
+
+
+def _hydro_forcing(index: pd.DatetimeIndex) -> ForcingData:
+    return ForcingData(
+        precip=pd.Series(1.0, index=index),
+        temp=pd.Series(5.0, index=index),
+        pet=pd.Series(0.5, index=index),
+    )
+
+
+def _hydro_results(zone_names: list[str] | None = None) -> HydroModelResults:
+    index = pd.DatetimeIndex(
+        [pd.Timestamp("2020-01-01") + pd.Timedelta(days=i) for i in range(4)]
+    )
+    if zone_names is None:
+        return HydroModelResults(
+            forcing=_hydro_forcing(index),
+            simulation=_hydro_sim(index),
+            objective_functions=Series(dtype=float),
+        )
+    return HydroModelResults(
+        forcing=_hydro_forcing(index),
+        simulation=_hydro_sim(index),
+        objective_functions=Series(dtype=float),
+        zone_names=zone_names,
+    )
+
+
+@pytest.fixture
+def hydro_results() -> HydroModelResults:
+    return _hydro_results(list(HYDRO_ZONES))
+
+
+def test_hydro_quantity_frame_relabels_and_orders(
+    hydro_results: HydroModelResults,
+) -> None:
+    frame = hydro_results.lateral
+    assert list(frame.columns) == HYDRO_ZONES
+    for i, zone in enumerate(HYDRO_ZONES):
+        np.testing.assert_array_equal(
+            frame[zone].to_numpy(),
+            hydro_results.simulation[f"q_lat_{zone}"].to_numpy(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("quantity", "prefix"),
+    [
+        ("storage", "s_"),
+        ("precip_flux", "q_forc_"),
+        ("evaporation", "q_vap_"),
+        ("lateral", "q_lat_"),
+        ("vertical", "q_vert_"),
+        ("inflow", "q_in_"),
+        ("external_lateral", "q_lat_ext_"),
+        ("external_vertical", "q_vert_ext_"),
+    ],
+)
+def test_hydro_all_quantity_frames(
+    hydro_results: HydroModelResults, quantity: str, prefix: str
+) -> None:
+    frame: DataFrame = getattr(hydro_results, quantity)
+    assert list(frame.columns) == HYDRO_ZONES
+    for zone in HYDRO_ZONES:
+        np.testing.assert_array_equal(
+            frame[zone].to_numpy(),
+            hydro_results.simulation[f"{prefix}{zone}"].to_numpy(),
+        )
+
+
+def test_hydro_streamflow_accessors(hydro_results: HydroModelResults) -> None:
+    pd.testing.assert_series_equal(
+        hydro_results.simulated_streamflow,
+        hydro_results.simulation["streamflow_sim"],
+    )
+    measured = hydro_results.measured_streamflow
+    assert measured is not None
+    pd.testing.assert_series_equal(measured, hydro_results.simulation["meas_streamflow_mmd"])
+
+
+def test_hydro_measured_streamflow_none_when_absent(
+    hydro_results: HydroModelResults,
+) -> None:
+    hydro_results.simulation = hydro_results.simulation.drop(
+        columns=["meas_streamflow_mmd"]
+    )
+    assert hydro_results.measured_streamflow is None
+
+
+def test_hydro_river_zone_fractions_relabels(
+    hydro_results: HydroModelResults,
+) -> None:
+    frame = hydro_results.river_zone_fractions
+    assert list(frame.columns) == ["wet_rp", "dry_rp"]
+    np.testing.assert_array_equal(
+        frame["wet_rp"].to_numpy(),
+        hydro_results.simulation["prop_q_wet_rp"].to_numpy(),
+    )
+
+
+def test_hydro_zone_view_matches_frame_columns(
+    hydro_results: HydroModelResults,
+) -> None:
+    view: HydroZoneResults = hydro_results.zone("wet_rp")
+    assert view.zone == "wet_rp"
+    for quantity, prefix in [
+        ("storage", "s_"),
+        ("lateral", "q_lat_"),
+        ("external_vertical", "q_vert_ext_"),
+    ]:
+        series: Series = getattr(view, quantity)
+        np.testing.assert_array_equal(
+            series.to_numpy(),
+            hydro_results.simulation[f"{prefix}wet_rp"].to_numpy(),
+        )
+
+
+def test_hydro_zones_dict_covers_all_zones(
+    hydro_results: HydroModelResults,
+) -> None:
+    assert list(hydro_results.zones) == HYDRO_ZONES
+    for zone in HYDRO_ZONES:
+        assert hydro_results.zones[zone].zone == zone
+
+
+def test_hydro_to_dataframe_is_stored_frame(
+    hydro_results: HydroModelResults,
+) -> None:
+    assert hydro_results.to_dataframe() is hydro_results.simulation
+
+
+def test_hydro_zone_names_parsed_when_unset() -> None:
+    # The frame is self-describing through its `s_` storage columns, so a
+    # results object built without zone_names still partitions correctly.
+    results = _hydro_results()
+    assert results.zone_names == []
+    assert list(results.lateral.columns) == HYDRO_ZONES
+
+
+def test_hydro_zone_names_unset_and_no_s_columns_raises() -> None:
+    index = pd.DatetimeIndex(
+        [pd.Timestamp("2020-01-01") + pd.Timedelta(days=i) for i in range(2)]
+    )
+    frame = DataFrame({"other_col": np.ones(len(index))}, index=index)
+    bare = HydroModelResults(
+        forcing=_hydro_forcing(index),
+        simulation=frame,
+        objective_functions=Series(dtype=float),
+    )
+    with pytest.raises(ValueError, match="zone names"):
+        _ = bare.lateral
+
+
+def test_hydro_recorded_zone_missing_column_raises(
+    hydro_results: HydroModelResults,
+) -> None:
+    bad = HydroModelResults(
+        forcing=hydro_results.forcing,
+        simulation=hydro_results.simulation,
+        objective_functions=Series(dtype=float),
+        zone_names=HYDRO_ZONES + ["ghost_zone"],
+    )
+    with pytest.raises(ValueError, match="ghost_zone"):
+        _ = bad.lateral
+
+
+def test_hydro_unknown_zone_raises(hydro_results: HydroModelResults) -> None:
+    with pytest.raises(ValueError, match="not a zone of these results"):
+        hydro_results.zone("no_such_zone")

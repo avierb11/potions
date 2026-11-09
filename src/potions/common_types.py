@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import (
     Callable,
+    Final,
     Literal,
     Optional,
     TYPE_CHECKING,
@@ -163,9 +164,75 @@ class HydroSimulation:
     vert_flux_ext: DataFrame
 
 
+# The per-zone quantities a hydrology frame carries, paired with the
+# column prefixes the flat frame uses for them. The layout's single
+# source of truth is `HydrologicalModel.get_hydro_column_names`; these
+# pairs must track it.
+_HYDRO_QUANTITY_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
+    ("storage", "s_"),
+    ("precip_flux", "q_forc_"),
+    ("evaporation", "q_vap_"),
+    ("lateral", "q_lat_"),
+    ("vertical", "q_vert_"),
+    ("inflow", "q_in_"),
+    ("external_lateral", "q_lat_ext_"),
+    ("external_vertical", "q_vert_ext_"),
+)
+# Must track `hydro_model.SIM_Q_NAME` and the measured-streamflow column
+# name used by `run_hydro_model`'s output assembly.
+_STREAMFLOW_SIM_COLUMN: Final[str] = "streamflow_sim"
+_MEAS_STREAMFLOW_COLUMN: Final[str] = "meas_streamflow_mmd"
+_PROP_Q_PREFIX: Final[str] = "prop_q_"
+
+
+@dataclass(frozen=True)
+class HydroZoneResults:
+    """One zone's per-quantity views of a hydrology run.
+
+    Each series is a renamed view of the corresponding
+    `{prefix}_{zone}` column of the parent `HydroModelResults.simulation`
+    frame. The views share the stored frame's data: mutating a series
+    through this object mutates the stored frame, and vice versa.
+
+    Attributes:
+        zone: The name of the zone these series belong to.
+        storage: The zone's storage over time (`s_{zone}`).
+        precip_flux: The zone's forced precipitation flux
+            (`q_forc_{zone}`).
+        evaporation: The zone's evaporation flux (`q_vap_{zone}`).
+        lateral: The zone's lateral (donor) flux (`q_lat_{zone}`).
+        vertical: The zone's vertical flux (`q_vert_{zone}`).
+        inflow: The zone's inflow (`q_in_{zone}`).
+        external_lateral: The zone's external lateral flux
+            (`q_lat_ext_{zone}`).
+        external_vertical: The zone's external vertical flux
+            (`q_vert_ext_{zone}`).
+    """
+
+    zone: str
+    storage: Series
+    precip_flux: Series
+    evaporation: Series
+    lateral: Series
+    vertical: Series
+    inflow: Series
+    external_lateral: Series
+    external_vertical: Series
+
+
 @dataclass
 class HydroModelResults:
     """A type containing the results of a hydrologic model run.
+
+    The flat `simulation` frame is the sole storage: every named
+    accessor is a cheap view over it (a renamed sub-frame or column),
+    and `to_dataframe()` returns the stored frame by identity.
+
+    The per-zone views partition the frame's `{prefix}_{zone}` columns,
+    treating zone names as opaque labels. If one zone name were a
+    suffix of another zone name after an underscore (e.g. zones `b`
+    and `a_b`), the partitioning would be ambiguous; model structures
+    should avoid such name pairs.
 
     Attributes:
         simulation (DataFrame): A DataFrame with time series of states and
@@ -173,12 +240,207 @@ class HydroModelResults:
         objective_functions (Series): A Series with the values of each of the objective functions as keys
         saved_dir (Optional[str]): The directory this run was saved to
             (`"results/run_<timestamp>"` by default); None if saving was disabled.
+        zone_names (list[str]): The model's zone names in layer-major
+            (structure) order, recording the frame's zone layout for the
+            per-zone accessors. Empty when the results were built by
+            hand, in which case the layout is parsed from the frame's
+            `s_` storage columns.
     """
 
     forcing: ForcingData | list[ForcingData]
     simulation: DataFrame
     objective_functions: Series
     saved_dir: Optional[str] = None
+    zone_names: list[str] = field(default_factory=list)
+
+    def _effective_zone_names(self) -> list[str]:
+        """The zone names to partition the frame by.
+
+        Uses the recorded `zone_names` when present; otherwise parses
+        them from the frame's `s_` storage columns. The `s_` prefix is
+        used by no other column, so a standard hydrology frame is
+        self-describing.
+
+        Returns:
+            The zone names in frame order.
+
+        Raises:
+            ValueError:
+                Raised when no zone names are recorded and the frame
+                carries no `s_` storage columns to parse.
+        """
+        if self.zone_names:
+            return self.zone_names
+        parsed: list[str] = [
+            c[len("s_"):]
+            for c in self.simulation.columns
+            if c.startswith("s_")
+        ]
+        if not parsed:
+            raise ValueError(
+                "The hydrology simulation frame carries no `s_` storage "
+                "columns and no zone names are recorded, so the zone "
+                "names cannot be determined. Record `zone_names` on the "
+                "results or use a frame with the standard per-zone "
+                "columns."
+            )
+        return parsed
+
+    def _quantity_frame(self, quantity: str) -> DataFrame:
+        """The frame of one per-zone quantity, relabeled to zone names.
+
+        Args:
+            quantity: A quantity name of `_HYDRO_QUANTITY_PREFIXES`,
+                e.g. `"lateral"`.
+
+        Returns:
+            A view of the stored frame with one column per zone: the
+            `{prefix}_{zone}` columns, relabeled to the zone names.
+
+        Raises:
+            ValueError:
+                Raised when a recorded zone name has no corresponding
+                `{prefix}_{zone}` column in the frame.
+        """
+        prefix = dict(_HYDRO_QUANTITY_PREFIXES)[quantity]
+        zone_names = self._effective_zone_names()
+        columns = [f"{prefix}{zone}" for zone in zone_names]
+        missing = [c for c in columns if c not in self.simulation.columns]
+        if missing:
+            raise ValueError(
+                f"Column(s) {missing} not found in the hydrology "
+                f"simulation frame for quantity '{quantity}'."
+            )
+        return self.simulation[columns].rename(
+            columns={f"{prefix}{zone}": zone for zone in zone_names}
+        )
+
+    @property
+    def storage(self) -> DataFrame:
+        """Zone storage: the `s_{zone}` columns, relabeled to zone names."""
+        return self._quantity_frame("storage")
+
+    @property
+    def precip_flux(self) -> DataFrame:
+        """Forced precipitation per zone: the `q_forc_{zone}` columns."""
+        return self._quantity_frame("precip_flux")
+
+    @property
+    def evaporation(self) -> DataFrame:
+        """Evaporation per zone: the `q_vap_{zone}` columns."""
+        return self._quantity_frame("evaporation")
+
+    @property
+    def lateral(self) -> DataFrame:
+        """Lateral (donor) flux per zone: the `q_lat_{zone}` columns."""
+        return self._quantity_frame("lateral")
+
+    @property
+    def vertical(self) -> DataFrame:
+        """Vertical flux per zone: the `q_vert_{zone}` columns."""
+        return self._quantity_frame("vertical")
+
+    @property
+    def inflow(self) -> DataFrame:
+        """Inflow per zone: the `q_in_{zone}` columns."""
+        return self._quantity_frame("inflow")
+
+    @property
+    def external_lateral(self) -> DataFrame:
+        """External lateral flux per zone: the `q_lat_ext_{zone}` columns."""
+        return self._quantity_frame("external_lateral")
+
+    @property
+    def external_vertical(self) -> DataFrame:
+        """External vertical flux per zone: the `q_vert_ext_{zone}` columns."""
+        return self._quantity_frame("external_vertical")
+
+    @property
+    def simulated_streamflow(self) -> Series:
+        """The simulated streamflow: the `streamflow_sim` column."""
+        return self.simulation[_STREAMFLOW_SIM_COLUMN]
+
+    @property
+    def measured_streamflow(self) -> Series | None:
+        """The measured streamflow: the `meas_streamflow_mmd` column.
+
+        Returns:
+            The measured series, or None when the frame carries no
+            measured-streamflow column (the run was not scored against
+            a measured streamflow).
+        """
+        if _MEAS_STREAMFLOW_COLUMN not in self.simulation.columns:
+            return None
+        return self.simulation[_MEAS_STREAMFLOW_COLUMN]
+
+    @property
+    def river_zone_fractions(self) -> DataFrame:
+        """The area fraction of each river zone: the `prop_q_{zone}`
+        columns, relabeled to the zone names.
+
+        The `prop_q_` prefix is unique to these columns, so no zone
+        names need be recorded to recover them.
+        """
+        columns = [
+            c
+            for c in self.simulation.columns
+            if c.startswith(_PROP_Q_PREFIX)
+        ]
+        return self.simulation[columns].rename(
+            columns={c: c[len(_PROP_Q_PREFIX):] for c in columns}
+        )
+
+    def to_dataframe(self) -> DataFrame:
+        """The stored flat simulation frame, returned by identity.
+
+        The named accessors are views over this frame and it is the
+        sole storage, so a mutation made through a view is visible
+        here.
+        """
+        return self.simulation
+
+    def zone(self, name: str) -> HydroZoneResults:
+        """One zone's per-quantity series, gathered into a view.
+
+        Args:
+            name: The name of the zone to gather.
+
+        Returns:
+            A `HydroZoneResults` whose series are renamed views of the
+            zone's `{prefix}_{name}` columns.
+
+        Raises:
+            ValueError:
+                Raised when `name` is not one of the results' zones, or
+                when the frame is missing one of the zone's columns.
+        """
+        zone_names = self._effective_zone_names()
+        if name not in zone_names:
+            raise ValueError(
+                f"Unknown zone '{name}': not a zone of these results. "
+                f"Known zones: {zone_names}"
+            )
+        missing = [
+            f"{prefix}{name}"
+            for _quantity, prefix in _HYDRO_QUANTITY_PREFIXES
+            if f"{prefix}{name}" not in self.simulation.columns
+        ]
+        if missing:
+            raise ValueError(
+                f"Column(s) {missing} not found in the hydrology "
+                f"simulation frame for zone '{name}'."
+            )
+        # HydroZoneResults' fields follow _HYDRO_QUANTITY_PREFIXES' order.
+        series: list[Series] = [
+            self.simulation[f"{prefix}{name}"].rename(quantity)
+            for quantity, prefix in _HYDRO_QUANTITY_PREFIXES
+        ]
+        return HydroZoneResults(name, *series)
+
+    @property
+    def zones(self) -> dict[str, HydroZoneResults]:
+        """One `HydroZoneResults` view per zone, keyed by zone name."""
+        return {zone: self.zone(zone) for zone in self._effective_zone_names()}
 
 
 @dataclass
