@@ -285,8 +285,10 @@ def _objective_panel_size(
 
     Args:
         heading_size: The heading label's size hint.
-        column_widths: The table's per-column section size hints.
-        row_heights: The table's per-row section size hints.
+        column_widths: The table's per-column rendered section
+            sizes (what the view actually draws after
+            re-resizing to contents).
+        row_heights: The table's per-row rendered section sizes.
         vertical_header_width: The row-header column's width.
         horizontal_header_height: The column-header row's height.
         frame_width: The table view's frame width, per side.
@@ -1534,8 +1536,18 @@ class _ObjectiveSelectionDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index: QModelIndex,
     ) -> None:
-        """Draw the cell, then the checkbox in its left inset."""
-        super().paint(painter, option, index)
+        """
+        Draw the cell, then the checkbox in its left inset.
+
+        The base style's text is drawn from a copy of the cell's
+        rect whose left edge starts at the inset, so the value text
+        starts to the right of the checkbox and is never covered by
+        it; the checkbox itself is still drawn over the cell's
+        unshifted left inset.
+        """
+        shifted: QStyleOptionViewItem = QStyleOptionViewItem(option)
+        shifted.rect = shifted.rect.adjusted(_CHECKBOX_INSET, 0, 0, 0)
+        super().paint(painter, shifted, index)
         model: QAbstractItemModel | None = index.model()
         if not isinstance(model, _ObjectiveTableModel) or not index.isValid():
             return
@@ -2149,25 +2161,33 @@ class MainWindow(QMainWindow):
         contents (plus the panel's margins) keeps the window's
         width from growing with the table, and leaves the rest of
         the row to the stretching parameter panel.  The size is the
-        table's own measurements (per-column and per-row section
-        size hints, both headers' size hints, and the frame width)
-        run through `_objective_panel_size`, so the scrollbars
-        (held off) never have work to do.
+        table's own measurements run through `_objective_panel_size`:
+        the section sizes the view actually renders (the wider of
+        the header text and the cell content, recomputed here since
+        both headers are in `ResizeToContents` mode — a header-text-
+        only measurement would clip any column or row whose cells
+        are wider) plus both headers' own size hints and the frame
+        width, so the scrollbars (held off) never have work to do.
         """
+        table = self._objective_table
+        # Re-resizing is the view's own measurement of what it will
+        # render; it is a no-op on the headers' sections while the
+        # model is still empty (the build-time call site).
+        table.horizontalHeader().resizeSections()
+        table.verticalHeader().resizeSections()
         width, height = _objective_panel_size(
             self._objective_heading.sizeHint(),
             [
-                self._objective_table.horizontalHeader().sectionSizeHint(c)
-                + _CHECKBOX_INSET
+                table.horizontalHeader().sectionSize(c)
                 for c in range(self._objective_model.columnCount())
             ],
             [
-                self._objective_table.verticalHeader().sectionSizeHint(r)
+                table.verticalHeader().sectionSize(r)
                 for r in range(self._objective_model.rowCount())
             ],
-            self._objective_table.verticalHeader().sizeHint().width(),
-            self._objective_table.horizontalHeader().sizeHint().height(),
-            self._objective_table.frameWidth(),
+            table.verticalHeader().sizeHint().width(),
+            table.horizontalHeader().sizeHint().height(),
+            table.frameWidth(),
             _OBJECTIVE_PANEL_MARGINS,
             _OBJECTIVE_PANEL_SPACING,
         )

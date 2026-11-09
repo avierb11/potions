@@ -39,16 +39,18 @@ import numpy as np
 import pandas as pd
 import pytest
 from matplotlib.figure import Figure
-from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QMouseEvent
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QImage, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLayoutItem,
     QSizePolicy,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -268,6 +270,37 @@ def _band_of(cell: QWidget) -> str:
     return match.group(1)
 
 
+def _app_font_12pt() -> QFont:
+    """The app's 12 pt base font, as `main` sets it on the app.
+
+    The test windows never pass through `main`, so the tests that
+    compare pixel-level rendering set the font on the widgets they
+    probe.
+    """
+    font: QFont = QFont()
+    font.setPointSize(12)
+    return font
+
+
+def _objective_test_table() -> pd.DataFrame:
+    """A four-target objective table crafted for the panel tests.
+
+    Every value formats to a five-character string (``"0.900"``
+    through ``"6.300"``); the three species' headers (``"DOC"``,
+    ``"DIC"``, ``"Ca++"``) are shorter than those values, so at the
+    app's 12 pt font the value cells are wider than the header text
+    and each rendered column is wider than a header-text-only
+    formula.
+    """
+    values: dict[str, list[float]] = {
+        "Streamflow": [0.9, 1.8, 2.7, 3.6, 4.5, 5.4, 6.3],
+        "DOC": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1],
+        "DIC": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        "Ca++": [1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8],
+    }
+    return pd.DataFrame(values, index=list(METRIC_LABELS.values()))
+
+
 class _FakeMessageBox:
     """
     Stands in for `QMessageBox`; the window only calls `question`
@@ -400,7 +433,11 @@ class TestMainWindowStartup:
             )
             # The panel is fixed in size (setFixedSize pins its
             # minimum to its maximum) to exactly what the table's
-            # own measurements demand, per the pure sizing function.
+            # own measurements demand, per the pure sizing function:
+            # the rendered section sizes (both headers re-resized
+            # to contents, the wider of the header text and the
+            # cell content), the headers' own size hints, and the
+            # frame width.
             assert (
                 win._objective_panel.minimumWidth()
                 == win._objective_panel.maximumWidth()
@@ -411,20 +448,22 @@ class TestMainWindowStartup:
                 == win._objective_panel.maximumHeight()
                 > 0
             )
+            table = win._objective_table
+            table.horizontalHeader().resizeSections()
+            table.verticalHeader().resizeSections()
             width, height = gui_window._objective_panel_size(
                 win._objective_heading.sizeHint(),
                 [
-                    win._objective_table.horizontalHeader().sectionSizeHint(c)
-                    + gui_window._CHECKBOX_INSET
+                    table.horizontalHeader().sectionSize(c)
                     for c in range(win._objective_model.columnCount())
                 ],
                 [
-                    win._objective_table.verticalHeader().sectionSizeHint(r)
+                    table.verticalHeader().sectionSize(r)
                     for r in range(win._objective_model.rowCount())
                 ],
-                win._objective_table.verticalHeader().sizeHint().width(),
-                win._objective_table.horizontalHeader().sizeHint().height(),
-                win._objective_table.frameWidth(),
+                table.verticalHeader().sizeHint().width(),
+                table.horizontalHeader().sizeHint().height(),
+                table.frameWidth(),
                 gui_window._OBJECTIVE_PANEL_MARGINS,
                 gui_window._OBJECTIVE_PANEL_SPACING,
             )
@@ -440,6 +479,205 @@ class TestMainWindowStartup:
             # widget's own flag (as the progress-strip assertion
             # does).
             assert not win._objective_heading.isHidden()
+        finally:
+            _close_window(win)
+
+    def test_objective_panel_width_uses_rendered_section_sizes(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The panel's fixed width fits the rendered column sections.
+
+        The width formula must use the section sizes the view
+        actually renders (the wider of the header text and the cell
+        content), not the header-text-only size hints: at the app's
+        12 pt font the value cells are wider than the short species
+        headers, and a header-only formula comes out narrow enough
+        to clip the last column.
+        """
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            font: QFont = _app_font_12pt()
+            win._objective_table.setFont(font)
+            win._objective_heading.setFont(font)
+            win._objective_model.set_table(_objective_test_table())
+            win._fit_objective_panel()
+            table = win._objective_table
+            h: QHeaderView = table.horizontalHeader()
+            v: QHeaderView = table.verticalHeader()
+            h.resizeSections()
+            v.resizeSections()
+            # The crafted table discriminates: some rendered column is
+            # wider than the header-text-only formula.
+            assert any(
+                h.sectionSize(c)
+                > h.sectionSizeHint(c) + gui_window._CHECKBOX_INSET
+                for c in range(win._objective_model.columnCount())
+            )
+            # Every rendered column fits its widest cell.
+            for c in range(win._objective_model.columnCount()):
+                widest: int = 0
+                for r in range(win._objective_model.rowCount()):
+                    hint: QSize = table.itemDelegate().sizeHint(
+                        QStyleOptionViewItem(),
+                        win._objective_model.index(r, c),
+                    )
+                    widest = max(widest, hint.width())
+                assert h.sectionSize(c) >= widest
+            width, height = gui_window._objective_panel_size(
+                win._objective_heading.sizeHint(),
+                [
+                    h.sectionSize(c)
+                    for c in range(win._objective_model.columnCount())
+                ],
+                [
+                    v.sectionSize(r)
+                    for r in range(win._objective_model.rowCount())
+                ],
+                v.sizeHint().width(),
+                h.sizeHint().height(),
+                table.frameWidth(),
+                gui_window._OBJECTIVE_PANEL_MARGINS,
+                gui_window._OBJECTIVE_PANEL_SPACING,
+            )
+            assert (
+                win._objective_panel.width(),
+                win._objective_panel.height(),
+            ) == (width, height)
+        finally:
+            _close_window(win)
+
+    def test_objective_cell_value_clears_the_checkbox_inset(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cell's value text sits clear of the checkbox, fully drawn.
+
+        The delegate paints an opaque checkbox over each cell's left
+        inset, so the value text must be shifted past it: no glyph
+        may start inside the inset, and the whole text must be
+        visible, ending near the inset plus the style's text margin
+        plus the font-metrics width (a covered start or a clipped
+        end would shorten the visible span).
+        """
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            font: QFont = _app_font_12pt()
+            win._objective_table.setFont(font)
+            win._objective_heading.setFont(font)
+            win._objective_model.set_table(_objective_test_table())
+            win._fit_objective_panel()
+            table = win._objective_table
+            h: QHeaderView = table.horizontalHeader()
+            v: QHeaderView = table.verticalHeader()
+            h.resizeSections()
+            v.resizeSections()
+            # Lay the table out explicitly (the test window is never
+            # shown): give it its full content size so the headers
+            # and viewport are positioned, then grab the viewport —
+            # `visualRect` is in viewport coordinates, so no parent
+            # mapping is involved.
+            table.resize(
+                v.sizeHint().width()
+                + sum(
+                    h.sectionSize(c)
+                    for c in range(win._objective_model.columnCount())
+                )
+                + 2 * table.frameWidth(),
+                h.sizeHint().height()
+                + sum(
+                    v.sectionSize(r)
+                    for r in range(win._objective_model.rowCount())
+                )
+                + 2 * table.frameWidth(),
+            )
+            for _ in range(20):
+                qapp.processEvents()
+                time.sleep(0.002)
+            assert table.viewport().width() > 0
+            assert table.viewport().height() > 0
+            model = win._objective_model
+            idx = model.index(1, model.columnCount() - 1)
+            cell = table.visualRect(idx)
+            assert cell.width() > 0 and cell.height() > 0
+            text: str | None = model.data(idx, Qt.ItemDataRole.DisplayRole)
+            assert isinstance(text, str)
+            tw: int = table.fontMetrics().horizontalAdvance(text)
+            # The probed text is wide enough that the defect (a
+            # quarter of it hidden under the 24 px checkbox) is
+            # resolvable at the pixel level.
+            assert tw >= 30
+            pixmap = table.viewport().grab()
+            img: QImage = pixmap.toImage()
+            s_x: float = pixmap.width() / table.viewport().width()
+            s_y: float = pixmap.height() / table.viewport().height()
+
+            def local_dark_xs() -> list[float]:
+                dark: list[float] = []
+                for yv in range(cell.y(), cell.y() + cell.height()):
+                    gy: int = int(round(yv * s_y))
+                    if gy < 0 or gy >= img.height():
+                        continue
+                    for xv in range(cell.x(), cell.x() + cell.width()):
+                        gx: int = int(round(xv * s_x))
+                        if gx < 0 or gx >= img.width():
+                            continue
+                        if (img.pixel(gx, gy) & 0xFF) < 128:
+                            dark.append(xv - cell.x())
+                return dark
+
+            dark = local_dark_xs()
+            assert dark, "the cell drew no dark pixels at all"
+            first_dark: float = min(dark)
+            last_dark: float = max(dark)
+            # The text starts to the right of the checkbox's inset
+            # (a little slack for antialiasing): it is not covered
+            # at its beginning.
+            assert first_dark >= gui_window._CHECKBOX_INSET - 2
+            # The full text is visible: the ink span matches the
+            # font-metrics width of the display string.
+            assert abs((last_dark - first_dark) - tw) <= 8
+            # The text ends where a shifted text should end: inset
+            # plus the style's 2 px text margin plus the full width
+            # (the ink trail ends a pixel or two short of the
+            # advance width): it is not clipped at the cell edge.
+            assert abs(last_dark - (gui_window._CHECKBOX_INSET + 2 + tw)) <= 10
+            # Guard: the checkbox itself is still drawn in the
+            # inset: its white fill (well above the cell background)
+            # at the cell's vertical middle.
+            mid_y: int = int(round((cell.y() + cell.height() // 2) * s_y))
+            fill: bool = any(
+                img.pixel(int(round((cell.x() + lx) * s_x)), mid_y) & 0xFF
+                >= 250
+                for lx in range(3, 12)
+            )
+            assert fill, "the checkbox's white fill is missing from the inset"
         finally:
             _close_window(win)
 
