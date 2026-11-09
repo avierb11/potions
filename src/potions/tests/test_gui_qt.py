@@ -38,7 +38,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import rcParams
 from matplotlib.figure import Figure
+from matplotlib.legend import Legend
+from matplotlib.text import Text
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QFont, QImage, QMouseEvent
 from PySide6.QtWidgets import (
@@ -2028,6 +2031,80 @@ class TestFigurePanel:
             for path in paths:
                 assert path.parent == out_dir
                 assert path.is_file()
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_hidpi_scaling_uses_the_canvas_dpi(
+        self, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The display's device pixel ratio rescales a figure from the
+        canvas dpi, not the publication dpi.
+
+        Under the package's rcParams a figure is stamped with a
+        300 dpi when it is constructed, before the panel restates it
+        at `CANVAS_DPI`.  A canvas that rescaled from that stale
+        stamp would render at the ratio times 300 (three times too
+        large on a ratio of 4/3) instead of times `CANVAS_DPI`.
+        """
+        # `main` sets these rcParams before building the figures;
+        # the panel's tests bypass it, so the tests set them here.
+        monkeypatch.setitem(rcParams, "figure.dpi", 300)
+        monkeypatch.setitem(rcParams, "font.size", 12)
+        dpr: float = 4 / 3
+        panel = gui_figure_panel.FigurePanel()
+        try:
+            panel.set_figures([_figure("A"), _figure("B")])
+            for canvas in panel._canvases:
+                canvas._set_device_pixel_ratio(dpr)
+            for canvas in panel._canvases:
+                assert canvas.figure.dpi == pytest.approx(
+                    gui_figure_panel.CANVAS_DPI * dpr, rel=1e-6
+                )
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_hidpi_legend_text_stays_at_canvas_scale(
+        self, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A legend's text renders at the base font of the canvas dpi,
+        not the publication dpi, on a high-dpi display.
+
+        At a device pixel ratio of 4/3 the figure's dpi is the
+        canvas dpi times the ratio, so the 12-point legend text
+        occupies a bounded number of physical pixels; a figure
+        rescaled from the 300 dpi publication stamp occupies three
+        times as many and the legend covers the plot.
+        """
+        monkeypatch.setitem(rcParams, "figure.dpi", 300)
+        monkeypatch.setitem(rcParams, "font.size", 12)
+        dpr: float = 4 / 3
+        panel = gui_figure_panel.FigurePanel()
+        try:
+            fig: Figure = Figure(figsize=(15, 7))
+            ax = fig.add_subplot()
+            ax.plot([0.0, 1.0], [0.0, 1.0], label="Series")
+            leg: Legend = fig.legend()
+            panel.set_figures([("Streamflow", fig)])
+
+            canvas = panel._canvases[0]
+            canvas._set_device_pixel_ratio(dpr)
+            renderer = canvas.get_renderer()  # type: ignore[no-untyped-call]
+            # One em of the 12-point base font at the rescaled dpi.
+            em: float = 12 / 72 * gui_figure_panel.CANVAS_DPI * dpr
+            texts: list[Text] = leg.get_texts()
+            assert texts, "Expected the legend to hold text."
+            max_height: float = max(
+                text.get_window_extent(renderer).height for text in texts
+            )
+            # Measured line heights of 12-point text sit at or below
+            # one em at the figure dpi, so the 1.5x margin bounds any
+            # font metrics while still rejecting the three-times
+            # larger publication-dpi height.
+            assert max_height <= 1.5 * em
         finally:
             panel.deleteLater()
             _pump()

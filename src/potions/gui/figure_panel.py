@@ -14,9 +14,15 @@ same handlers — flip between the pages.
 Each figure is attached to a matplotlib Qt canvas.  The package's
 rcParams set a publication dpi (300), which is far too large for an
 interactive canvas, so the panel restates every figure at a screen
-dpi (`CANVAS_DPI`) before attaching.  The canvas then tracks the
-panel size through matplotlib's built-in resize handling, so the
-visible figure always fills the panel.
+dpi (`CANVAS_DPI`) before attaching.  On a high-dpi display the
+canvas rescales that dpi by the display's device pixel ratio, so
+the panel restates the figure's construction-time dpi stamp to
+match as well: matplotlib bases the rescale on the stamp, and
+recent versions keep the rcParams' publication dpi in it, which
+would otherwise render every font three times too large and cover
+the plot.  The canvas then tracks the panel size through
+matplotlib's built-in resize handling, so the visible figure
+always fills the panel.
 """
 
 import re
@@ -95,10 +101,12 @@ class FigurePanel(QWidget):
         """
         Replace the panel's pages with the given titled figures.
 
-        Every figure is restated at `CANVAS_DPI` and attached to a
-        fresh canvas.  The previously visible page is kept when it
-        still exists, so a rebuild (e.g. after a plot-selection
-        change) does not move the user to a different figure.
+        Every figure is restated at `CANVAS_DPI` — its dpi and the
+        construction-time stamp the high-dpi rescale bases itself
+        on — and attached to a fresh canvas.  The previously
+        visible page is kept when it still exists, so a rebuild
+        (e.g. after a plot-selection change) does not move the user
+        to a different figure.
 
         Args:
             figures: The (page title, figure) pairs, in page order.
@@ -112,9 +120,18 @@ class FigurePanel(QWidget):
 
         for title, fig in figures:
             fig.set_dpi(CANVAS_DPI)
-            # matplotlib's Qt canvas is untyped source inside the
-            # py.typed matplotlib package, so the constructor call
-            # carries the only type-ignore in this module.
+            # `set_dpi` leaves the construction-time `_original_dpi`
+            # stamp in place, and recent matplotlibs keep the
+            # rcParams' publication dpi in that stamp; the canvas'
+            # high-dpi hook rescales the figure by the display ratio
+            # times the stamp, so it is restated to the canvas dpi
+            # here as well (the module docstring explains the effect
+            # of a stale stamp).  The stamp is private, hence the
+            # ignore.
+            fig._original_dpi = CANVAS_DPI  # type: ignore[attr-defined]
+            # The Qt canvas is untyped source inside the py.typed
+            # matplotlib package, so the constructor call carries a
+            # type-ignore.
             canvas: FigureCanvasQTAgg = FigureCanvasQTAgg(
                 fig
             )  # type: ignore[no-untyped-call]
