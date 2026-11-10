@@ -1091,9 +1091,12 @@ def make_zone_concentrations_figure(
     last day (the partial 2025 water year) still plots only the days
     the record carries.
 
-    The model emits a ``{species}_{zone}`` column for every zone
-    (each zone keeps the full state vector of every species), so all
-    selected zone-species pairs plot.
+    The model emits a ``{species}_{zone}`` column for every network
+    species in every zone, but a derived species (DIC, the aqueous
+    carbonate sum) is carried only as ``{species}_riv``.  A selected
+    zone-species pair whose column the frame does not carry is
+    skipped, and the zone and species legend rows list only what was
+    drawn.
 
     A previous run's results, when the overlay frame is given, are
     drawn first and faintly (half transparent, unlabeled), so the
@@ -1107,8 +1110,10 @@ def make_zone_concentrations_figure(
     Args:
         rt_sim: The reactive-transport simulation DataFrame, for the
             per-zone concentrations (``{species}_{zone}``).
-        species: The network species to plot.
-        zones: The zones to plot.
+        species: The network species to plot; a species without a
+            per-zone column is skipped.
+        zones: The zones to plot; a zone without a column for any
+            selected species is skipped.
         window: The plotting window, as
             `potions.gui.common.water_year_window` returns it.
         overlay_rt_sim: The previous run's reactive-transport
@@ -1153,14 +1158,31 @@ def make_zone_concentrations_figure(
 
     for zone in zones:
         for i, species_name in enumerate(species):
-            linestyle: Linestyle = LINESTYLE_CYCLE[i % len(LINESTYLE_CYCLE)]
+            column: str = f"{species_name}_{zone}"
+            if column not in rt_plot.columns:
+                continue
             ax.plot(
                 rt_plot.index,
-                rt_plot[f"{species_name}_{zone}"],
+                rt_plot[column],
                 color=zone_colors[zone],
-                linestyle=linestyle,
+                linestyle=LINESTYLE_CYCLE[i % len(LINESTYLE_CYCLE)],
                 linewidth=1,
             )
+
+    drawn_zones: set[str] = {
+        zone
+        for zone in zones
+        if any(f"{name}_{zone}" in rt_plot.columns for name in species)
+    }
+    drawn_species: set[str] = {
+        name
+        for name in species
+        if any(f"{name}_{zone}" in rt_plot.columns for zone in zones)
+    }
+    plotted_zones: list[str] = [zone for zone in zones if zone in drawn_zones]
+    plotted_species: list[str] = [
+        name for name in species if name in drawn_species
+    ]
 
     ax.set_title("Concentration")
     ax.set_ylabel("Concentration (mol/L)")
@@ -1172,10 +1194,13 @@ def make_zone_concentrations_figure(
 
     zone_row: Legend = _attach_legend(
         fig,
-        [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in zones],
-        [zone_labels[zone] for zone in zones],
+        [
+            Line2D([], [], color=zone_colors[zone], linewidth=2)
+            for zone in plotted_zones
+        ],
+        [zone_labels[zone] for zone in plotted_zones],
         title="Zone",
-        ncol=max(len(zones), 1),
+        ncol=max(len(plotted_zones), 1),
     )
     species_row: Legend = _attach_legend(
         fig,
@@ -1184,12 +1209,14 @@ def make_zone_concentrations_figure(
                 [],
                 [],
                 color="k",
-                linestyle=LINESTYLE_CYCLE[i % len(LINESTYLE_CYCLE)],
+                linestyle=LINESTYLE_CYCLE[
+                    species.index(name) % len(LINESTYLE_CYCLE)
+                ],
                 linewidth=2,
             )
-            for i in range(len(species))
+            for name in plotted_species
         ],
-        list(species),
+        list(plotted_species),
         title="Species",
         above=zone_row,
     )

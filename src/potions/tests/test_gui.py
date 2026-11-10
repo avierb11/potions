@@ -145,14 +145,23 @@ def _synthetic_rt_sim(
     zones: list[str] = ZONE_ORDER,
     snow_zones: list[str] = SNOW_ZONES,
 ) -> pd.DataFrame:
-    """A synthetic reactive-transport frame with every plotted column."""
-    species: list[str] = ["DOC", "DIC", "Ca++"]
+    """
+    A synthetic reactive-transport frame with every plotted column.
+
+    The frame mirrors the model's real schema: every river species is
+    carried as a ``{species}_riv`` column, but only the network species
+    carry a ``{species}_{zone}`` column.  DIC is a derived species, so
+    it appears only as ``DIC_riv``.
+    """
+    river_species: list[str] = ["DOC", "DIC", "Ca++"]
+    network_species: list[str] = ["DOC", "Ca++"]
     non_snow_zones: list[str] = [
         zone for zone in zones if zone not in snow_zones
     ]
     data: dict[str, np.ndarray] = {}
-    for species_name in species:
+    for species_name in river_species:
         data[f"{species_name}_riv"] = np.arange(len(index), dtype=float)
+    for species_name in network_species:
         for zone in zones:
             data[f"{species_name}_{zone}"] = np.arange(len(index), dtype=float)
     for mineral in minerals:
@@ -2766,6 +2775,9 @@ class TestZoneConcentrationsFigure:
     """The zone concentrations figure on synthetic data."""
 
     SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+    # DIC is derived, so the frame carries no per-zone DIC column and
+    # only the network species plot.
+    NETWORK_SPECIES: tuple[str, ...] = ("DOC", "Ca++")
     ZONES: tuple[str, ...] = tuple(ZONE_ORDER)
 
     def test_axes_and_labels(self, input_data: gui_data.GuiInputData) -> None:
@@ -2797,11 +2809,13 @@ class TestZoneConcentrationsFigure:
             window,
         )
         lines = _lines(fig.axes[0])
-        assert len(lines) == len(self.ZONES) * len(self.SPECIES)
+        assert len(lines) == len(self.ZONES) * len(self.NETWORK_SPECIES)
         rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
         for position, line in enumerate(lines):
-            zone = self.ZONES[position // len(self.SPECIES)]
-            species = self.SPECIES[position % len(self.SPECIES)]
+            zone = self.ZONES[position // len(self.NETWORK_SPECIES)]
+            species = self.NETWORK_SPECIES[
+                position % len(self.NETWORK_SPECIES)
+            ]
             assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
                 ZONE_COLORS[zone]
             )
@@ -2865,15 +2879,15 @@ class TestZoneConcentrationsFigure:
         assert species_row.get_frame().get_visible() is False
         assert species_row.get_title().get_text() == "Species"
         assert [text.get_text() for text in species_row.get_texts()] == list(
-            self.SPECIES
+            self.NETWORK_SPECIES
         )
         # The species row's handles carry the species' linestyles.
-        for handle, i in zip(
-            species_row.legend_handles, range(len(self.SPECIES))
+        for handle, species in zip(
+            species_row.legend_handles, self.NETWORK_SPECIES
         ):
             assert isinstance(handle, Line2D)
             assert handle.get_linestyle() == LINESTYLE_CYCLE[
-                i % len(LINESTYLE_CYCLE)
+                self.SPECIES.index(species) % len(LINESTYLE_CYCLE)
             ]
         # Both rows sit below the axes, the species row above the zone
         # row, without overlapping it.
@@ -2891,7 +2905,7 @@ class TestZoneConcentrationsFigure:
         rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
 
         overlay_rt: pd.DataFrame = rt_sim.copy()
-        for species in self.SPECIES:
+        for species in self.NETWORK_SPECIES:
             for zone in self.ZONES:
                 overlay_rt[f"{species}_{zone}"] = (
                     rt_sim[f"{species}_{zone}"] + 1.0
@@ -2905,7 +2919,7 @@ class TestZoneConcentrationsFigure:
             overlay_rt_sim=overlay_rt,
         )
         lines = _lines(fig.axes[0])
-        expected_count: int = len(self.ZONES) * len(self.SPECIES)
+        expected_count: int = len(self.ZONES) * len(self.NETWORK_SPECIES)
         # The overlay's lines first (half transparent), then the current.
         assert len(lines) == 2 * expected_count
         assert [_alpha(line) for line in lines] == [
@@ -2915,8 +2929,10 @@ class TestZoneConcentrationsFigure:
             overlay_rt, window
         )
         for position, line in enumerate(lines[:expected_count]):
-            zone = self.ZONES[position // len(self.SPECIES)]
-            species = self.SPECIES[position % len(self.SPECIES)]
+            zone = self.ZONES[position // len(self.NETWORK_SPECIES)]
+            species = self.NETWORK_SPECIES[
+                position % len(self.NETWORK_SPECIES)
+            ]
             np.testing.assert_allclose(
                 np.asarray(line.get_ydata()),
                 overlay_plot[f"{species}_{zone}"].to_numpy(),
@@ -2938,9 +2954,57 @@ class TestZoneConcentrationsFigure:
             window,
             overlay_rt_sim=overlay_rt,
         )
-        expected_count: int = len(self.ZONES) * len(self.SPECIES)
+        expected_count: int = len(self.ZONES) * len(self.NETWORK_SPECIES)
         # One overlay line missing, all current lines present.
         assert len(_lines(fig.axes[0])) == (expected_count - 1) + expected_count
+
+    def test_skips_derived_species_without_zone_columns(self) -> None:
+        """A derived species carried only as ``_riv`` does not crash."""
+        index = pd.date_range("2020-01-01", periods=3, freq="D")
+        sim = pd.DataFrame(
+            {
+                "DOC_surface_hs": [1.0, 2.0, 3.0],
+                "Ca++_surface_hs": [3.0, 2.0, 1.0],
+                "DOC_riv": [1.5, 2.5, 3.5],
+                "DIC_riv": [0.5, 1.5, 2.5],
+                "Ca++_riv": [2.0, 2.0, 2.0],
+            },
+            index=index,
+        )
+        fig = gui_plots.make_zone_concentrations_figure(
+            sim,
+            ["DOC", "DIC", "Ca++"],
+            ["surface_hs"],
+            (index[0], index[-1]),
+        )
+        assert len(_lines(fig.axes[0])) == 2
+        zone_row, species_row = fig.legends
+        assert [text.get_text() for text in zone_row.get_texts()] == [
+            "Surface (HS)"
+        ]
+        assert [text.get_text() for text in species_row.get_texts()] == [
+            "DOC",
+            "Ca++",
+        ]
+
+    def test_zone_legend_lists_only_plotted_zones(self) -> None:
+        """A selected zone without any concentration column is omitted."""
+        index = pd.date_range("2020-01-01", periods=3, freq="D")
+        sim = pd.DataFrame(
+            {"DOC_surface_hs": [1.0, 2.0, 3.0]},
+            index=index,
+        )
+        fig = gui_plots.make_zone_concentrations_figure(
+            sim,
+            ["DOC"],
+            ["snow_hs", "surface_hs"],
+            (index[0], index[-1]),
+        )
+        assert len(_lines(fig.axes[0])) == 1
+        zone_row, _species_row = fig.legends
+        assert [text.get_text() for text in zone_row.get_texts()] == [
+            "Surface (HS)"
+        ]
 
 
 class TestRateFigure:

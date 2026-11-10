@@ -5191,6 +5191,45 @@ class TestModelSelection:
         finally:
             _close_window(win)
 
+    def test_full_run_after_switch_plots_every_page(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A full three-layer run after a switch plots all eight pages.
+
+        The zone-concentration figure must skip the derived river
+        species (DIC carries no per-zone column) instead of raising.
+        """
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._model_combo.setCurrentIndex(
+                win._model_combo.findData("three_layer")
+            )
+            _wait_until(
+                lambda: win._input_data.spec.key == "three_layer"
+                and win._worker is None
+                and win._results is not None
+            )
+            _pump(50)
+
+            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel._titles[6] == "Zone concentrations"
+        finally:
+            _close_window(win)
+
     def test_switch_filters_history_to_current_model(
         self,
         qapp: QApplication,
