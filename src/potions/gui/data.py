@@ -1,14 +1,15 @@
 """
-The data loader and run machinery of the East River lateral-model
-calibration GUI.
+The data loader and run machinery of the East River calibration GUI.
 
 Reads the East River series CSV that ships with the package
 (``potions/gui/data/east_river_series.csv``, the sole data source of
 the GUI; a different record can be supplied by passing a path to
 `load_input_data`) and assembles everything a run needs: the SOC /
-DOC / calcite reaction network, the East River parameter bounds, the
+DOC / calcite reaction network, the model's parameter bounds, the
 reactive-transport zone configurations, the forcing, the
-precipitation concentrations, and the measured series.
+precipitation concentrations, and the measured series.  The model
+structure itself is selected by a `potions.gui.model_specs.ModelSpec`
+key; every spec runs over the same East River record.
 
 The CSV carries the site's daily record from 2014-05-02 to
 2025-09-18: the meteorological forcing (``ppt``, ``temp``, ``pet``),
@@ -42,7 +43,13 @@ import numpy as np
 import pandas as pd
 import potions as pt
 from potions.calibration import build_rt_bounds
-from potions.gui.common import RIVER_SPECIES, SNOW_ZONES, WATER_YEARS, ZONE_ORDER
+from potions.gui.common import RIVER_SPECIES, WATER_YEARS
+from potions.gui.model_specs import (
+    DEFAULT_MODEL_KEY,
+    DEFAULT_MODEL_SPEC,
+    ModelSpec,
+    get_model_spec,
+)
 from potions.hydro_model import HydrologicalModel
 from potions.reactive_transport.common_networks import get_soc_calcite_network
 from scipy.optimize import root_scalar
@@ -62,54 +69,6 @@ DEFAULT_CSV_PATH: Final[Path] = (
 # record so the model reaches a representative state before the first
 # day of the record.
 NUM_SPINUP_DAYS: Final[int] = 2 * 365
-
-# The reactive-transport zone configurations of the East River model:
-# the two snow zones carry no chemistry, and the four non-snow zones
-# do both the mineral reactions and the aqueous speciation.
-LATERAL_THREE_LAYER_CONFIGS: Final[dict[str, pt.RtZoneConfiguration]] = {
-    "snow_hs": pt.RtZoneConfiguration(do_reactions=False, do_speciation=False),
-    "snow_rp": pt.RtZoneConfiguration(do_reactions=False, do_speciation=False),
-    "surface_hs": pt.RtZoneConfiguration(do_reactions=True, do_speciation=True),
-    "surface_rp": pt.RtZoneConfiguration(do_reactions=True, do_speciation=True),
-    "ground_hs": pt.RtZoneConfiguration(do_reactions=True, do_speciation=True),
-    "ground_rp": pt.RtZoneConfiguration(do_reactions=True, do_speciation=True),
-}
-
-# The East River per-zone reactive water storage bounds, in mm, by
-# layer: the snow storage is fixed, and the non-snow zones are
-# calibrated.
-_LAYER_MAX_WATER_BOUNDS: Final[dict[str, tuple[float, float]]] = {
-    "snow": (5000.0, 5000.0),
-    "surface": (150.0, 1500.0),
-    "ground": (100.0, 5000.0),
-}
-
-# The East River per-layer kinetic bounds, in the order the model
-# carries the four parameters of each mineral (sw_threshold, sw_exp,
-# q_10, k_a).  The surface layer is fully calibrated; the ground
-# layer fixes the soil-moisture and temperature dependencies
-# (degenerate bounds) and calibrates only k_a.
-_LAYER_KINETIC_BOUNDS: Final[dict[str, dict[str, tuple[float, float]]]] = {
-    "surface": {
-        "sw_threshold": (0.0, 1.0),
-        "sw_exp": (0.5, 2.5),
-        "q_10": (1.0, 5.0),
-        "k_a": (-15.0, -5.0),
-    },
-    "ground": {
-        "sw_threshold": (0.0, 0.0),
-        "sw_exp": (0.0, 0.0),
-        "q_10": (1.0, 1.0),
-        "k_a": (-15.0, -5.0),
-    },
-}
-
-# The East River bounds of the calibrated total exchange-site
-# concentrations, in log10 mol/L, per layer.
-_LAYER_INITIAL_STATE_BOUNDS: Final[dict[str, tuple[float, float]]] = {
-    "surface": (-5.0, -1.0),
-    "ground": (-7.0, -3.0),
-}
 
 # The (frozen) initial concentration of every mineral in a reactive
 # zone, in mol/L: the mineral state does not vary over the simulation,
@@ -161,6 +120,7 @@ class GuiInputData:
     Assembled once by `load_input_data` and cached for the session.
 
     Attributes:
+        spec: The selected model's spec.
         network: The SOC / DOC / calcite reaction network of the run.
         bounds: The flat parameter bounds, in the order of the run's
             parameter array: the hydro parameters, the per-zone
@@ -180,6 +140,7 @@ class GuiInputData:
             spin-up and on days without a sample.
     """
 
+    spec: ModelSpec
     network: pt.ReactionNetwork
     bounds: dict[str, tuple[float, float]]
     zone_configs: dict[str, pt.RtZoneConfiguration]
@@ -210,84 +171,109 @@ class GuiRunResults:
 
 
 # ==== Functions ==== #
-def _layer_of(zone_name: str) -> str:
+def _max_water_bounds(zone_class: type) -> tuple[float, float]:
     """
-    The layer of a lateral-model zone name.
-
-    The six zone names are the layer name plus the region tag
-    (hillslope ``_hs`` or riparian ``_rp``), so the layer is the
-    prefix before the first underscore.
+    The reactive water-storage bounds of a zone class.
 
     Args:
-        zone_name: The name of a zone of the East River model.
+        zone_class: The zone's hydrology class.
 
     Returns:
-        The layer name (snow, surface, or ground).
+        The lower and upper bounds of the zone's ``max_water``
+        parameter, in millimeters.
+
+    Raises:
+        ValueError:
+            Raised for a zone class the GUI has no storage bounds for.
     """
-    return zone_name.split("_", 1)[0]
+    if issubclass(zone_class, pt.SnowZone):
+        return (5000.0, 5000.0)
+    if issubclass(zone_class, pt.SurfaceZone):
+        return (150.0, 1500.0)
+    if issubclass(zone_class, pt.SubsurfaceZone):
+        return (150.0, 1500.0)
+    if issubclass(zone_class, pt.SubsurfaceZoneB):
+        return (100.0, 5000.0)
+    raise ValueError(
+        f"No max_water bounds for zone class {zone_class.__name__}."
+    )
 
 
-def _bounds(network: pt.ReactionNetwork) -> dict[str, tuple[float, float]]:
+def _initial_state_bounds(zone_class: type) -> tuple[float, float]:
     """
-    Assemble the East River flat parameter bounds.
+    The exchange-site bounds of a speciation zone class.
+
+    The deep, slow-draining subsurface zone holds a lower exchange-site
+    concentration than the surface and shallow zones.
+
+    Args:
+        zone_class: The zone's hydrology class.
+
+    Returns:
+        The lower and upper bounds of the zone's log10 total
+        exchange-site concentration, in mol/L.
+    """
+    if issubclass(zone_class, pt.SubsurfaceZoneB):
+        return (-7.0, -3.0)
+    return (-5.0, -1.0)
+
+
+def _bounds(
+    spec: ModelSpec, network: pt.ReactionNetwork
+) -> dict[str, tuple[float, float]]:
+    """
+    Assemble the flat parameter bounds of a model spec.
 
     Starts from the generic bounds of `build_rt_bounds` (the hydro
     parameters in the model's order, then each zone's storage and
     per-mineral kinetic parameters, in the model's per-zone order) and
-    applies the East River overrides on the same keys: the per-layer
-    storage and kinetic bounds, the pinned per-column drainage alphas,
-    the calibrated catchment proportion, and the trailing
+    applies the GUI's East River overrides on the same keys: the
+    per-zone-class storage bounds, the pinned per-column drainage
+    alphas, the calibrated catchment proportion, and the trailing
     per-speciation-zone initial-state (exchange-site) bounds.
 
     The key order matches the run's flat parameter array
     (`arr_to_model` / `arr_to_results`).
 
     Args:
+        spec: The selected model's spec.
         network: The reaction network of the run.
 
     Returns:
         The bounds of every flat parameter of the run, in array order.
     """
     bounds: dict[str, tuple[float, float]] = build_rt_bounds(
-        pt.LateralThreeLayerModel,
+        spec.model_class,
         # build_rt_bounds is annotated with the legacy Python-side
         # ReactionNetwork, but it only reads the network's mineral
         # count, so the core network it actually receives at runtime
         # (and the one from_array consumes) is accepted here.
         network,  # type: ignore[arg-type]
-        LATERAL_THREE_LAYER_CONFIGS,
+        spec.zone_configs,
     )
+    zone_classes: dict[str, type] = {
+        zone: spec.model_class.get_zone_type(zone) for zone in spec.zones
+    }
 
-    for zone_name in pt.LateralThreeLayerModel.get_zone_names():
-        layer: str = _layer_of(zone_name)
-        bounds[f"{zone_name}.max_water"] = _LAYER_MAX_WATER_BOUNDS[layer]
+    for zone in spec.zones:
+        bounds[f"{zone}.max_water"] = _max_water_bounds(zone_classes[zone])
 
-        if not LATERAL_THREE_LAYER_CONFIGS[zone_name].do_reactions:
-            continue
-
-        for mineral_id in range(network.num_minerals):
-            for field, bnd in _LAYER_KINETIC_BOUNDS[layer].items():
-                bounds[f"{zone_name}.{field}[{mineral_id}]"] = bnd
-
-    # Pin the per-column drainage-fraction alphas of the lateral
-    # model; the bounds only carry them if the generic hydro bounds do.
-    for fixed_alpha in (
-        "ground_hs.alpha",
-        "ground_rp.alpha",
-    ):
-        if fixed_alpha in bounds:
-            bounds[fixed_alpha] = (1.0, 1.0)
-
+    # A model with more than one surface column splits the catchment
+    # between them, and pins the per-column drainage-fraction alphas.
     if "proportion.1" in bounds:
         bounds["proportion.1"] = (0.25, 0.95)
+        for zone in spec.zones:
+            alpha_key: str = f"{zone}.alpha"
+            if alpha_key in bounds and issubclass(
+                zone_classes[zone],
+                (pt.SubsurfaceZone, pt.SubsurfaceZoneB),
+            ):
+                bounds[alpha_key] = (1.0, 1.0)
 
     if network.has_exchange:
-        for zone_name in pt.LateralThreeLayerModel.get_zone_names():
-            if not LATERAL_THREE_LAYER_CONFIGS[zone_name].do_speciation:
-                continue
-            init_layer: str = _layer_of(zone_name)
-            bounds[f"initial_state.{zone_name}_x"] = (
-                _LAYER_INITIAL_STATE_BOUNDS[init_layer]
+        for zone in spec.speciation_zones:
+            bounds[f"initial_state.{zone}_x"] = _initial_state_bounds(
+                zone_classes[zone]
             )
 
     return bounds
@@ -351,29 +337,38 @@ def _with_spinup(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([spinup, df])
 
 
-def load_input_data(csv_path: Path = DEFAULT_CSV_PATH) -> GuiInputData:
+def load_input_data(
+    csv_path: Path = DEFAULT_CSV_PATH,
+    model_key: str = DEFAULT_MODEL_KEY,
+) -> GuiInputData:
     """
     Load and assemble the GUI inputs from the East River series CSV.
 
-    Builds the reaction network and the East River bounds, reads the
-    CSV, prepends the two-year spin-up, and creates the forcing, the
-    precipitation concentrations, and the measured series.
+    Builds the reaction network and the selected model's bounds, reads
+    the CSV, prepends the two-year spin-up, and creates the forcing,
+    the precipitation concentrations, and the measured series.
 
     Args:
         csv_path: Path to the East River series CSV; defaults to the
             record shipped with the package.
+        model_key: The key of the selected model's spec; defaults to
+            the lateral three-layer model.
 
     Returns:
         The assembled `GuiInputData`.
+
+    Raises:
+        ValueError: Raised for an unknown model key.
     """
+    spec: ModelSpec = get_model_spec(model_key)
     network: pt.ReactionNetwork = get_soc_calcite_network()
-    bounds: dict[str, tuple[float, float]] = _bounds(network)
+    bounds: dict[str, tuple[float, float]] = _bounds(spec, network)
 
     df: pd.DataFrame = _with_spinup(_load_csv(csv_path))
 
     precip_conc: np.ndarray = np.full(
         (
-            len(pt.LateralThreeLayerModel.structure[0]),
+            len(spec.model_class.structure[0]),
             len(df),
             network.num_species,
         ),
@@ -389,9 +384,10 @@ def load_input_data(csv_path: Path = DEFAULT_CSV_PATH) -> GuiInputData:
     conc_df: pd.DataFrame = df[["DOC", "DIC", "Ca++"]]
 
     return GuiInputData(
+        spec=spec,
         network=network,
         bounds=bounds,
-        zone_configs=LATERAL_THREE_LAYER_CONFIGS,
+        zone_configs=spec.zone_configs,
         forc=forc,
         precip_conc=precip_conc,
         q_meas=q_meas,
@@ -463,7 +459,7 @@ def arr_to_model(arr: np.ndarray, input_data: GuiInputData) -> tuple[pt.Model, n
         else []
     )
 
-    model: pt.Model = pt.LateralThreeLayerModel.from_array(
+    model: pt.Model = input_data.spec.model_class.from_array(
         model_params,
         network=input_data.network,
         config=input_data.zone_configs,
@@ -626,9 +622,9 @@ def arr_to_hydro_results(
         The run's `GuiRunResults`, with no reactive-transport
         results.
     """
-    num_hydro: int = pt.LateralThreeLayerModel.get_num_hydro_parameters()
+    num_hydro: int = input_data.spec.model_class.get_num_hydro_parameters()
     hydro_model: HydrologicalModel = (
-        pt.LateralThreeLayerModel.hydro_from_array(
+        input_data.spec.model_class.hydro_from_array(
             arr[:num_hydro], natural_scales=True
         )
     )
@@ -642,20 +638,28 @@ def arr_to_hydro_results(
     return GuiRunResults(hydro=hydro, rt=None)
 
 
-def default_plot_selection() -> PlotSelection:
+def default_plot_selection(
+    spec: ModelSpec = DEFAULT_MODEL_SPEC,
+) -> PlotSelection:
     """
-    The default figure selections: every river species (streamflow
-    on) in the river-concentration figure, every non-snow zone in the
-    storage and zone-concentration figures, the dominant SOC mineral
-    in the reaction-rate figure, and the whole water-year record as
-    the plotting window.
+    The default figure selections for a model spec.
+
+    Every river species (streamflow on) in the river-concentration
+    figure, every non-snow zone of the spec in the storage and
+    zone-concentration figures, the dominant SOC mineral in the
+    reaction-rate figure, and the whole water-year record as the
+    plotting window.
+
+    Args:
+        spec: The selected model's spec; defaults to the lateral
+            three-layer model.
 
     Returns:
         The default `PlotSelection`.
     """
     return PlotSelection(
         species=list(RIVER_SPECIES),
-        zones=[zone for zone in ZONE_ORDER if zone not in SNOW_ZONES],
+        zones=[zone for zone in spec.zones if zone not in spec.snow_zones],
         mineral="SOC(s)",
     )
 # =================== #

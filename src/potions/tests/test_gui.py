@@ -107,6 +107,17 @@ def input_data() -> gui_data.GuiInputData:
     return gui_data.load_input_data(gui_data.DEFAULT_CSV_PATH)
 
 
+@pytest.fixture(scope="session")
+def model_inputs() -> dict[str, gui_data.GuiInputData]:
+    """The East River inputs assembled for every curated model spec."""
+    return {
+        key: gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, model_key=key
+        )
+        for key in model_specs.MODEL_SPECS
+    }
+
+
 def _synthetic_hydro_sim(index: pd.Index) -> pd.DataFrame:
     """A synthetic hydrology simulation frame with the figure columns."""
     data: dict[str, np.ndarray] = {
@@ -326,6 +337,98 @@ class TestLoadInputData:
         assert bounds["ground_hs.max_water"] == (100.0, 5000.0)
         assert bounds["ground_hs.alpha"] == (1.0, 1.0)
         assert bounds["ground_rp.k_a[1]"] == (-15.0, -5.0)
+
+    def test_carries_spec(self) -> None:
+        data = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, model_key="hbv"
+        )
+        assert data.spec.key == "hbv"
+        assert list(data.zone_configs) == data.spec.zones
+
+    def test_rejects_unknown_key(self) -> None:
+        with pytest.raises(ValueError, match="nope"):
+            gui_data.load_input_data(
+                gui_data.DEFAULT_CSV_PATH, model_key="nope"
+            )
+
+
+class TestModelBounds:
+    """The model-generic bounds of every curated spec."""
+
+    @pytest.mark.parametrize(
+        ("key", "total", "pinned"),
+        [
+            ("lateral_three_layer", 83, 28),
+            ("three_layer", 41, 13),
+            ("hbv", 59, 23),
+            ("hbv_lateral", 119, 50),
+        ],
+    )
+    def test_counts(
+        self,
+        model_inputs: dict[str, gui_data.GuiInputData],
+        key: str,
+        total: int,
+        pinned: int,
+    ) -> None:
+        bounds = model_inputs[key].bounds
+        assert len(bounds) == total
+        assert sum(1 for lo, hi in bounds.values() if lo == hi) == pinned
+
+    def test_lateral_unchanged(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        bounds = model_inputs["lateral_three_layer"].bounds
+        assert bounds["surface_hs.max_water"] == (150.0, 1500.0)
+        assert bounds["ground_hs.max_water"] == (100.0, 5000.0)
+        assert bounds["ground_hs.alpha"] == (1.0, 1.0)
+        assert bounds["proportion.1"] == (0.25, 0.95)
+
+    def test_three_layer_has_no_proportion(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        bounds = model_inputs["three_layer"].bounds
+        assert "proportion.1" not in bounds
+        assert bounds["ground.alpha"] == (0.5, 3.0)
+
+    def test_hbv_zone_classes(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        bounds = model_inputs["hbv"].bounds
+        assert bounds["shallow.max_water"] == (150.0, 1500.0)
+        assert bounds["deep.max_water"] == (100.0, 5000.0)
+        assert bounds["shallow.perc"] == (0.0, 5.0)
+        assert bounds["shallow.alpha"] == (0.5, 3.0)
+        assert "proportion.1" not in bounds
+        assert list(bounds)[-3:] == [
+            "initial_state.surface_x",
+            "initial_state.shallow_x",
+            "initial_state.deep_x",
+        ]
+
+    def test_hbv_lateral_pins_all_subsurface_alphas(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        bounds = model_inputs["hbv_lateral"].bounds
+        assert "proportion.1" in bounds
+        for zone in ("shallow_hs", "shallow_rp", "deep_hs", "deep_rp"):
+            assert bounds[f"{zone}.alpha"] == (1.0, 1.0)
+
+    def test_initial_state_by_zone_class(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        bounds = model_inputs["hbv"].bounds
+        assert bounds["initial_state.surface_x"] == (-5.0, -1.0)
+        assert bounds["initial_state.shallow_x"] == (-5.0, -1.0)
+        assert bounds["initial_state.deep_x"] == (-7.0, -3.0)
+
+    def test_precip_conc_has_one_row_per_surface_zone(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        for data in model_inputs.values():
+            assert data.precip_conc.shape[0] == len(
+                data.spec.model_class.structure[0]
+            )
 
 
 class TestArrToModel:
@@ -575,6 +678,17 @@ class TestDefaultPlotSelection:
         assert selection.streamflow is True
         assert selection.water_years_from == WATER_YEARS[0]
         assert selection.water_years_to == WATER_YEARS[-1]
+
+    def test_excludes_snow_zones_for_every_spec(
+        self, model_inputs: dict[str, gui_data.GuiInputData]
+    ) -> None:
+        for data in model_inputs.values():
+            selection = gui_data.default_plot_selection(data.spec)
+            assert selection.zones == [
+                zone
+                for zone in data.spec.zones
+                if zone not in data.spec.snow_zones
+            ]
 
 
 
