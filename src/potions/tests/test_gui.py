@@ -74,6 +74,7 @@ from ..gui.common import (
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
+    ZONE_STACK_ORDER,
     bound_decimals,
     param_label,
     param_symbol,
@@ -385,6 +386,18 @@ class TestArrToModel:
 _MINERAL_NAMES: list[str] = ["SOC(s)", "SOC-lz(s)", "Calcite(s)"]
 
 
+def test_lateral_stack_order_is_deepest_first() -> None:
+    """The partitioning stack lists the deepest layer first."""
+    assert ZONE_STACK_ORDER == [
+        "ground_hs",
+        "ground_rp",
+        "surface_hs",
+        "surface_rp",
+        "snow_hs",
+        "snow_rp",
+    ]
+
+
 class TestParamLabel:
     """Human-readable labels for every parameter-key form."""
 
@@ -412,6 +425,23 @@ class TestParamLabel:
         assert (
             param_label("initial_state.ground_rp_x", _MINERAL_NAMES)
             == "Ground (RP) total sorption sites"
+        )
+
+    def test_initial_state_label_uses_given_zone_labels(self) -> None:
+        labels: dict[str, str] = {"deep_hs": "Deep (HS)"}
+        assert (
+            param_label(
+                "initial_state.deep_hs_x",
+                _MINERAL_NAMES,
+                zone_labels=labels,
+            )
+            == "Deep (HS) total sorption sites"
+        )
+
+    def test_percolation_label(self) -> None:
+        assert (
+            param_label("shallow.perc", _MINERAL_NAMES)
+            == "percolation rate [mm/d]"
         )
 
     def test_unknown_key(self) -> None:

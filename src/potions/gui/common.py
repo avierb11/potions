@@ -42,7 +42,7 @@ series are drawn lighter than measured ones.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -77,6 +77,17 @@ ZONE_ORDER: Final[list[str]] = [
     "surface_rp",
     "ground_hs",
     "ground_rp",
+]
+
+# The lateral model's zones deepest-layer first, for the partitioning
+# figure's stack order.
+ZONE_STACK_ORDER: Final[list[str]] = [
+    "ground_hs",
+    "ground_rp",
+    "surface_hs",
+    "surface_rp",
+    "snow_hs",
+    "snow_rp",
 ]
 
 # Human-readable zone label: the layer name plus the region tag.
@@ -154,6 +165,8 @@ PARAM_LABELS: Final[dict[str, str]] = {
     # Ground zone: lateral outflow = k * s^alpha.
     "k": "discharge coefficient",
     "alpha": "discharge exponent (α)",
+    # HBV subsurface zone: percolation to the next layer.
+    "perc": "percolation rate [mm/d]",
     # Reactive-transport zone storage.
     "max_water": "max reactive water storage [mm]",
     "passive_water_storage": "passive water storage [mm]",
@@ -329,7 +342,11 @@ def set_rc_params() -> None:
     plt.rcParams["axes.titlelocation"] = "left"
 
 
-def param_label(name: str, mineral_names: Sequence[str]) -> str:
+def param_label(
+    name: str,
+    mineral_names: Sequence[str],
+    zone_labels: Mapping[str, str] = ZONE_LABELS,
+) -> str:
     """
     The human-readable label for a flat parameter key.
 
@@ -347,6 +364,8 @@ def param_label(name: str, mineral_names: Sequence[str]) -> str:
         name: The parameter key, as a key of the bounds mapping.
         mineral_names: The mineral names of the network, in the
             network's order, for labeling the bracketed mineral keys.
+        zone_labels: The display name of every zone, for labeling the
+            initial-state keys; defaults to the lateral model's labels.
 
     Returns:
         The label to display for the parameter.
@@ -359,7 +378,7 @@ def param_label(name: str, mineral_names: Sequence[str]) -> str:
 
     if name.startswith("initial_state."):
         zone: str = name.removeprefix("initial_state.").removesuffix("_x")
-        return f"{ZONE_LABELS[zone]} total sorption sites"
+        return f"{zone_labels[zone]} total sorption sites"
 
     if "." not in name:
         raise ValueError(f"Unrecognized parameter key: {name!r}")
