@@ -189,10 +189,15 @@ _PROP_Q_PREFIX: Final[str] = "prop_q_"
 class HydroZoneResults:
     """One zone's per-quantity views of a hydrology run.
 
-    Each series is a renamed view of the corresponding
+    Each series is a relabeled snapshot of the corresponding
     `{prefix}_{zone}` column of the parent `HydroModelResults.simulation`
-    frame. The views share the stored frame's data: mutating a series
-    through this object mutates the stored frame, and vice versa.
+    frame, taken when the view is created. This project pins pandas
+    >= 3, in which Copy-on-Write is unconditional: a write made through
+    this object never reaches the stored frame, and a later change to
+    the stored frame is not reflected in an already-taken view. To
+    mutate the results, write through `HydroModelResults.to_dataframe()`
+    or its `simulation` field and re-access: every accessor access
+    returns a fresh snapshot of the stored frame.
 
     Attributes:
         zone: The name of the zone these series belong to.
@@ -225,8 +230,9 @@ class HydroModelResults:
     """A type containing the results of a hydrologic model run.
 
     The flat `simulation` frame is the sole storage: every named
-    accessor is a cheap view over it (a renamed sub-frame or column),
-    and `to_dataframe()` returns the stored frame by identity.
+    accessor is a cheap view over it (a renamed sub-frame or column —
+    a fresh snapshot object on each access), and `to_dataframe()` is
+    the only accessor that returns the stored frame by identity.
 
     The per-zone views partition the frame's `{prefix}_{zone}` columns,
     treating zone names as opaque labels. If one zone name were a
@@ -393,9 +399,14 @@ class HydroModelResults:
     def to_dataframe(self) -> DataFrame:
         """The stored flat simulation frame, returned by identity.
 
-        The named accessors are views over this frame and it is the
-        sole storage, so a mutation made through a view is visible
-        here.
+        This is the only accessor that returns the stored object
+        itself, so it is also the way to mutate the results: a write
+        through it (or through the `simulation` field) is what later
+        accessor accesses read, because each of those returns a fresh
+        snapshot of the stored frame. A write made through a named
+        accessor does not reach this frame: this project pins pandas
+        >= 3, in which Copy-on-Write makes such writes no-ops (and
+        pandas may flag them with a `ChainedAssignmentError`).
         """
         return self.simulation
 
@@ -447,13 +458,18 @@ class HydroModelResults:
 class RtZoneResults:
     """One zone's views of a reactive-transport run.
 
-    ``species`` is a renamed view of the zone's ``{species}_{zone}``
-    columns — one column per network species, including mineral and
-    exchange species. ``mineral_rates`` is a renamed view of the
-    zone's ``{mineral}_rate_{zone}`` columns, or None when the zone
-    performs no mineral reactions. Both views share the stored frame's
-    data: mutating a column through this object mutates the stored
-    frame, and vice versa.
+    ``species`` is a relabeled snapshot of the zone's
+    ``{species}_{zone}`` columns — one column per network species,
+    including mineral and exchange species. ``mineral_rates`` is a
+    relabeled snapshot of the zone's ``{mineral}_rate_{zone}``
+    columns, or None when the zone performs no mineral reactions. This
+    project pins pandas >= 3, in which Copy-on-Write is unconditional:
+    a write made through either frame never reaches the parent
+    `RtModelResults.simulation` frame, and a later change to that
+    frame is not reflected in an already-taken view. To mutate the
+    results, write through `RtModelResults.to_dataframe()` or its
+    ``simulation`` field and re-access: every accessor access returns
+    a fresh snapshot of the stored frame.
     """
 
     zone: str
@@ -466,8 +482,9 @@ class RtModelResults:
     """A type containing the results of a reactive transport model run.
 
     The flat `simulation` frame is the sole storage: every named
-    accessor is a cheap view over it (a renamed sub-frame), and
-    `to_dataframe()` returns the stored frame by identity.
+    accessor is a cheap view over it (a renamed sub-frame — a fresh
+    snapshot object on each access), and `to_dataframe()` is the only
+    accessor that returns the stored frame by identity.
 
     Unlike a hydrology frame, an RT frame is not self-describing: no
     column pattern alone recovers the zone names, so the per-zone and
@@ -652,9 +669,14 @@ class RtModelResults:
     def to_dataframe(self) -> DataFrame:
         """The stored flat simulation frame, returned by identity.
 
-        The named accessors are views over this frame and it is the
-        sole storage, so a mutation made through a view is visible
-        here.
+        This is the only accessor that returns the stored object
+        itself, so it is also the way to mutate the results: a write
+        through it (or through the `simulation` field) is what later
+        accessor accesses read, because each of those returns a fresh
+        snapshot of the stored frame. A write made through a named
+        accessor does not reach this frame: this project pins pandas
+        >= 3, in which Copy-on-Write makes such writes no-ops (and
+        pandas may flag them with a `ChainedAssignmentError`).
         """
         return self.simulation
 

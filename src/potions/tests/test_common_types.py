@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -427,6 +429,63 @@ def test_rt_setstate_defaults_missing_zone_names() -> None:
     RtModelResults.__setstate__(loaded, state)
     assert loaded.zone_names == []
     pd.testing.assert_frame_equal(loaded.simulation, results.simulation)
+
+
+# ==== Snapshot semantics of the named views (the corrected contract) ==== #
+#
+# The pre-fix docstrings promised that the named accessors were live
+# views: a write through one reached the stored frame, and a later
+# write to the stored frame was visible in already-taken views. Under
+# the project's pandas >= 3 pin (Copy-on-Write unconditional) neither
+# direction holds. This test pins the actual contract the corrected
+# docstrings state: every named accessor access returns a fresh
+# snapshot object; only to_dataframe() returns the stored frame by
+# identity; a write through a named accessor never reaches the stored
+# frame; a write to the stored frame is visible only to fresh accessor
+# accesses, not to already-taken snapshots.
+
+
+def test_views_are_snapshots_not_write_through() -> None:
+    zone: str = HYDRO_ZONES[0]
+    rt_zone: str = RT_ZONES[0]
+
+    # Only to_dataframe() returns the stored frame itself; every named
+    # accessor returns a distinct snapshot object.
+    hydro = _hydro_results(list(HYDRO_ZONES))
+    assert hydro.to_dataframe() is hydro.simulation
+    assert hydro.lateral is not hydro.simulation
+
+    # A write through a named accessor never reaches the stored frame.
+    # pandas 3.0.x flags such writes with ChainedAssignmentError (3.1.x
+    # does not); suppress that version-dependent warning here, since
+    # the no-op on the stored frame below is the behavior under test.
+    lateral = hydro.lateral
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=pd.errors.ChainedAssignmentError
+        )
+        lateral[zone] = 99.0
+    assert (hydro.simulation[f"q_lat_{zone}"] != 99.0).all()
+
+    # A later write to the stored frame is not visible in an
+    # already-taken snapshot; a fresh accessor access reads it.
+    held = hydro.lateral
+    hydro.simulation[f"q_lat_{zone}"] = 55.0
+    assert not (held[zone] == 55.0).all()
+    assert (hydro.lateral[zone] == 55.0).all()
+
+    # The same contract holds for the reactive-transport accessors.
+    rt = _rt_results(list(RT_ZONES))
+    assert rt.to_dataframe() is rt.simulation
+    assert rt.zone(rt_zone).species is not rt.simulation
+
+    zone_view = rt.zone(rt_zone)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=pd.errors.ChainedAssignmentError
+        )
+        zone_view.species[RT_SPECIES[0]] = 99.0
+    assert (rt.simulation[f"{RT_SPECIES[0]}_{rt_zone}"] != 99.0).all()
 
 
 # ==== ModelResults.rt alias and package exports ==== #
