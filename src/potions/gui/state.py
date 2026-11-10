@@ -1,15 +1,14 @@
 """
-Persistence and restoration of the East River lateral-model
-calibration GUI state.
+Persistence and restoration of the East River calibration GUI state.
 
 A run saved from the GUI (the *Save run* button) carries, besides the
 standard run outputs of `potions.result_saving`, a ``gui_state.json``
 file in the run directory with the full state of the GUI at save time:
-the series CSV path, the value and bounds of every parameter (including
-bounds the user has edited), the plot selections, the run mode, and the
-window geometry.  At startup the GUI looks for the most recent saved run
-directory under the ``results`` directory of the current working
-directory and restores from it:
+the series CSV path, the selected model, the value and bounds of every
+parameter (including bounds the user has edited), the plot selections,
+the run mode, and the window geometry.  At startup the GUI looks for
+the most recent saved run directory under the ``results`` directory of
+the current working directory and restores from it:
 
 * a run saved by this GUI (a ``gui_state.json`` is present) restores
   everything exactly, and the figures are built straight from the
@@ -53,12 +52,17 @@ from potions.gui.data import (
     PlotSelection,
     default_plot_selection,
 )
+from potions.gui.model_specs import (
+    DEFAULT_MODEL_KEY,
+    get_model_spec,
+    model_key_for_class_name,
+)
 
 # ==== Constants ==== #
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 4
+GUI_STATE_VERSION: Final[int] = 5
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -71,12 +75,13 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one (4), version 3 (the time-series figure's selection
-# list), version 2 (the last version this GUI has written), and
-# version 1 (the two-splitter layout, whose splitter sizes are mapped
-# onto the current one).
+# the current one (5, the selected model's key), version 4 (the
+# objective-table selection), version 3 (the time-series figure's
+# selection list), version 2 (the last version this GUI has written),
+# and version 1 (the two-splitter layout, whose splitter sizes are
+# mapped onto the current one).
 _ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
-    {1, 2, 3, GUI_STATE_VERSION}
+    {1, 2, 3, 4, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
@@ -121,6 +126,10 @@ class GuiState:
             when the session made no explicit selection (an unset
             selection searches every selectable term) or the state
             predates the selection.
+        model_key: The key of the model spec the session ran; an
+            absent field in a state file means a state saved before
+            the model selector existed, which restores the lateral
+            three-layer model.
     """
 
     csv_path: str | None
@@ -132,6 +141,7 @@ class GuiState:
     save_history: bool = False
     mode: str = MODE_FULL
     objective_terms: list[str] | None = None
+    model_key: str = DEFAULT_MODEL_KEY
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -176,6 +186,7 @@ class GuiState:
                 if self.objective_terms is not None
                 else None
             ),
+            "model_key": self.model_key,
         }
 
     @classmethod
@@ -219,6 +230,7 @@ class GuiState:
             save_history=_optional_save_history(data),
             mode=_optional_mode(data),
             objective_terms=_optional_objective_terms(data),
+            model_key=_optional_model_key(data),
         )
 
 
@@ -244,12 +256,17 @@ class RunHistoryEntry:
         objectives: The objective-function values the run reported:
             one mapping per measured target (the streamflow and the
             river species), each mapping metric name to value.
+        model_key: The key of the model spec the run used; an absent
+            field in a history line means a run recorded before the
+            model selector existed, which belongs to the lateral
+            three-layer model.
     """
 
     timestamp: str
     mode: str
     param_values: dict[str, float]
     objectives: dict[str, dict[str, float]]
+    model_key: str = DEFAULT_MODEL_KEY
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -272,6 +289,7 @@ class RunHistoryEntry:
                 }
                 for target, metrics in self.objectives.items()
             },
+            "model_key": self.model_key,
         }
 # =============== #
 
@@ -603,6 +621,34 @@ def _optional_objective_terms(data: dict[str, object]) -> list[str] | None:
     return list(raw)
 
 
+def _optional_model_key(data: dict[str, object]) -> str:
+    """
+    The optional ``model_key`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's model key, or `DEFAULT_MODEL_KEY` when it is
+        absent (a state saved before the model selector existed
+        restores the lateral three-layer model).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            string or does not name a registered model spec.
+    """
+    raw: object = data.get("model_key", DEFAULT_MODEL_KEY)
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"gui_state.json 'model_key' must be a string, "
+            f"got {type(raw).__name__}."
+        )
+    try:
+        return get_model_spec(raw).key
+    except ValueError as error:
+        raise ValueError(f"gui_state.json {error}") from error
+
+
 def _not_number(value: object) -> bool:
     """Whether a JSON value is not a (non-boolean) number."""
     return not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -661,6 +707,50 @@ def read_gui_state(run_dir: Path) -> GuiState | None:
             file=sys.stderr,
         )
         return None
+
+
+def saved_run_model_key(run_dir: Path) -> str:
+    """
+    The model key a saved run was produced with.
+
+    The run's ``gui_state.json`` is authoritative (a run saved by
+    this GUI records the selected model there).  A run without one (a
+    run saved by an older version of the GUI or by the command-line
+    tools) is identified by the ``model_class`` field of its
+    ``run_info.json``: the top-level file of a hydrology-only run,
+    then the ``hydro`` and ``rt`` copies of a full run.  A run that
+    names no recognized model class, or carries no ``run_info.json``
+    at all, is assumed to be the lateral three-layer model, the
+    GUI's startup default.
+
+    Args:
+        run_dir: The saved run directory to inspect.
+
+    Returns:
+        The key of the run's model spec.
+    """
+    state: GuiState | None = read_gui_state(run_dir)
+    if state is not None:
+        return state.model_key
+    for info_path in (
+        run_dir / "run_info.json",
+        run_dir / "hydro" / "run_info.json",
+        run_dir / "rt" / "run_info.json",
+    ):
+        if not info_path.is_file():
+            continue
+        try:
+            data: object = json.loads(info_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        model_class: object = data.get("model_class")
+        if isinstance(model_class, str):
+            key: str | None = model_key_for_class_name(model_class)
+            if key is not None:
+                return key
+    return DEFAULT_MODEL_KEY
 
 
 def list_run_dirs(results_dir: str | Path = "results") -> list[Path]:
@@ -841,6 +931,8 @@ class SavedRun:
             None for a run saved before the selection existed or
             without a state file (its search falls back to every
             selectable term).
+        model_key: The key of the model spec the run was produced
+            with, resolved by `saved_run_model_key`.
     """
 
     results: GuiRunResults
@@ -853,6 +945,7 @@ class SavedRun:
     mode: str
     restore_note: str | None
     objective_terms: list[str] | None
+    model_key: str
 # =============== #
 
 
@@ -907,6 +1000,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             mode=state.mode,
             restore_note=None,
             objective_terms=state.objective_terms,
+            model_key=state.model_key,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -929,6 +1023,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         restore_note=note,
         # A stateless run never recorded an objective selection.
         objective_terms=None,
+        model_key=saved_run_model_key(run_dir),
     )
 
 

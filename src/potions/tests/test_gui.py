@@ -93,6 +93,7 @@ from ..gui.state import (
     load_saved_run,
     objectives_from_results,
     read_gui_state,
+    saved_run_model_key,
     write_gui_state,
 )
 
@@ -239,6 +240,7 @@ def _full_state(
     save_history: bool = False,
     mode: str = MODE_FULL,
     objective_terms: list[str] | None = None,
+    model_key: str = model_specs.DEFAULT_MODEL_KEY,
 ) -> GuiState:
     """A complete gui_state matching the loaded input data."""
     bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
@@ -256,6 +258,7 @@ def _full_state(
         save_history=save_history,
         mode=mode,
         objective_terms=objective_terms,
+        model_key=model_key,
     )
 
 
@@ -716,13 +719,14 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 4
-        assert state.to_dict()["version"] == 4
+        assert GUI_STATE_VERSION == 5
+        assert state.to_dict()["version"] == 5
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 4
+        assert raw["version"] == 5
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
+        assert raw["model_key"] == "lateral_three_layer"
         param_values = _as_dict(raw, "param_values")
         assert param_values["proportion.1"] == 0.7
         param_bounds = _as_dict(raw, "param_bounds")
@@ -834,6 +838,44 @@ class TestGuiStateRoundTrip:
         del raw["mode"]
         assert GuiState.from_dict(raw).mode == MODE_FULL
 
+    def test_model_key_round_trips(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        state = _full_state(input_data, model_key="hbv")
+        assert state.to_dict()["model_key"] == "hbv"
+        assert GuiState.from_dict(state.to_dict()).model_key == "hbv"
+
+    def test_model_key_defaults_to_lateral(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A state built without a model key is the lateral model."""
+        state = _full_state(input_data)
+        assert state.model_key == "lateral_three_layer"
+        raw: dict[str, object] = state.to_dict()
+        del raw["model_key"]
+        assert (
+            GuiState.from_dict(raw).model_key == "lateral_three_layer"
+        )
+
+    def test_state_v4_defaults_to_lateral(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A version-4 state predates the model key: it restores lateral."""
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["version"] = 4
+        del raw["model_key"]
+        assert GuiState.from_dict(raw).model_key == "lateral_three_layer"
+
+    def test_unknown_model_key_raises(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["model_key"] = "nope"
+        with pytest.raises(
+            ValueError, match="Unknown model key"
+        ):
+            GuiState.from_dict(raw)
+
     def test_state_v3_objective_terms_roundtrip(
         self, input_data: gui_data.GuiInputData
     ) -> None:
@@ -848,6 +890,45 @@ class TestGuiStateRoundTrip:
         assert GuiState.from_dict(raw) == bare
 
 
+class TestSavedRunModelKey:
+    """The model key a saved run was produced with."""
+
+    def test_prefers_gui_state(
+        self, tmp_path: Path, input_data: gui_data.GuiInputData
+    ) -> None:
+        (tmp_path / "run_info.json").write_text(
+            json.dumps(
+                {"model_class": "potions.common_models.ThreeLayerModel"}
+            )
+        )
+        write_gui_state(tmp_path, _full_state(input_data, model_key="hbv"))
+        assert saved_run_model_key(tmp_path) == "hbv"
+
+    def test_falls_back_to_run_info(self, tmp_path: Path) -> None:
+        (tmp_path / "run_info.json").write_text(
+            json.dumps(
+                {"model_class": "potions.common_models.ThreeLayerModel"}
+            )
+        )
+        assert saved_run_model_key(tmp_path) == "three_layer"
+
+    def test_falls_back_to_nested_run_info(self, tmp_path: Path) -> None:
+        (tmp_path / "hydro").mkdir()
+        (tmp_path / "hydro" / "run_info.json").write_text(
+            json.dumps({"model_class": "potions.common_models.HbvModel"})
+        )
+        assert saved_run_model_key(tmp_path) == "hbv"
+
+    def test_defaults_to_lateral(self, tmp_path: Path) -> None:
+        assert saved_run_model_key(tmp_path) == "lateral_three_layer"
+
+    def test_ignores_unknown_model_class(self, tmp_path: Path) -> None:
+        (tmp_path / "run_info.json").write_text(
+            json.dumps({"model_class": "some.UnknownModel"})
+        )
+        assert saved_run_model_key(tmp_path) == "lateral_three_layer"
+
+
 class TestFromDictErrors:
     """Each malformed gui_state field produces its documented message."""
 
@@ -859,7 +940,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5]).",
             ),
             (
                 {"csv_path": 12},
@@ -1113,7 +1194,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5]).\n"
         )
 
     def test_top_level_not_object(
@@ -1134,7 +1215,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 4,")
+        assert text.startswith("{\n  \"version\": 5,")
         assert text.endswith("\n")
 
 
@@ -1463,13 +1544,17 @@ class TestLoadSavedRunHydro:
 # ------------------------------------------------------------------ #
 
 
-def _small_history_entry(timestamp: str) -> RunHistoryEntry:
+def _small_history_entry(
+    timestamp: str,
+    model_key: str = model_specs.DEFAULT_MODEL_KEY,
+) -> RunHistoryEntry:
     """A small run-history record for the append tests."""
     return RunHistoryEntry(
         timestamp=timestamp,
         mode="full",
         param_values={"proportion.1": 0.7},
         objectives={"Streamflow": {"nse": 0.85}},
+        model_key=model_key,
     )
 
 
@@ -1481,7 +1566,9 @@ class TestAppendRunHistory:
         # creates it (and the file) on demand.
         results_dir: Path = tmp_path / "does-not-exist" / "results"
         entry_one = _small_history_entry("2026-01-01T00:00:00+00:00")
-        entry_two = _small_history_entry("2026-01-02T00:00:00+00:00")
+        entry_two = _small_history_entry(
+            "2026-01-02T00:00:00+00:00", model_key="hbv"
+        )
 
         path = append_run_history(results_dir, entry_one)
         assert path == results_dir / RUN_HISTORY_FILENAME
@@ -1494,6 +1581,10 @@ class TestAppendRunHistory:
             entry_one.to_dict(),
             entry_two.to_dict(),
         ]
+        # The model key is persisted with the run, so the history
+        # dropdown can filter to the selected model.
+        assert json.loads(lines[0])["model_key"] == "lateral_three_layer"
+        assert json.loads(lines[1])["model_key"] == "hbv"
 
     def test_write_failure_prints_note_and_does_not_raise(
         self,
