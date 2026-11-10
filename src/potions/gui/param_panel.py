@@ -1,11 +1,14 @@
 """
-The parameter panel of the East River lateral-model calibration GUI.
+The parameter panel of the East River calibration GUI.
 
-Holds the model's adjustable parameters in the panel below the
-figure: the hydrology parameters of every zone (blue-themed), the
-single catchment-proportion parameter, the reactive-transport
-parameters of every zone (red-themed, with a header per mineral in
-the non-snow zones), and the calibrated initial state.
+Holds the selected model's adjustable parameters in the panel below
+the figure: the hydrology parameters of every zone (blue-themed), the
+single catchment-proportion parameter (when the model has one), the
+reactive-transport parameters of every zone (red-themed, with a header
+per mineral in the reactive zones), and the calibrated initial state.
+The zones, their labels and colors, and their chemistry all come from
+the selected `potions.gui.model_specs.ModelSpec`, so switching the
+model rebuilds the panel in place (see `ParamPanel.reload`).
 
 Every parameter whose bounds are distinct is a spin-box cell whose
 range can be re-edited by double-clicking the cell; the value's
@@ -59,20 +62,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import potions as pt
+
 from potions.gui.common import (
-    HYDRO_PARAMS,
     HYDRO_THEME,
     MINERAL_PARAMS,
     RIVER_SPECIES,
     RT_DIM_PARAMS,
     RT_THEME,
-    SNOW_ZONES,
-    SPECIATION_ZONES,
     Theme,
     WATER_YEARS,
-    ZONE_COLORS,
-    ZONE_LABELS,
-    ZONE_ORDER,
     bound_decimals,
     param_label,
     param_symbol,
@@ -442,19 +441,28 @@ def _labeled_combo(
 class _ZoneHeader(QLabel):
     """
     The bold subheader of a zone's parameters: the zone's color chip
-    (the zone's color from the figure palette) followed by its
-    display name.
+    (the zone's color from the model spec) followed by its display
+    name.
 
     Args:
-        zone: The zone, a key of `ZONE_LABELS` and `ZONE_COLORS`.
+        zone: The zone's name; kept for the group's bookkeeping.
+        label: The zone's display name.
+        color: The zone's color from the model spec's palette.
         parent: The parent widget; defaults to None.
     """
 
-    def __init__(self, zone: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        zone: str,
+        label: str,
+        color: str,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._zone: str = zone
         self.setText(
-            f'<span style="color: {ZONE_COLORS[zone]};">{_ZONE_CHIP}</span> '
-            f"<b>{ZONE_LABELS[zone]}</b>"
+            f'<span style="color: {color};">{_ZONE_CHIP}</span> '
+            f"<b>{label}</b>"
         )
         self.setContentsMargins(4, 4, 0, 0)
 
@@ -942,11 +950,12 @@ class ParamPanel(QScrollArea):
     figure-selection controls.
 
     The groups, in order, are: *Hydrology* (blue-themed; one cell
-    per zone parameter in `ZONE_ORDER`), *Catchment proportion*
-    (the single area-fraction parameter), *Reactive transport*
-    (red-themed; per-zone storage parameters and per-mineral kinetic
-    parameters in every non-snow zone), *Initial state* (red-themed;
-    the calibrated exchange-site state per zone), *Plots* (the
+    per zone parameter, in the spec's zone order), *Catchment
+    proportion* (the single area-fraction parameter, only when the
+    model has one), *Reactive transport* (red-themed; per-zone
+    storage parameters and per-mineral kinetic parameters in every
+    reactive zone), *Initial state* (red-themed; the calibrated
+    exchange-site state per speciation zone), *Plots* (the
     streamflow toggle and river-species checkboxes of the
     river-concentration figure, the zone checkboxes of the storage
     and zone-concentration figures, the single mineral of the
@@ -1074,9 +1083,9 @@ class ParamPanel(QScrollArea):
 
         Returns:
             The `PlotSelection` of the checked river species (in the
-            panel's order), the checked zones (in model order), the
-            selected mineral, the streamflow toggle, and the
-            water-year window.
+            panel's order), the checked zones (in the panel's zone
+            order), the selected mineral, the streamflow toggle, and
+            the water-year window.
         """
         return PlotSelection(
             species=[
@@ -1086,8 +1095,8 @@ class ParamPanel(QScrollArea):
             ],
             zones=[
                 zone
-                for zone in ZONE_ORDER
-                if self._zone_boxes[zone].isChecked()
+                for zone, box in self._zone_boxes.items()
+                if box.isChecked()
             ],
             mineral=self._mineral_combo.currentText(),
             streamflow=self._streamflow_box.isChecked(),
@@ -1158,7 +1167,9 @@ class ParamPanel(QScrollArea):
         """
         self._hydro_only = enabled
         for name in ("reactive", "initial"):
-            self._groups[name].setVisible(not enabled)
+            group: ThemedGroup | None = self._groups.get(name)
+            if group is not None:
+                group.setVisible(not enabled)
         for header in (
             self._streamflow_header,
             self._species_header,
@@ -1191,6 +1202,48 @@ class ParamPanel(QScrollArea):
             self._values[key] = min(max(self._values[key], lo), hi)
         self._build_param_groups(first_build=False)
         return self.param_values()
+
+    def reload(
+        self,
+        input_data: GuiInputData,
+        selection: PlotSelection,
+    ) -> None:
+        """
+        Replace the loaded inputs and rebuild every panel group.
+
+        Used when the window switches the selected model: the new
+        spec's bounds, zones, labels, colors, and chemistry replace
+        the old ones, and every parameter starts at its new default
+        (a pinned parameter at its bound, a free one at the midpoint
+        of its range).  The plot-selection group is rebuilt from
+        ``selection`` and the history group is kept (the window
+        refills its dropdown).  The hydrology-only visibility is
+        re-applied.
+
+        Args:
+            input_data: The new model's assembled inputs.
+            selection: The plot selection to start from.
+        """
+        self._input_data = input_data
+        self._bounds = dict(input_data.bounds)
+        self._values = {
+            key: (lo if lo == hi else 0.5 * (lo + hi))
+            for key, (lo, hi) in input_data.bounds.items()
+        }
+        self._rows = {}
+        self._groups = {}
+        while self._container_layout.count():
+            item = self._container_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._build_param_groups(first_build=True)
+        self._plots_group = self._build_plots_group(selection)
+        self._container_layout.addWidget(self._plots_group)
+        self._history_group = self._build_history_group()
+        self._container_layout.addWidget(self._history_group)
+        self._container_layout.addStretch()
+        self.set_hydro_only(self._hydro_only)
 
     def restore_state(
         self,
@@ -1233,11 +1286,13 @@ class ParamPanel(QScrollArea):
 
     def _build_param_groups(self, first_build: bool) -> None:
         """
-        Build (or rebuild, after `reset_bounds`) the four parameter
+        Build (or rebuild, after `reset_bounds`) the parameter
         groups from the current bounds.
 
-        A rebuild creates fresh (visible) groups, so the
-        hydrology-only mode's visibility is re-applied at the end.
+        A group the selected model does not have (the catchment
+        proportion of a single-column model) is skipped.  A rebuild
+        creates fresh (visible) groups, so the hydrology-only mode's
+        visibility is re-applied at the end.
 
         Args:
             first_build: True for the initial build (the groups are
@@ -1253,31 +1308,51 @@ class ParamPanel(QScrollArea):
                 group.deleteLater()
             insert_at = self._container_layout.indexOf(self._plots_group)
 
-        self._groups = {
+        candidates: dict[str, ThemedGroup | None] = {
             "hydrology": self._populate_hydrology(),
             "proportion": self._populate_proportion(),
             "reactive": self._populate_reactive(),
             "initial": self._populate_initial(),
         }
+        self._groups = {
+            name: group
+            for name, group in candidates.items()
+            if group is not None
+        }
         for offset, group in enumerate(self._groups.values()):
             self._container_layout.insertWidget(insert_at + offset, group)
         if self._hydro_only:
             for name in ("reactive", "initial"):
-                self._groups[name].setVisible(False)
+                optional_group: ThemedGroup | None = self._groups.get(name)
+                if optional_group is not None:
+                    optional_group.setVisible(False)
 
     def _populate_hydrology(self) -> ThemedGroup:
         """The blue-themed hydrology group: one cell per zone parameter."""
         group: ThemedGroup = ThemedGroup(
             "Hydrology", HYDRO_THEME, grid_columns=_GRID_COLUMNS
         )
-        for zone in ZONE_ORDER:
-            group.add_header(_ZoneHeader(zone))
-            for param in HYDRO_PARAMS[zone]:
+        spec = self._input_data.spec
+        for zone in spec.zones:
+            group.add_header(
+                _ZoneHeader(
+                    zone, spec.zone_labels[zone], spec.zone_colors[zone]
+                )
+            )
+            zone_class: type[pt.HydrologicZone] = (
+                spec.model_class.get_zone_type(zone)
+            )
+            for param in zone_class.parameter_names():
                 self._add_param_cell(group, f"{zone}.{param}")
         return group
 
-    def _populate_proportion(self) -> ThemedGroup:
-        """The blue-themed catchment-proportion group: one cell."""
+    def _populate_proportion(self) -> ThemedGroup | None:
+        """
+        The blue-themed catchment-proportion group: one cell, or None
+        when the model has no catchment split.
+        """
+        if "proportion.1" not in self._bounds:
+            return None
         group: ThemedGroup = ThemedGroup(
             "Catchment proportion", HYDRO_THEME, grid_columns=_GRID_COLUMNS
         )
@@ -1296,17 +1371,22 @@ class ParamPanel(QScrollArea):
         """
         The red-themed reactive-transport group: per-zone storage
         parameters, and per-mineral kinetic parameters in every
-        non-snow zone.
+        reactive zone.
         """
         group: ThemedGroup = ThemedGroup(
             "Reactive transport", RT_THEME, grid_columns=_GRID_COLUMNS
         )
+        spec = self._input_data.spec
         mineral_names: list[str] = self._input_data.network.mineral_names
-        for zone in ZONE_ORDER:
-            group.add_header(_ZoneHeader(zone))
+        for zone in spec.zones:
+            group.add_header(
+                _ZoneHeader(
+                    zone, spec.zone_labels[zone], spec.zone_colors[zone]
+                )
+            )
             for param in RT_DIM_PARAMS:
                 self._add_param_cell(group, f"{zone}.{param}")
-            if zone not in SNOW_ZONES:
+            if spec.zone_configs[zone].do_reactions:
                 for mineral_id, mineral_name in enumerate(mineral_names):
                     group.add_header(_BoldHeader(mineral_name, top_margin=4))
                     for field in MINERAL_PARAMS:
@@ -1323,7 +1403,7 @@ class ParamPanel(QScrollArea):
         group: ThemedGroup = ThemedGroup(
             "Initial state", RT_THEME, grid_columns=_GRID_COLUMNS
         )
-        for zone in SPECIATION_ZONES:
+        for zone in self._input_data.spec.speciation_zones:
             self._add_param_cell(group, f"initial_state.{zone}_x")
         return group
 
@@ -1333,7 +1413,11 @@ class ParamPanel(QScrollArea):
         cell or a pinned cell according to its current bounds.
         """
         symbol: str = param_symbol(key)
-        label: str = param_label(key, self._input_data.network.mineral_names)
+        label: str = param_label(
+            key,
+            self._input_data.network.mineral_names,
+            zone_labels=self._input_data.spec.zone_labels,
+        )
         lo, hi = self._bounds[key]
         if lo == hi:
             pinned_cell: _PinnedCell = _PinnedCell(
@@ -1397,8 +1481,9 @@ class ParamPanel(QScrollArea):
         )
         group.add_header(self._zone_header)
         self._zone_boxes: dict[str, QCheckBox] = {}
-        for zone in ZONE_ORDER:
-            box = QCheckBox(ZONE_LABELS[zone])
+        spec = self._input_data.spec
+        for zone in spec.zones:
+            box = QCheckBox(spec.zone_labels[zone])
             box.toggled.connect(self._on_selection_changed)
             self._zone_boxes[zone] = box
             group.add_widget(box)
@@ -1534,7 +1619,11 @@ class ParamPanel(QScrollArea):
         a strict range replaces the cell's bounds, while a degenerate
         (static) one pins the parameter at its displayed value.
         """
-        label: str = param_label(key, self._input_data.network.mineral_names)
+        label: str = param_label(
+            key,
+            self._input_data.network.mineral_names,
+            zone_labels=self._input_data.spec.zone_labels,
+        )
         lo, hi = self._bounds[key]
         decimals: int = bound_decimals(lo, hi)
         hint: str = f"Current range: {lo:.{decimals}f} to {hi:.{decimals}f}."
@@ -1577,7 +1666,11 @@ class ParamPanel(QScrollArea):
         place.  A degenerate (static) result is a no-op: the cell is
         already pinned at that value.
         """
-        label: str = param_label(key, self._input_data.network.mineral_names)
+        label: str = param_label(
+            key,
+            self._input_data.network.mineral_names,
+            zone_labels=self._input_data.spec.zone_labels,
+        )
         value: float = self._values[key]
         # A sensible first range around the pinned value: a symmetric
         # span of half the value, or ±1 for a value pinned at zero.

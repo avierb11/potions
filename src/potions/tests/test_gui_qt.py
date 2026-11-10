@@ -2846,6 +2846,73 @@ class TestParamPanel:
             panel.deleteLater()
             _pump()
 
+    def test_panel_uses_spec_zone_labels(
+        self, qapp: QApplication
+    ) -> None:
+        data = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, model_key="hbv"
+        )
+        panel = gui_param_panel.ParamPanel(
+            data, gui_data.default_plot_selection(data.spec)
+        )
+        try:
+            labels = [
+                header.text()
+                for group in panel._groups.values()
+                for header in group.findChildren(
+                    gui_param_panel._ZoneHeader
+                )
+            ]
+            assert any("Shallow subsurface" in text for text in labels)
+            assert any("Deep subsurface" in text for text in labels)
+            assert panel._groups.get("proportion") is None
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_reload_switches_groups_and_defaults(
+        self, qapp: QApplication
+    ) -> None:
+        data = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, model_key="lateral_three_layer"
+        )
+        panel = gui_param_panel.ParamPanel(
+            data, gui_data.default_plot_selection(data.spec)
+        )
+        try:
+            old_keys = set(panel.param_values())
+            hbv = gui_data.load_input_data(
+                gui_data.DEFAULT_CSV_PATH, model_key="hbv"
+            )
+            panel.reload(hbv, gui_data.default_plot_selection(hbv.spec))
+            new_keys = set(panel.param_values())
+            assert "shallow.perc" in new_keys
+            assert "snow_hs.tt" not in new_keys
+            assert old_keys != new_keys
+            assert set(panel._zone_boxes) == set(hbv.spec.zones)
+            assert panel._groups.get("proportion") is None
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_reload_preserves_hydro_only_visibility(
+        self, qapp: QApplication
+    ) -> None:
+        data = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, model_key="hbv"
+        )
+        panel = gui_param_panel.ParamPanel(
+            data, gui_data.default_plot_selection(data.spec)
+        )
+        try:
+            panel.set_hydro_only(True)
+            panel.reload(data, gui_data.default_plot_selection(data.spec))
+            assert not panel._groups["reactive"].isVisible()
+            assert not panel._groups["initial"].isVisible()
+        finally:
+            panel.deleteLater()
+            _pump()
+
 
 # ------------------------------------------------------------------ #
 # The range dialog's own buttons (standalone)
