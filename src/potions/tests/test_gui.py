@@ -4239,3 +4239,120 @@ class TestModelSpecs:
             == "hbv_lateral"
         )
         assert model_specs.model_key_for_class_name("UnknownModel") is None
+
+
+# ------------------------------------------------------------------ #
+# Model-specific zone metadata on the plot builders
+# ------------------------------------------------------------------ #
+
+
+def test_storage_figure_accepts_zone_metadata() -> None:
+    """The storage figure uses the given zone labels and colors."""
+    index = pd.date_range("2020-01-01", periods=3, freq="D")
+    sim = pd.DataFrame(
+        {"s_a": [1.0, 2.0, 3.0], "s_b": [3.0, 2.0, 1.0]}, index=index
+    )
+    fig = gui_plots.make_storage_figure(
+        sim,
+        ["a", "b"],
+        (index[0], index[-1]),
+        zone_labels={"a": "Alpha", "b": "Beta"},
+        zone_colors={"a": "#111111", "b": "#222222"},
+    )
+    ax = fig.axes[0]
+    assert [line.get_color() for line in _lines(ax)] == [
+        "#111111",
+        "#222222",
+    ]
+    legend: Legend = fig.legends[0]
+    assert [text.get_text() for text in legend.get_texts()] == [
+        "Alpha",
+        "Beta",
+    ]
+
+
+def test_zone_concentrations_figure_accepts_zone_metadata() -> None:
+    """The zone-concentration figure uses the given labels and colors."""
+    index = pd.date_range("2020-01-01", periods=3, freq="D")
+    sim = pd.DataFrame(
+        {
+            "DOC_a": [1.0, 2.0, 3.0],
+            "DOC_b": [3.0, 2.0, 1.0],
+        },
+        index=index,
+    )
+    fig = gui_plots.make_zone_concentrations_figure(
+        sim,
+        ["DOC"],
+        ["a", "b"],
+        (index[0], index[-1]),
+        zone_labels={"a": "Alpha", "b": "Beta"},
+        zone_colors={"a": "#111111", "b": "#222222"},
+    )
+    ax = fig.axes[0]
+    assert [line.get_color() for line in _lines(ax)] == [
+        "#111111",
+        "#222222",
+    ]
+    zone_row: Legend = fig.legends[0]
+    assert [text.get_text() for text in zone_row.get_texts()] == [
+        "Alpha",
+        "Beta",
+    ]
+
+
+def test_rate_figure_accepts_zone_order_and_metadata() -> None:
+    """The rate figure iterates the zones in the given order."""
+    index = pd.date_range("2020-01-01", periods=3, freq="D")
+    sim = pd.DataFrame(
+        {
+            "SOC(s)_rate_a": [1.0, 2.0, 3.0],
+            "SOC(s)_rate_b": [3.0, 2.0, 1.0],
+        },
+        index=index,
+    )
+    fig = gui_plots.make_rate_figure(
+        sim,
+        "SOC(s)",
+        (index[0], index[-1]),
+        zone_labels={"a": "Alpha", "b": "Beta"},
+        zone_colors={"a": "#111111", "b": "#222222"},
+        zone_order=["b", "a"],
+    )
+    ax = fig.axes[0]
+    assert [line.get_color() for line in _lines(ax)] == [
+        "#222222",
+        "#111111",
+    ]
+    zone_row: Legend = fig.legends[0]
+    assert [text.get_text() for text in zone_row.get_texts()] == [
+        "Beta",
+        "Alpha",
+    ]
+
+
+def test_partitioning_figure_accepts_stack_order() -> None:
+    """The partitioning figure stacks the zones in the given order."""
+    index = pd.date_range("2020-01-01", periods=3, freq="D")
+    sim = pd.DataFrame(
+        {
+            "streamflow_sim": [1.0, 2.0, 3.0],
+            "prop_q_a": [0.2, 0.2, 0.2],
+            "prop_q_b": [0.8, 0.8, 0.8],
+        },
+        index=index,
+    )
+    q_meas = pd.Series([np.nan] * 3, index=index)
+    fig = gui_plots.make_partitioning_figure(
+        sim,
+        q_meas,
+        (index[0], index[-1]),
+        zone_labels={"a": "Alpha", "b": "Beta"},
+        zone_colors={"a": "#111111", "b": "#222222"},
+        stack_order=["b", "a"],
+    )
+    zone_row: Legend = fig.legends[0]
+    assert [text.get_text() for text in zone_row.get_texts()] == [
+        "Beta",
+        "Alpha",
+    ]

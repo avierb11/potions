@@ -118,6 +118,7 @@ from potions.gui.common import (
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
+    ZONE_STACK_ORDER,
 )
 
 
@@ -507,6 +508,8 @@ def make_storage_figure(
     zones: list[str],
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_hydro_sim: pd.DataFrame | None = None,
+    zone_labels: dict[str, str] = ZONE_LABELS,
+    zone_colors: dict[str, str] = ZONE_COLORS,
 ) -> Figure:
     """
     Build the per-zone water-storage figure.
@@ -536,6 +539,10 @@ def make_storage_figure(
             `potions.gui.common.water_year_window` returns it.
         overlay_hydro_sim: The previous run's hydrology simulation,
             for the faint storage overlay; None for no overlay.
+        zone_labels: The display name of every zone; defaults to the
+            lateral model's labels.
+        zone_colors: The line color of every zone; defaults to the
+            lateral model's palette.
 
     Returns:
         The completed figure.
@@ -559,7 +566,7 @@ def make_storage_figure(
                 storage_ax.plot(
                     overlay_hydro_plot.index,
                     overlay_hydro_plot[overlay_storage],
-                    color=ZONE_COLORS[zone],
+                    color=zone_colors[zone],
                     alpha=_OVERLAY_ALPHA,
                     linewidth=1,
                 )
@@ -568,7 +575,7 @@ def make_storage_figure(
         storage_ax.plot(
             hydro_plot.index,
             hydro_plot[f"s_{zone}"],
-            color=ZONE_COLORS[zone],
+            color=zone_colors[zone],
             linewidth=1,
         )
 
@@ -582,8 +589,8 @@ def make_storage_figure(
 
     legend: Legend = _attach_legend(
         fig,
-        [Line2D([], [], color=ZONE_COLORS[zone], linewidth=2) for zone in zones],
-        [ZONE_LABELS[zone] for zone in zones],
+        [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in zones],
+        [zone_labels[zone] for zone in zones],
         title="Zone",
         ncol=max(len(zones), 1),
     )
@@ -592,30 +599,40 @@ def make_storage_figure(
     return fig
 
 
-def _river_zone_stack_order(hydro_sim: pd.DataFrame) -> list[str]:
+def _river_zone_stack_order(
+    hydro_sim: pd.DataFrame,
+    stack_order: list[str] = ZONE_STACK_ORDER,
+) -> list[str]:
     """
     The river zones a hydrology frame partitions, in stack order.
 
     A zone partitions the streamflow when the frame carries its
     ``prop_q_{zone}`` column (the same discovery the model's
     `river_zone_fractions` accessor uses).  The stack order puts the
-    ground zones under the surface zones, in `ZONE_ORDER` within a
-    family, so the stack reads bottom-up the way the figure spec
+    deepest zones under the shallower ones, in ``stack_order``'s
+    order, so the stack reads bottom-up the way the figure spec
     describes it (the ground components first, then the surface).
+    A discovered zone the order does not name goes last.
+
+    Args:
+        hydro_sim: The hydrology simulation frame.
+        stack_order: The zones deepest-layer first; defaults to the
+            lateral model's order.
+
+    Returns:
+        The river zones, in stack order.
     """
     river_zones: list[str] = [
         name.removeprefix("prop_q_")
         for name in hydro_sim.columns
         if name.startswith("prop_q_")
     ]
-    family_rank: dict[str, int] = {"ground": 0, "surface": 1}
-    order: dict[str, int] = {zone: index for index, zone in enumerate(ZONE_ORDER)}
+    rank: dict[str, int] = {
+        zone: index for index, zone in enumerate(stack_order)
+    }
     return sorted(
         river_zones,
-        key=lambda zone: (
-            family_rank.get(zone.split("_")[0], 2),
-            order.get(zone, len(ZONE_ORDER)),
-        ),
+        key=lambda zone: rank.get(zone, len(stack_order)),
     )
 
 
@@ -624,6 +641,7 @@ def _draw_river_stack(
     frame: pd.DataFrame,
     zones: list[str],
     alpha: float | None,
+    zone_colors: dict[str, str] = ZONE_COLORS,
 ) -> None:
     """
     Draw a frame's stacked river-zone streamflow components on `ax`.
@@ -644,6 +662,8 @@ def _draw_river_stack(
             ``prop_q_{zone}`` columns.
         zones: The river zones to stack, in stack order.
         alpha: The band transparency; None for opaque bands.
+        zone_colors: The band color of every zone; defaults to the
+            lateral model's palette.
     """
     bottom: pd.Series = pd.Series(0.0, index=frame.index)
     for zone in zones:
@@ -655,7 +675,7 @@ def _draw_river_stack(
             frame.index,
             bottom,
             bottom + share,
-            color=ZONE_COLORS[zone],
+            color=zone_colors[zone],
             alpha=alpha,
         )
         bottom = bottom + share
@@ -666,6 +686,9 @@ def make_partitioning_figure(
     q_meas: pd.Series,
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_hydro_sim: pd.DataFrame | None = None,
+    zone_labels: dict[str, str] = ZONE_LABELS,
+    zone_colors: dict[str, str] = ZONE_COLORS,
+    stack_order: list[str] = ZONE_STACK_ORDER,
 ) -> Figure:
     """
     Build the discharge-partitioning figure.
@@ -703,6 +726,13 @@ def make_partitioning_figure(
             `potions.gui.common.water_year_window` returns it.
         overlay_hydro_sim: The previous run's hydrology simulation,
             for the faint stack overlay; None for no overlay.
+        zone_labels: The display name of every zone; defaults to the
+            lateral model's labels.
+        zone_colors: The band color of every zone; defaults to the
+            lateral model's palette.
+        stack_order: The zones deepest-layer first, which sets the
+            stack order of the bands; defaults to the lateral model's
+            order.
 
     Returns:
         The completed figure.
@@ -715,7 +745,7 @@ def make_partitioning_figure(
         else None
     )
 
-    zones: list[str] = _river_zone_stack_order(hydro_plot)
+    zones: list[str] = _river_zone_stack_order(hydro_plot, stack_order)
 
     fig: Figure = Figure(figsize=(15, 5))
     ax: Axes = fig.gca()
@@ -723,9 +753,15 @@ def make_partitioning_figure(
     # The previous run's stack, drawn first (behind) and faintly,
     # without labels (they stay out of the legends).
     if overlay_hydro_plot is not None:
-        _draw_river_stack(ax, overlay_hydro_plot, zones, alpha=_OVERLAY_ALPHA)
+        _draw_river_stack(
+            ax,
+            overlay_hydro_plot,
+            zones,
+            alpha=_OVERLAY_ALPHA,
+            zone_colors=zone_colors,
+        )
 
-    _draw_river_stack(ax, hydro_plot, zones, alpha=None)
+    _draw_river_stack(ax, hydro_plot, zones, alpha=None, zone_colors=zone_colors)
 
     # The measured streamflow: scatter points, never a line.
     ax.scatter(
@@ -749,10 +785,10 @@ def make_partitioning_figure(
         zone_row = _attach_legend(
             fig,
             [
-                Patch(facecolor=ZONE_COLORS[zone], edgecolor="none")
+                Patch(facecolor=zone_colors[zone], edgecolor="none")
                 for zone in zones
             ],
-            [ZONE_LABELS[zone] for zone in zones],
+            [zone_labels[zone] for zone in zones],
             title="Zone",
             ncol=max(len(zones), 1),
         )
@@ -1040,6 +1076,8 @@ def make_zone_concentrations_figure(
     zones: list[str],
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_rt_sim: pd.DataFrame | None = None,
+    zone_labels: dict[str, str] = ZONE_LABELS,
+    zone_colors: dict[str, str] = ZONE_COLORS,
 ) -> Figure:
     """
     Build the zone concentrations figure.
@@ -1076,6 +1114,10 @@ def make_zone_concentrations_figure(
         overlay_rt_sim: The previous run's reactive-transport
             simulation, for the faint concentration overlay; None for
             no overlay.
+        zone_labels: The display name of every zone; defaults to the
+            lateral model's labels.
+        zone_colors: The line color of every zone; defaults to the
+            lateral model's palette.
 
     Returns:
         The completed figure.
@@ -1103,7 +1145,7 @@ def make_zone_concentrations_figure(
                     ax.plot(
                         overlay_rt_plot.index,
                         overlay_rt_plot[overlay_column],
-                        color=ZONE_COLORS[zone],
+                        color=zone_colors[zone],
                         linestyle=overlay_linestyle,
                         alpha=_OVERLAY_ALPHA,
                         linewidth=1,
@@ -1115,7 +1157,7 @@ def make_zone_concentrations_figure(
             ax.plot(
                 rt_plot.index,
                 rt_plot[f"{species_name}_{zone}"],
-                color=ZONE_COLORS[zone],
+                color=zone_colors[zone],
                 linestyle=linestyle,
                 linewidth=1,
             )
@@ -1130,8 +1172,8 @@ def make_zone_concentrations_figure(
 
     zone_row: Legend = _attach_legend(
         fig,
-        [Line2D([], [], color=ZONE_COLORS[zone], linewidth=2) for zone in zones],
-        [ZONE_LABELS[zone] for zone in zones],
+        [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in zones],
+        [zone_labels[zone] for zone in zones],
         title="Zone",
         ncol=max(len(zones), 1),
     )
@@ -1395,6 +1437,9 @@ def make_rate_figure(
     mineral: str,
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_rt_sim: pd.DataFrame | None = None,
+    zone_labels: dict[str, str] = ZONE_LABELS,
+    zone_colors: dict[str, str] = ZONE_COLORS,
+    zone_order: list[str] = ZONE_ORDER,
 ) -> Figure:
     """
     Build the reaction-rate figure for a single mineral.
@@ -1427,6 +1472,12 @@ def make_rate_figure(
         overlay_rt_sim: The previous run's reactive-transport
             simulation, for the faint rate overlay; None for no
             overlay.
+        zone_labels: The display name of every zone; defaults to the
+            lateral model's labels.
+        zone_colors: The line color of every zone; defaults to the
+            lateral model's palette.
+        zone_order: The zones to consider, in plot order; defaults to
+            the lateral model's zone order.
 
     Returns:
         The completed figure.
@@ -1443,7 +1494,7 @@ def make_rate_figure(
     # mineral's column.
     plot_zones: list[str] = [
         zone
-        for zone in ZONE_ORDER
+        for zone in zone_order
         if f"{mineral}_rate_{zone}" in rt_plot.columns
     ]
 
@@ -1459,7 +1510,7 @@ def make_rate_figure(
                 ax.plot(
                     overlay_rt_plot.index,
                     overlay_rt_plot[overlay_column],
-                    color=ZONE_COLORS[zone],
+                    color=zone_colors[zone],
                     alpha=_OVERLAY_ALPHA,
                     linewidth=1,
                 )
@@ -1468,7 +1519,7 @@ def make_rate_figure(
         ax.plot(
             rt_plot.index,
             rt_plot[f"{mineral}_rate_{zone}"],
-            color=ZONE_COLORS[zone],
+            color=zone_colors[zone],
             linewidth=1,
         )
 
@@ -1483,8 +1534,8 @@ def make_rate_figure(
     if plot_zones:
         zone_row: Legend = _attach_legend(
             fig,
-            [Line2D([], [], color=ZONE_COLORS[zone], linewidth=2) for zone in plot_zones],
-            [ZONE_LABELS[zone] for zone in plot_zones],
+            [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in plot_zones],
+            [zone_labels[zone] for zone in plot_zones],
             title="Zone",
             ncol=max(len(plot_zones), 1),
         )
