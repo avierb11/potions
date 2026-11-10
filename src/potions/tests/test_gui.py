@@ -4040,7 +4040,10 @@ class TestModelPool:
             np.array([0.0, 4.0]),
         ]
 
-        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
             return input_data
 
         def fake_run(
@@ -4078,7 +4081,10 @@ class TestModelPool:
             np.array([0.0, 4.0]),
         ]
 
-        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
             return input_data
 
         def failing_run(
@@ -4115,7 +4121,10 @@ class TestModelPool:
             np.array([3.0]),
         ]
 
-        def failing_load(csv_path: Path) -> gui_data.GuiInputData:
+        def failing_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
             raise RuntimeError("missing csv")
 
         monkeypatch.setattr(gui_data, "load_input_data", failing_load)
@@ -4139,7 +4148,10 @@ class TestModelPool:
         log_file: Path = tmp_path / "worker_init.log"
         points: list[np.ndarray] = [np.array([1.0]), np.array([2.0])]
 
-        def logging_load(csv_path: Path) -> gui_data.GuiInputData:
+        def logging_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(f"{csv_path}\n")
             return input_data
@@ -4172,7 +4184,10 @@ class TestModelPool:
     ) -> None:
         points: list[np.ndarray] = [np.array([1.0, 2.0])]
 
-        def fake_load(csv_path: Path) -> gui_data.GuiInputData:
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
             return input_data
 
         def full_run(
@@ -4199,6 +4214,68 @@ class TestModelPool:
         assert not isinstance(first, str)
         assert first.rt is None
         assert float(first.hydro.objective_functions.iloc[0]) == 1003.0
+
+    def test_map_model_runs_forwards_model_key(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen: list[str] = []
+
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
+            seen.append(model_key)
+            return input_data
+
+        def fake_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        model_pool.map_model_runs(
+            [np.array([1.0])],
+            MODE_HYDRO,
+            "unused.csv",
+            workers=1,
+            model_key="hbv",
+        )
+
+        assert seen == ["hbv"]
+
+    def test_map_model_runs_defaults_to_lateral_model(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen: list[str] = []
+
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        ) -> gui_data.GuiInputData:
+            seen.append(model_key)
+            return input_data
+
+        def fake_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        model_pool.map_model_runs(
+            [np.array([1.0])], MODE_HYDRO, "unused.csv", workers=1
+        )
+
+        assert seen == [model_specs.DEFAULT_MODEL_KEY]
 
 
 class TestModelSpecs:

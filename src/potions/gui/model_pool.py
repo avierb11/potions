@@ -33,6 +33,7 @@ import numpy as np
 from multiprocessing import Pool
 
 from potions.gui import data as gui_data
+from potions.gui.model_specs import DEFAULT_MODEL_KEY
 from potions.gui.state import MODE_HYDRO
 
 # The input data loaded by this process's initializer, and the
@@ -42,7 +43,7 @@ _INPUT_DATA: gui_data.GuiInputData | None = None
 _INIT_ERROR: str | None = None
 
 
-def init_worker(csv_path: str) -> None:
+def init_worker(csv_path: str, model_key: str) -> None:
     """
     Pool initializer: load the input data once per worker process.
 
@@ -60,11 +61,16 @@ def init_worker(csv_path: str) -> None:
     Args:
         csv_path:
             Path of the input CSV this worker should load.
+        model_key:
+            The key of the selected model's spec; the worker builds
+            the inputs, bounds, and zone configurations of that model.
     """
     global _INPUT_DATA, _INIT_ERROR
     try:
         sys.stdout = os.fdopen(1, "w", closefd=False)
-        _INPUT_DATA = gui_data.load_input_data(Path(csv_path))
+        _INPUT_DATA = gui_data.load_input_data(
+            Path(csv_path), model_key=model_key
+        )
         _INIT_ERROR = None
     except Exception as err:
         _INPUT_DATA = None
@@ -115,6 +121,7 @@ def map_model_runs(
     on_result: (
         Callable[[int, gui_data.GuiRunResults | str], None] | None
     ) = None,
+    model_key: str = DEFAULT_MODEL_KEY,
 ) -> list[gui_data.GuiRunResults | str]:
     """
     Run a batch of parameter points in a worker pool.
@@ -145,6 +152,11 @@ def map_model_runs(
             completes, with the point's input index and its results
             or error string.  Completion order is arbitrary.
 
+        model_key:
+            The key of the selected model's spec; every worker loads
+            that model's inputs, bounds, and zone configurations.
+            Defaults to the lateral three-layer model.
+
     Returns:
         One entry per input point, in input order: the point's
         ``GuiRunResults``, or an ``"ExceptionType: message"`` string
@@ -170,7 +182,7 @@ def map_model_runs(
     pool = Pool(
         processes=workers if workers is not None else (os.cpu_count() or 1),
         initializer=init_worker,
-        initargs=(csv_path,),
+        initargs=(csv_path, model_key),
     )
     try:
         for index, payload in pool.imap_unordered(_run_one_task, tasks):
