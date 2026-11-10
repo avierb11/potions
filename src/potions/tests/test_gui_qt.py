@@ -291,18 +291,19 @@ def _app_font_12pt() -> QFont:
 def _objective_test_table() -> pd.DataFrame:
     """A four-target objective table crafted for the panel tests.
 
-    Every value formats to a five-character string (``"0.900"``
-    through ``"6.300"``); the three species' headers (``"DOC"``,
-    ``"DIC"``, ``"Ca++"``) are shorter than those values, so at the
-    app's 12 pt font the value cells are wider than the header text
-    and each rendered column is wider than a header-text-only
-    formula.
+    The three species' values format to eight-character scientific
+    strings (``"1.23e+03"`` and the like) that are wider, at the
+    app's 12 pt font, than their short headers (``"DOC"``, ``"DIC"``,
+    ``"Ca++"``), so each of those rendered columns is wider than a
+    header-text-only formula; the streamflow values format to short
+    strings (``"0.9"`` through ``"6.3"``) that stay within their
+    longer ``"Streamflow"`` header, so that column is not.
     """
     values: dict[str, list[float]] = {
         "Streamflow": [0.9, 1.8, 2.7, 3.6, 4.5, 5.4, 6.3],
-        "DOC": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1],
-        "DIC": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-        "Ca++": [1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8],
+        "DOC": [1.23e3, 2.34e3, 3.45e3, 4.56e3, 5.67e3, 6.78e3, 7.89e3],
+        "DIC": [1.23e4, 2.34e4, 3.45e4, 4.56e4, 5.67e4, 6.78e4, 7.89e4],
+        "Ca++": [1.23e5, 2.34e5, 3.45e5, 4.56e5, 5.67e5, 6.78e5, 7.89e5],
     }
     return pd.DataFrame(values, index=list(METRIC_LABELS.values()))
 
@@ -2159,7 +2160,7 @@ class TestObjectiveTableModel:
                 for i in range(7)
             ]
             assert row_headers == list(METRIC_LABELS.values())
-            assert model.data(model.index(0, 0)) == "0.900"
+            assert model.data(model.index(0, 0)) == "0.9"
             assert model.data(model.index(0, 1)) == "–"
             # Invalid indices and foreign roles yield None.
             assert model.data(model.index(9, 0)) is None
@@ -2169,6 +2170,37 @@ class TestObjectiveTableModel:
                 )
                 is None
             )
+        finally:
+            model.deleteLater()
+            _pump()
+
+    def test_cell_formats_three_visible_digits(
+        self, qapp: QApplication
+    ) -> None:
+        """A cell shows three visible digits; scientific when large."""
+        values: dict[str, list[float]] = {
+            "Streamflow": [0.9, 0.876, 1234.5, 0.0000123, 0.0009, 99.9, 100.0],
+        }
+        model = gui_window._ObjectiveTableModel()
+        try:
+            model.set_table(
+                pd.DataFrame(values, index=list(METRIC_LABELS.values()))
+            )
+            texts: list[str | None] = [
+                model.data(model.index(row, 0)) for row in range(7)
+            ]
+            # Three significant digits, so 1234.5 needs scientific
+            # notation and 0.0009 shows its single nonzero digit
+            # instead of pre-rounding to zero.
+            assert texts == [
+                "0.9",
+                "0.876",
+                "1.23e+03",
+                "1.23e-05",
+                "0.0009",
+                "99.9",
+                "100",
+            ]
         finally:
             model.deleteLater()
             _pump()
@@ -4012,7 +4044,7 @@ class TestLineSearch:
             assert (
                 win._status_label.text()
                 == f"Line search finished in {state.elapsed_seconds:.1f} s: "
-                f"best t = {best_t:.4f} (Streamflow: KGE = {best_value:.3f}); "
+                f"best t = {best_t:.4f} (Streamflow: KGE = {best_value:.3g}); "
                 f"the best point's parameters are in the panel and the "
                 f"profile was saved to {state.csv_path}."
                 f" 1 of {total} points failed; their values are shown "

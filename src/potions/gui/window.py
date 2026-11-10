@@ -1550,7 +1550,11 @@ class _ObjectiveTableModel(QAbstractTableModel):
         index: QModelIndex | QPersistentModelIndex,
         role: int = 0,
     ) -> str | None:
-        """The display text of a cell: the value at three decimals, or a placeholder."""
+        """
+        The display text of a cell: the value at three visible
+        digits (scientific notation when the magnitude is large),
+        or a placeholder.
+        """
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
             return None
         # The table's cells are floats (possibly NaN); the object
@@ -1561,7 +1565,7 @@ class _ObjectiveTableModel(QAbstractTableModel):
             isinstance(cell, (float, np.floating)) and math.isnan(cell)
         ):
             return _MISSING
-        return f"{float(cell):.3f}"
+        return f"{float(cell):.3g}"
 
     def headerData(
         self, section: int, orientation: Qt.Orientation, role: int = 0
@@ -3127,14 +3131,14 @@ class MainWindow(QMainWindow):
         self._refresh_from_results()
         if len(outcome.terms) == 1:
             best_text: str = (
-                f"({outcome.terms[0]} = {best_value:.3f}); the best "
+                f"({outcome.terms[0]} = {best_value:.3g}); the best "
                 f"point's parameters are in the panel and the profile "
                 f"was saved to {outcome.csv_path}."
             )
         else:
             best_text = (
                 f"(sum of {len(outcome.terms)} objectives = "
-                f"{best_value:.3f}); the best point's parameters are "
+                f"{best_value:.3g}); the best point's parameters are "
                 f"in the panel and the profile was saved to "
                 f"{outcome.csv_path}."
             )
@@ -3727,7 +3731,7 @@ class MainWindow(QMainWindow):
             )
             table: pd.DataFrame = build_objective_table(
                 hydro.objective_functions, None
-            ).round(3)
+            )
         else:
             rt_sim: pd.DataFrame = rt.simulation
             time_series = make_time_series_figure(
@@ -3757,7 +3761,7 @@ class MainWindow(QMainWindow):
             )
             table = build_objective_table(
                 hydro.objective_functions, rt.objective_functions
-            ).round(3)
+            )
 
         # The last finished gradient job's matrix rides along as an
         # extra page, so it stays on screen across runs, mode
