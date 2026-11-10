@@ -114,6 +114,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QHeaderView,
     QLabel,
     QMainWindow,
@@ -146,6 +147,7 @@ from potions.gui.data import (
     arr_to_model,
     arr_to_results,
     default_plot_selection,
+    load_input_data,
 )
 from potions.gui.figure_panel import FigurePanel
 from potions.gui.gradients import (
@@ -163,6 +165,12 @@ from potions.gui.line_search import (
     write_line_search_csv,
 )
 from potions.gui.model_pool import map_model_runs
+from potions.gui.model_specs import (
+    DEFAULT_MODEL_KEY,
+    MODEL_SPECS,
+    ModelSpec,
+    get_model_spec,
+)
 from potions.gui.param_panel import ParamPanel
 from potions.gui.plots import (
     build_objective_table,
@@ -187,12 +195,27 @@ from potions.gui.state import (
     list_run_dirs,
     load_saved_run,
     objectives_from_results,
+    saved_run_model_key,
     write_gui_state,
 )
 
 # ==== Constants ==== #
-# The window title (the title row repeats it in a larger font).
-_TITLE: Final[str] = "East River lateral model calibration"
+# The window title (the title row repeats it in a larger font); the
+# selected model's display name fills the placeholder.
+_TITLE_TEMPLATE: Final[str] = "East River calibration — {model}"
+
+
+def _title_for(spec: ModelSpec) -> str:
+    """
+    The window title for a model spec.
+
+    Args:
+        spec: The selected model's spec.
+
+    Returns:
+        The title naming the model's display name.
+    """
+    return _TITLE_TEMPLATE.format(model=spec.display_name)
 
 # The debounce interval (ms) between a parameter change and the
 # re-run; a drag or a burst of keyboard steps coalesces into one.
@@ -204,7 +227,7 @@ _ELAPSED_MS: Final[int] = 200
 
 # The initial window size (px); a restored window geometry replaces
 # it before the window is shown.
-_INITIAL_SIZE: Final[tuple[int, int]] = (1200, 900)
+_INITIAL_SIZE: Final[tuple[int, int]] = (1360, 900)
 
 # The initial sizes (px) of the main vertical splitter: the figure
 # and the lower (table-and-parameters) row.  Qt scales the pair
@@ -410,6 +433,8 @@ class _HistoryItem:
             None for a saved run, which is re-read on demand).
         mode: The run's mode (`MODE_FULL` or `MODE_HYDRO`); None for
             a saved run, whose mode comes from its saved state.
+        model_key: The key of the model spec the run used; the
+            history dropdown lists only the current model's runs.
     """
 
     label: str
@@ -417,6 +442,7 @@ class _HistoryItem:
     param_values: dict[str, float] | None
     results: GuiRunResults | None
     mode: str | None
+    model_key: str = DEFAULT_MODEL_KEY
 
 
 # ==== Worker ==== #
@@ -545,6 +571,8 @@ class _GradientOutcome:
         total_points: The number of points the job evaluated (the
             deduplicated perturbed points, the base included when
             it ran).  Always zero on a failed job.
+        model_key: The key of the model spec the job ran; the window
+            discards an outcome from another model.
     """
 
     error: str | None
@@ -554,6 +582,7 @@ class _GradientOutcome:
     mode: str
     csv_path: Path | None
     elapsed_seconds: float
+    model_key: str
     failed_points: int = 0
     total_points: int = 0
 
@@ -582,6 +611,8 @@ class _GradientSnapshot:
             the page's caption.
         elapsed_seconds: The wall-clock duration of the job, shown
             in the completion status line.
+        model_key: The key of the model spec the job ran; the window
+            discards a snapshot from another model.
     """
 
     table: pd.DataFrame
@@ -589,6 +620,7 @@ class _GradientSnapshot:
     mode: str
     csv_path: Path
     elapsed_seconds: float
+    model_key: str
 
 
 class _GradientWorker(QThread):
@@ -630,6 +662,7 @@ class _GradientWorker(QThread):
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
             point too).
+        model_key: The key of the model spec the job runs.
         parent: The parent object (the window); defaults to None.
     """
 
@@ -644,6 +677,7 @@ class _GradientWorker(QThread):
         mode: str,
         csv_path: str,
         base_results: GuiRunResults | None,
+        model_key: str = DEFAULT_MODEL_KEY,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -652,6 +686,7 @@ class _GradientWorker(QThread):
         self._mode: str = mode
         self._csv_path: str = csv_path
         self._base_results: GuiRunResults | None = base_results
+        self._model_key: str = model_key
 
     @staticmethod
     def _key(point: np.ndarray) -> tuple[float, ...]:
@@ -678,6 +713,7 @@ class _GradientWorker(QThread):
                 mode=self._mode,
                 csv_path=None,
                 elapsed_seconds=time.perf_counter() - started,
+                model_key=self._model_key,
             )
         finally:
             sys.stdout = real_stdout
@@ -746,6 +782,7 @@ class _GradientWorker(QThread):
             self._mode,
             self._csv_path,
             on_result=on_result,
+            model_key=self._model_key,
         )
         failed_points: int = 0
         results: dict[tuple[float, ...], GuiRunResults | str] = {}
@@ -762,6 +799,7 @@ class _GradientWorker(QThread):
                         mode=self._mode,
                         csv_path=None,
                         elapsed_seconds=time.perf_counter() - started,
+                        model_key=self._model_key,
                     )
                 failed_points += 1
             results[self._key(point)] = payload
@@ -804,6 +842,7 @@ class _GradientWorker(QThread):
             mode=self._mode,
             csv_path=csv_path,
             elapsed_seconds=time.perf_counter() - started,
+            model_key=self._model_key,
             failed_points=failed_points,
             total_points=step_total,
         )
@@ -852,6 +891,8 @@ class _LineSearchOutcome:
         mode: The run mode the job's points ran in (`MODE_FULL` or
             `MODE_HYDRO`).
         elapsed_seconds: The wall-clock duration of the job.
+        model_key: The key of the model spec the job ran; the window
+            discards an outcome from another model.
         failed_points: The number of the job's search points that
             failed: their profile entries are NaN.  Always zero
             on a failed job.
@@ -869,6 +910,7 @@ class _LineSearchOutcome:
     terms: list[str]
     mode: str
     elapsed_seconds: float
+    model_key: str
     failed_points: int = 0
     total_points: int = 0
 
@@ -924,6 +966,7 @@ class _LineSearchWorker(QThread):
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
             point too).
+        model_key: The key of the model spec the job runs.
         parent: The parent object (the window); defaults to None.
     """
 
@@ -941,6 +984,7 @@ class _LineSearchWorker(QThread):
         csv_path: str,
         bounds: dict[str, tuple[float, float]],
         base_results: GuiRunResults | None,
+        model_key: str = DEFAULT_MODEL_KEY,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -952,6 +996,7 @@ class _LineSearchWorker(QThread):
         self._csv_path: str = csv_path
         self._bounds: dict[str, tuple[float, float]] = bounds
         self._base_results: GuiRunResults | None = base_results
+        self._model_key: str = model_key
 
     def _key(self, x: np.ndarray) -> tuple[float, ...]:
         """The deduplication key of a parameter vector (its values)."""
@@ -977,6 +1022,7 @@ class _LineSearchWorker(QThread):
                 terms=list(self._terms),
                 mode=self._mode,
                 elapsed_seconds=time.perf_counter() - started,
+                model_key=self._model_key,
             )
         finally:
             sys.stdout = real_stdout
@@ -1025,6 +1071,7 @@ class _LineSearchWorker(QThread):
             terms=list(self._terms),
             mode=self._mode,
             elapsed_seconds=time.perf_counter() - started,
+            model_key=self._model_key,
         )
 
     def _compute(self, started: float) -> _LineSearchOutcome:
@@ -1146,6 +1193,7 @@ class _LineSearchWorker(QThread):
                 self._mode,
                 self._csv_path,
                 on_result=on_phase1_result,
+                model_key=self._model_key,
             )
         results: dict[tuple[float, ...], GuiRunResults] = {}
         if self._base_results is not None:
@@ -1213,6 +1261,7 @@ class _LineSearchWorker(QThread):
                 self._mode,
                 self._csv_path,
                 on_result=on_pool_result,
+                model_key=self._model_key,
             )
             if pool_points
             else []
@@ -1299,6 +1348,7 @@ class _LineSearchWorker(QThread):
             terms=list(self._terms),
             mode=self._mode,
             elapsed_seconds=time.perf_counter() - started,
+            model_key=self._model_key,
             failed_points=failed_points,
             total_points=step_total,
         )
@@ -1405,6 +1455,8 @@ class _LineSearchSnapshot:
             the page's caption.
         elapsed_seconds: The wall-clock duration of the job, shown
             in the completion status line.
+        model_key: The key of the model spec the job ran; the window
+            discards a snapshot from another model.
     """
 
     profile: pd.DataFrame
@@ -1412,6 +1464,7 @@ class _LineSearchSnapshot:
     mode: str
     csv_path: Path
     elapsed_seconds: float
+    model_key: str
 
 
 # ==== Objective table ==== #
@@ -1910,8 +1963,11 @@ class MainWindow(QMainWindow):
         # unset selection, which searches every selectable term.
         # Restored from a saved run; never set by a run's results.
         self._objective_terms: frozenset[str] | None = None
+        # Set when a model switch asked for a run but a worker was
+        # still in flight; the run starts once that worker ends.
+        self._pending_run_after_worker: bool = False
 
-        self.setWindowTitle(_TITLE)
+        self.setWindowTitle(_title_for(self._input_data.spec))
         self.resize(*_INITIAL_SIZE)
 
         self._build_ui()
@@ -1995,15 +2051,33 @@ class MainWindow(QMainWindow):
         its text (the tooltip keeps the full message) instead of
         pushing the window past the screen.
         """
-        title: QLabel = QLabel(_TITLE)
-        font: QFont = QFont(title.font())
+        self._title_label: QLabel = QLabel(_title_for(self._input_data.spec))
+        font: QFont = QFont(self._title_label.font())
         font.setBold(True)
         font.setPointSize(max(9, font.pointSize() + 2))
-        title.setFont(font)
+        self._title_label.setFont(font)
 
         # The running-job indicator: hidden at rest, its fixed size
         # keeps the row's footprint constant either way.
         self._job_spinner: _SpinnerLabel = _SpinnerLabel()
+
+        # The model selector: one entry per curated model spec, the
+        # selected model's display name in the text and its spec key
+        # in the item data.  A change reloads the inputs and resets
+        # the panel (see `_on_model_changed`).
+        self._model_combo: QComboBox = QComboBox()
+        self._model_combo.setToolTip(
+            "Switch the calibrated model.  The parameters, bounds, "
+            "zones, figures, and history follow the selected model; "
+            "switching resets the parameter values to the new "
+            "model's defaults."
+        )
+        for key, spec in MODEL_SPECS.items():
+            self._model_combo.addItem(spec.display_name, key)
+        self._model_combo.setCurrentIndex(
+            self._model_combo.findData(self._input_data.spec.key)
+        )
+        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
 
         # Off by default: the models run in full mode.
         self._mode_checkbox: QCheckBox = QCheckBox("Hydrology only")
@@ -2095,8 +2169,9 @@ class MainWindow(QMainWindow):
         layout: QHBoxLayout = QHBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
-        layout.addWidget(title)
+        layout.addWidget(self._title_label)
         layout.addWidget(self._job_spinner)
+        layout.addWidget(self._model_combo)
         layout.addWidget(self._mode_checkbox)
         layout.addStretch(1)
         # The status label stretches with the middle stretch (both
@@ -2284,7 +2359,9 @@ class MainWindow(QMainWindow):
     def _build_param_panel(self) -> ParamPanel:
         """Build the parameter panel and connect its signals to the window."""
         self._param_panel: ParamPanel = ParamPanel(
-            self._input_data, default_plot_selection(), self
+            self._input_data,
+            default_plot_selection(self._input_data.spec),
+            self,
         )
         self._param_panel.value_changed.connect(self._on_value_changed)
         self._param_panel.bounds_changed.connect(self._on_bounds_changed)
@@ -2310,19 +2387,38 @@ class MainWindow(QMainWindow):
         """
         Restore the most recent saved run, or start from defaults.
 
-        The parameter panel's *History* dropdown is filled first
-        with every saved run directory, newest first, so the
-        restored run is one of its entries; with a restorable latest
-        run the window then opens on that run's figures and
-        parameters without a re-run, and otherwise (no run, or an
-        unreadable one) it starts from the default parameters and
-        runs the models once in the background.
+        The latest saved run's model decides the window's model: a
+        saved run of another curated model switches the window to it
+        first (without starting a run, since the saved run is
+        applied straight away).  The parameter panel's *History*
+        dropdown is then filled with the current model's saved run
+        directories, newest first, so the restored run is one of its
+        entries; with a restorable latest run the window opens on
+        that run's figures and parameters without a re-run, and
+        otherwise (no run, or an unreadable one) it starts from the
+        default parameters and runs the models once in the
+        background.
         """
         runs: list[Path] = list_run_dirs()
+        latest: Path | None = runs[0] if runs else None
+        if latest is not None:
+            key: str = saved_run_model_key(latest)
+            if key != self._input_data.spec.key:
+                index: int = self._model_combo.findData(key)
+                if index >= 0:
+                    self._model_combo.blockSignals(True)
+                    self._model_combo.setCurrentIndex(index)
+                    self._model_combo.blockSignals(False)
+                    self._switch_model(key, start_run=False)
         # The saved-run directories become entries of the window's
         # history (label and path only; their state is read on
         # demand), so a selection from the dropdown can restore and
-        # overlay the same runs the dropdown shows.
+        # overlay the same runs the dropdown shows.  Only the current
+        # model's runs are listed.
+        current_key: str = self._input_data.spec.key
+        current_runs: list[Path] = [
+            run for run in runs if saved_run_model_key(run) == current_key
+        ]
         self._history_items = [
             _HistoryItem(
                 label=run.name,
@@ -2330,11 +2426,13 @@ class MainWindow(QMainWindow):
                 param_values=None,
                 results=None,
                 mode=None,
+                model_key=current_key,
             )
-            for run in runs
+            for run in current_runs
         ]
-        self._param_panel.set_history_items([run.name for run in runs])
-        latest: Path | None = runs[0] if runs else None
+        self._param_panel.set_history_items(
+            [run.name for run in current_runs]
+        )
         if latest is None:
             self._status(
                 "No saved run found; starting from the default parameters."
@@ -2546,8 +2644,22 @@ class MainWindow(QMainWindow):
         (``deleteLater``, connected after this handler) runs, so a
         later ``isRunning`` check never touches a deleted C++
         object.
+
+        A model switch made while this worker was in flight asked
+        for a run of the new model (see `_switch_model`): that run
+        starts now that the window is free, or the run button lights
+        up when auto-run is off.
         """
         self._worker = None
+        if not self._pending_run_after_worker:
+            return
+        self._pending_run_after_worker = False
+        if self._auto_run_checkbox.isChecked():
+            self._start_run(self._current_x())
+        else:
+            self._run_button.setEnabled(True)
+            self._gradients_button.setEnabled(True)
+            self._line_search_button.setEnabled(True)
 
     def _on_finished_run(self, payload: object) -> None:
         """
@@ -2697,6 +2809,7 @@ class MainWindow(QMainWindow):
             self._current_mode(),
             self._csv_path or str(DEFAULT_CSV_PATH),
             base_results,
+            self._input_data.spec.key,
             self,
         )
         worker.progress_line.connect(self._on_gradient_progress_line)
@@ -2737,6 +2850,14 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, _GradientOutcome):
             return
         outcome: _GradientOutcome = payload
+        if outcome.model_key != self._input_data.spec.key:
+            # The model changed mid-job: the outcome belongs to the
+            # model the window no longer shows.  Drop it and restore
+            # the job buttons the switch left disabled.
+            self._gradients_button.setEnabled(True)
+            self._line_search_button.setEnabled(True)
+            self._update_run_button()
+            return
         if outcome.error is not None:
             self._status(f"Gradients failed: {outcome.error}")
         elif outcome.table is None or outcome.csv_path is None:
@@ -2758,6 +2879,7 @@ class MainWindow(QMainWindow):
                 mode=outcome.mode,
                 csv_path=csv_path,
                 elapsed_seconds=outcome.elapsed_seconds,
+                model_key=outcome.model_key,
             )
             self._refresh_from_results()
             message: str = (
@@ -2998,6 +3120,7 @@ class MainWindow(QMainWindow):
             self._csv_path or str(DEFAULT_CSV_PATH),
             bounds,
             base_results,
+            self._input_data.spec.key,
             self,
         )
         worker: _LineSearchWorker = self._worker
@@ -3051,6 +3174,12 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, _LineSearchOutcome):
             return
         outcome: _LineSearchOutcome = payload
+        if outcome.model_key != self._input_data.spec.key:
+            # The model changed mid-job: the outcome belongs to the
+            # model the window no longer shows.  Drop it (the job
+            # buttons were already restored above).
+            self._update_run_button()
+            return
         if (
             outcome.error is not None
             or outcome.profile is None
@@ -3098,6 +3227,7 @@ class MainWindow(QMainWindow):
             mode=outcome.mode,
             csv_path=outcome.csv_path,
             elapsed_seconds=outcome.elapsed_seconds,
+            model_key=outcome.model_key,
         )
         if (
             base_value is not None
@@ -3200,6 +3330,7 @@ class MainWindow(QMainWindow):
             mode=mode,
             param_values=self._param_panel.param_values(),
             objectives=objectives_from_results(self._results),
+            model_key=self._input_data.spec.key,
         )
         append_run_history(Path("results"), entry)
 
@@ -3230,6 +3361,7 @@ class MainWindow(QMainWindow):
             param_values=self._param_panel.param_values(),
             results=self._results,
             mode=mode,
+            model_key=self._input_data.spec.key,
         )
         session_entries: list[_HistoryItem] = [
             entry for entry in self._history_items if entry.run_dir is None
@@ -3272,6 +3404,7 @@ class MainWindow(QMainWindow):
                 param_values=None,
                 results=None,
                 mode=None,
+                model_key=self._input_data.spec.key,
             ),
         )
         self._history_items = session_entries + saved_entries
@@ -3301,7 +3434,10 @@ class MainWindow(QMainWindow):
         index: int = self._param_panel.history_selected_index()
         if index < 0 or index >= len(self._history_items):
             return None
-        return self._history_items[index]
+        item: _HistoryItem = self._history_items[index]
+        if item.model_key != self._input_data.spec.key:
+            return None
+        return item
 
     def _load_saved_history_item(
         self, item: _HistoryItem
@@ -3529,6 +3665,117 @@ class MainWindow(QMainWindow):
         if self._auto_run_checkbox.isChecked():
             self._debounce_timer.start()
 
+    def _on_model_changed(self, _index: int) -> None:
+        """
+        The header's model selector changed: switch to its model.
+
+        The combo's item data is the selected model's spec key; a
+        change to the key already loaded is ignored (a programmatic
+        resync of the combo emits the same signal).
+        """
+        key: object = self._model_combo.currentData()
+        if not isinstance(key, str) or key == self._input_data.spec.key:
+            return
+        self._switch_model(key)
+
+    def _switch_selection(self, spec: ModelSpec) -> PlotSelection:
+        """
+        The plot selection after a model switch.
+
+        The species, mineral, streamflow toggle, and water-year
+        window are network- or record-level and survive the switch;
+        the zones are the new model's defaults, since the old
+        model's zone names may not exist in the new one.
+
+        Args:
+            spec: The model spec being switched to.
+
+        Returns:
+            The selection to hand the rebuilt parameter panel.
+        """
+        old: PlotSelection = self._param_panel.selection()
+        return PlotSelection(
+            species=list(old.species),
+            zones=default_plot_selection(spec).zones,
+            mineral=old.mineral,
+            streamflow=old.streamflow,
+            water_years_from=old.water_years_from,
+            water_years_to=old.water_years_to,
+        )
+
+    def _switch_model(self, key: str, *, start_run: bool = True) -> None:
+        """
+        Reload the window for the model spec ``key``.
+
+        The new model's inputs replace the loaded ones, the
+        parameter panel is rebuilt at its new defaults, and every
+        model-specific piece of state is discarded: the results,
+        the figures, the objective table, the gradient and line
+        search pages, and the session history.  The saved runs
+        listed in the history dropdown are filtered to the new
+        model.  The title and status follow the model.
+
+        A worker still in flight cannot be interrupted, so the run
+        the switch asks for is deferred to `_on_worker_finished`
+        (the run's own outcome is discarded by the bumped
+        generation); otherwise the run starts now when auto-run is
+        on, or the run button lights up.
+
+        Args:
+            key: The spec key to switch to.
+            start_run: Whether the switch may start a run.  Startup
+                passes False: it applies a saved run immediately, so
+                a fresh run would overwrite the restored results.
+        """
+        self._run_generation += 1
+        self._debounce_timer.stop()
+        self._start_x = None
+        self._start_mode = None
+        spec: ModelSpec = get_model_spec(key)
+        self._input_data = load_input_data(
+            Path(self._csv_path) if self._csv_path else DEFAULT_CSV_PATH,
+            model_key=key,
+        )
+        self._param_panel.reload(
+            self._input_data, self._switch_selection(spec)
+        )
+        self._results = None
+        self._last_run_x = None
+        self._last_run_mode = None
+        self._gradient_state = None
+        self._line_search_state = None
+        self._figure_panel.set_figures([])
+        self._objective_model.set_table(pd.DataFrame())
+        self._fit_objective_panel()
+        self._saved_run_cache.clear()
+        self._history_items = [
+            _HistoryItem(
+                label=run.name,
+                run_dir=run,
+                param_values=None,
+                results=None,
+                mode=None,
+                model_key=key,
+            )
+            for run in list_run_dirs()
+            if saved_run_model_key(run) == key
+        ]
+        self._sync_history_combo()
+        self._title_label.setText(_title_for(spec))
+        self.setWindowTitle(_title_for(spec))
+        self._status(f"Switched to {spec.display_name}.")
+        if not start_run:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_run_after_worker = True
+            return
+        if self._auto_run_checkbox.isChecked():
+            self._start_run(self._current_x())
+        else:
+            self._run_button.setEnabled(True)
+            self._gradients_button.setEnabled(True)
+            self._line_search_button.setEnabled(True)
+
     def _on_value_changed(self, _key: str) -> None:
         """
         A parameter value changed: re-run after the debounce, when
@@ -3618,13 +3865,10 @@ class MainWindow(QMainWindow):
             # A hydrology-only run saves one flat bundle
             # (simulation, parameters, and objective functions
             # directly in the run directory).
-            num_hydro: int = (
-                pt.LateralThreeLayerModel.get_num_hydro_parameters()
-            )
-            hydro_model: HydrologicalModel = (
-                pt.LateralThreeLayerModel.hydro_from_array(
-                    self._current_x()[:num_hydro], natural_scales=True
-                )
+            model_class: type[pt.Model] = self._input_data.spec.model_class
+            num_hydro: int = model_class.get_num_hydro_parameters()
+            hydro_model: HydrologicalModel = model_class.hydro_from_array(
+                self._current_x()[:num_hydro], natural_scales=True
             )
             run_dir: Path = save_hydro_run(
                 hydro_model, self._results.hydro, results_dir=None
@@ -3667,6 +3911,7 @@ class MainWindow(QMainWindow):
                 if self._objective_terms is not None
                 else None
             ),
+            model_key=self._input_data.spec.key,
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(
@@ -3728,6 +3973,7 @@ class MainWindow(QMainWindow):
             overlay[1] if overlay is not None else None
         )
 
+        spec: ModelSpec = self._input_data.spec
         hydro_sim: pd.DataFrame = hydro.simulation
         hydrology: Figure = make_hydrology_figure(
             hydro_sim,
@@ -3740,12 +3986,17 @@ class MainWindow(QMainWindow):
             selection.zones,
             window,
             overlay_hydro_sim=overlay_hydro,
+            zone_labels=spec.zone_labels,
+            zone_colors=spec.zone_colors,
         )
         partitioning: Figure = make_partitioning_figure(
             hydro_sim,
             self._input_data.q_meas,
             window,
             overlay_hydro_sim=overlay_hydro,
+            zone_labels=spec.zone_labels,
+            zone_colors=spec.zone_colors,
+            stack_order=spec.stack_order,
         )
         figures: tuple[tuple[str, Figure], ...] = (
             ("Hydrology", hydrology),
@@ -3796,12 +4047,17 @@ class MainWindow(QMainWindow):
                 selection.zones,
                 window,
                 overlay_rt_sim=overlay_rt,
+                zone_labels=spec.zone_labels,
+                zone_colors=spec.zone_colors,
             )
             rate: Figure = make_rate_figure(
                 rt_sim,
                 selection.mineral,
                 window,
                 overlay_rt_sim=overlay_rt,
+                zone_labels=spec.zone_labels,
+                zone_colors=spec.zone_colors,
+                zone_order=spec.zones,
             )
             figures = figures + (
                 ("River concentrations", river_concentrations),

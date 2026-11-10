@@ -67,6 +67,7 @@ from potions.reactive_transport.rt_zone import WaterVolumeError
 
 from ..gui import data as gui_data
 from ..gui import figure_panel as gui_figure_panel
+from ..gui import model_specs
 from ..gui import param_panel as gui_param_panel
 from ..gui import window as gui_window
 from ..gui.common import (
@@ -101,6 +102,7 @@ from .test_gui import (
     _synthetic_results,
     _write_saved_run,
     input_data,
+    model_inputs,
 )
 
 
@@ -168,7 +170,7 @@ def _fake_results_factory(
         x: np.ndarray, _input_data: gui_data.GuiInputData
     ) -> gui_data.GuiRunResults:
         calls.append(np.array(x))
-        hydro, rt = _synthetic_results(input_data)
+        hydro, rt = _synthetic_results(_input_data)
         if hydro_only:
             return gui_data.GuiRunResults(hydro, None)
         return gui_data.GuiRunResults(hydro, rt)
@@ -411,7 +413,9 @@ class TestMainWindowStartup:
             # per measured target (the streamflow and the species).
             assert win._objective_model.rowCount() == 7
             assert win._objective_model.columnCount() == 4
-            assert win.windowTitle() == gui_window._TITLE
+            assert win.windowTitle() == gui_window._title_for(
+                model_specs.DEFAULT_MODEL_SPEC
+            )
         finally:
             _close_window(win)
 
@@ -796,8 +800,8 @@ class TestMainWindowStartup:
                     0.5 * (lo + hi)
                 )
             # Geometry and splitter sizes keep their defaults.
-            assert win.width() == 1200
-            assert win.height() == 900
+            assert win.width() == gui_window._INITIAL_SIZE[0]
+            assert win.height() == gui_window._INITIAL_SIZE[1]
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
             # No saved state carried the toggle: it restores off.
@@ -1144,6 +1148,7 @@ class TestMainWindowRuns:
             saved = read_gui_state(run_dir)
             assert saved is not None
             assert saved.csv_path is None
+            assert saved.model_key == "lateral_three_layer"
             assert saved.param_values == win._param_panel.param_values()
             assert saved.param_bounds == win._param_panel.current_bounds()
             assert saved.selection == gui_data.default_plot_selection()
@@ -1155,8 +1160,8 @@ class TestMainWindowRuns:
             assert saved.window_geometry == {
                 "x": 0,
                 "y": 0,
-                "width": 1200,
-                "height": 900,
+                "width": gui_window._INITIAL_SIZE[0],
+                "height": gui_window._INITIAL_SIZE[1],
             }
             # The saved list holds the main vertical splitter's
             # laid-out sizes: scaled to the splitter's actual size,
@@ -3002,7 +3007,7 @@ def _gradient_fake_factory(
         hydro_only: bool,
     ) -> gui_data.GuiRunResults:
         calls.append(np.array(x))
-        hydro, rt = _synthetic_results(input_data)
+        hydro, rt = _synthetic_results(_input_data)
         hydro.objective_functions = (
             hydro.objective_functions
             + 2.0 * float(x[hydro_index])
@@ -4212,6 +4217,7 @@ class TestLineSearch:
             on_result: (
                 Callable[[int, gui_data.GuiRunResults | str], None] | None
             ) = None,
+            model_key: str = "lateral_three_layer",
         ) -> list[gui_data.GuiRunResults | str]:
             payloads: list[gui_data.GuiRunResults | str] = []
             for index, point in enumerate(points):
@@ -4326,6 +4332,7 @@ class TestLineSearch:
                 csv_path=csv_path,
                 terms=["Streamflow: KGE"],
                 mode=win._current_mode(),
+                model_key=model_specs.DEFAULT_MODEL_KEY,
                 elapsed_seconds=3.0,
                 failed_points=0,
                 total_points=25,
@@ -4417,6 +4424,7 @@ class TestLineSearch:
                 csv_path=csv_path,
                 terms=["Streamflow: KGE"],
                 mode=win._current_mode(),
+                model_key=model_specs.DEFAULT_MODEL_KEY,
                 elapsed_seconds=3.0,
                 failed_points=0,
                 total_points=25,
@@ -4837,6 +4845,7 @@ class TestLineSearch:
                 mode=MODE_FULL,
                 csv_path=csv_path,
                 elapsed_seconds=0.0,
+                model_key=model_specs.DEFAULT_MODEL_KEY,
             )
 
             terms: frozenset[str] = frozenset({"DOC: KGE"})
@@ -5077,4 +5086,245 @@ class TestLineSearch:
         finally:
             gate.set()
             file_gate.touch()
+            _close_window(win)
+
+
+class TestModelSelection:
+    """The header model selector and the state a switch resets."""
+
+    def test_starts_on_lateral_and_titles_it(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The window opens on the lateral model and names it."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            assert win._model_combo.currentData() == "lateral_three_layer"
+            assert win.windowTitle() == (
+                "East River calibration — Lateral three-layer"
+            )
+        finally:
+            _close_window(win)
+
+    def test_model_combo_lists_the_four_models(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The selector offers exactly the four curated models, in order."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            labels: list[str] = [
+                win._model_combo.itemText(i)
+                for i in range(win._model_combo.count())
+            ]
+            keys: list[str] = [
+                win._model_combo.itemData(i)
+                for i in range(win._model_combo.count())
+            ]
+            assert labels == [
+                "Lateral three-layer",
+                "Three-layer",
+                "HBV",
+                "HBV lateral",
+            ]
+            assert keys == [
+                "lateral_three_layer",
+                "three_layer",
+                "hbv",
+                "hbv_lateral",
+            ]
+        finally:
+            _close_window(win)
+
+    def test_switching_model_resets_panel_and_clears_results(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A switch reloads the panel, clears the figures, and re-titles."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            win._model_combo.setCurrentIndex(
+                win._model_combo.findData("hbv")
+            )
+            _pump()
+
+            assert win._input_data.spec.key == "hbv"
+            values: dict[str, float] = win._param_panel.param_values()
+            assert "shallow.perc" in values
+            assert "snow_hs.tt" not in values
+            assert win._results is None
+            assert win._figure_panel.page_count() == 0
+            assert win._objective_model._table.empty
+            assert win.windowTitle() == "East River calibration — HBV"
+            assert win._status_label.text() == "Switched to HBV."
+        finally:
+            _close_window(win)
+
+    def test_switch_filters_history_to_current_model(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        model_inputs: dict[str, gui_data.GuiInputData],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the current model's saved runs remain in the history."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            hbv_input: gui_data.GuiInputData = model_inputs["hbv"]
+            _write_saved_run(tmp_path, input_data)
+            _write_saved_run(
+                tmp_path,
+                hbv_input,
+                state=_full_state(hbv_input, model_key="hbv"),
+            )
+
+            win._auto_run_checkbox.setChecked(False)
+            win._model_combo.setCurrentIndex(
+                win._model_combo.findData("hbv")
+            )
+            _pump()
+
+            assert win._history_items
+            assert all(
+                item.model_key == "hbv" for item in win._history_items
+            )
+            combo = win._param_panel._history_combo
+            labels: list[str] = [
+                combo.itemText(i) for i in range(combo.count())
+            ]
+            assert labels == [item.label for item in win._history_items]
+            assert all("lateral" not in label.lower() for label in labels)
+        finally:
+            _close_window(win)
+
+    def test_gradient_outcome_from_another_model_is_discarded(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gradient outcome from another model never reaches the panel."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            outcome = gui_window._GradientOutcome(
+                error=None,
+                table=pd.DataFrame({"x": [1.0]}),
+                base_results=None,
+                base_x=win._current_x(),
+                mode=MODE_FULL,
+                csv_path=tmp_path / "gradient.csv",
+                elapsed_seconds=1.0,
+                model_key="three_layer",
+            )
+            win._on_finished_gradient(outcome)
+
+            assert win._gradient_state is None
+            assert win._gradients_button.isEnabled()
+            assert win._line_search_button.isEnabled()
+        finally:
+            _close_window(win)
+
+    def test_saves_the_selected_model(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Saving under HBV writes an HBV model and records the key."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            win._model_combo.setCurrentIndex(
+                win._model_combo.findData("hbv")
+            )
+            _pump()
+            # Run once so there are results to save for the new model.
+            win._start_run(win._current_x())
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+
+            run_dir: Path = tmp_path / "results" / "run_hbv"
+            saves: list[pt.Model] = []
+
+            def fake_save(
+                model: pt.Model,
+                hydro: pt.HydroModelResults,
+                rt: pt.RtModelResults,
+                results_dir: Path | None = None,
+            ) -> Path:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                saves.append(model)
+                return run_dir
+
+            monkeypatch.setattr(gui_window, "save_model_run", fake_save)
+            win._on_save_run()
+
+            assert len(saves) == 1
+            assert isinstance(saves[0], pt.HbvModel)
+            saved = read_gui_state(run_dir)
+            assert saved is not None
+            assert saved.model_key == "hbv"
+        finally:
             _close_window(win)

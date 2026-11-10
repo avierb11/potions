@@ -119,32 +119,44 @@ def model_inputs() -> dict[str, gui_data.GuiInputData]:
     }
 
 
-def _synthetic_hydro_sim(index: pd.Index) -> pd.DataFrame:
+def _synthetic_hydro_sim(
+    index: pd.Index,
+    zones: list[str] = ZONE_ORDER,
+    snow_zones: list[str] = SNOW_ZONES,
+) -> pd.DataFrame:
     """A synthetic hydrology simulation frame with the figure columns."""
     data: dict[str, np.ndarray] = {
         "streamflow_sim": np.arange(len(index), dtype=float)
     }
-    for i, zone in enumerate(ZONE_ORDER):
+    for i, zone in enumerate(zones):
         share: float = (i + 1) * 0.1
         data[f"s_{zone}"] = np.arange(len(index), dtype=float)
         data[f"q_lat_{zone}"] = share * data["streamflow_sim"]
         # Only the river zones partition the streamflow (the snow
         # zones discharge to the ground zones, not to the river).
-        if zone not in SNOW_ZONES:
+        if zone not in snow_zones:
             data[f"prop_q_{zone}"] = np.full(len(index), share)
     return pd.DataFrame(data, index=index)
 
 
-def _synthetic_rt_sim(index: pd.Index, minerals: list[str]) -> pd.DataFrame:
+def _synthetic_rt_sim(
+    index: pd.Index,
+    minerals: list[str],
+    zones: list[str] = ZONE_ORDER,
+    snow_zones: list[str] = SNOW_ZONES,
+) -> pd.DataFrame:
     """A synthetic reactive-transport frame with every plotted column."""
     species: list[str] = ["DOC", "DIC", "Ca++"]
+    non_snow_zones: list[str] = [
+        zone for zone in zones if zone not in snow_zones
+    ]
     data: dict[str, np.ndarray] = {}
     for species_name in species:
         data[f"{species_name}_riv"] = np.arange(len(index), dtype=float)
-        for zone in ZONE_ORDER:
+        for zone in zones:
             data[f"{species_name}_{zone}"] = np.arange(len(index), dtype=float)
     for mineral in minerals:
-        for zone in ZONE_ORDER[2:]:
+        for zone in non_snow_zones:
             data[f"{mineral}_conc_{zone}"] = np.arange(len(index), dtype=float)
             data[f"{mineral}_rate_{zone}"] = np.arange(len(index), dtype=float)
     return pd.DataFrame(data, index=index)
@@ -155,18 +167,23 @@ def _synthetic_results(
 ) -> tuple[pt.HydroModelResults, pt.RtModelResults]:
     """Synthetic hydrology and reactive-transport results objects."""
     index: pd.Index = input_data.forc.precip.index
+    zones: list[str] = list(input_data.spec.zones)
+    snow_zones: list[str] = list(input_data.spec.snow_zones)
     hydro: pt.HydroModelResults = pt.HydroModelResults(
         forcing=input_data.forc,
-        simulation=_synthetic_hydro_sim(index),
+        simulation=_synthetic_hydro_sim(index, zones, snow_zones),
         objective_functions=pd.Series(
             {name: 0.9 * (i + 1) for i, name in enumerate(METRIC_NAMES)},
             dtype=float,
         ),
-        zone_names=list(ZONE_ORDER),
+        zone_names=zones,
     )
     rt: pt.RtModelResults = pt.RtModelResults(
         simulation=_synthetic_rt_sim(
-            index, list(input_data.network.mineral_names)
+            index,
+            list(input_data.network.mineral_names),
+            zones,
+            snow_zones,
         ),
         objective_functions=pd.DataFrame(
             {
@@ -176,7 +193,7 @@ def _synthetic_results(
             index=METRIC_NAMES,
         ).T,
         saved_dir=None,
-        zone_names=list(ZONE_ORDER),
+        zone_names=zones,
     )
     return hydro, rt
 
@@ -203,12 +220,11 @@ def _write_saved_run(
     """
     hydro, rt = _synthetic_results(input_data)
     if hydro_only:
-        num_hydro: int = pt.LateralThreeLayerModel.get_num_hydro_parameters()
-        hydro_model: HydrologicalModel = (
-            pt.LateralThreeLayerModel.hydro_from_array(
-                _midpoint_vector(input_data)[:num_hydro],
-                natural_scales=True,
-            )
+        model_class: type[pt.Model] = input_data.spec.model_class
+        num_hydro: int = model_class.get_num_hydro_parameters()
+        hydro_model: HydrologicalModel = model_class.hydro_from_array(
+            _midpoint_vector(input_data)[:num_hydro],
+            natural_scales=True,
         )
         run_dir = save_hydro_run(
             hydro_model, hydro, results_dir=base_dir / "results"
@@ -247,7 +263,8 @@ def _full_state(
     values: dict[str, float] = {
         key: 0.5 * (lo + hi) for key, (lo, hi) in bounds.items()
     }
-    values["proportion.1"] = 0.7
+    if "proportion.1" in values:
+        values["proportion.1"] = 0.7
     return GuiState(
         csv_path=str(gui_data.DEFAULT_CSV_PATH),
         param_values=values,
