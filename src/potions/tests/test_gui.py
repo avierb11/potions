@@ -54,6 +54,7 @@ from potions.result_saving import (
 from ..gui import data as gui_data
 from ..gui import gradients as gui_gradients
 from ..gui import model_pool
+from ..gui import model_specs
 from ..gui import plots as gui_plots
 from ..gui import state as gui_state
 from ..gui.common import (
@@ -3963,3 +3964,134 @@ class TestModelPool:
         assert not isinstance(first, str)
         assert first.rt is None
         assert float(first.hydro.objective_functions.iloc[0]) == 1003.0
+
+
+class TestModelSpecs:
+    """The curated model registry and its derived zone metadata."""
+
+    def test_registry_has_the_four_models_in_order(self) -> None:
+        assert list(model_specs.MODEL_SPECS) == [
+            "lateral_three_layer",
+            "three_layer",
+            "hbv",
+            "hbv_lateral",
+        ]
+        assert model_specs.DEFAULT_MODEL_KEY == "lateral_three_layer"
+
+    def test_display_names(self) -> None:
+        assert {
+            key: spec.display_name
+            for key, spec in model_specs.MODEL_SPECS.items()
+        } == {
+            "lateral_three_layer": "Lateral three-layer",
+            "three_layer": "Three-layer",
+            "hbv": "HBV",
+            "hbv_lateral": "HBV lateral",
+        }
+
+    @pytest.mark.parametrize(
+        ("key", "zones"),
+        [
+            (
+                "lateral_three_layer",
+                [
+                    "snow_hs",
+                    "snow_rp",
+                    "surface_hs",
+                    "surface_rp",
+                    "ground_hs",
+                    "ground_rp",
+                ],
+            ),
+            ("three_layer", ["snow", "surface", "ground"]),
+            ("hbv", ["snow", "surface", "shallow", "deep"]),
+            (
+                "hbv_lateral",
+                [
+                    "snow_hs",
+                    "snow_rp",
+                    "surface_hs",
+                    "surface_rp",
+                    "shallow_hs",
+                    "shallow_rp",
+                    "deep_hs",
+                    "deep_rp",
+                ],
+            ),
+        ],
+    )
+    def test_zones_follow_model_order(
+        self, key: str, zones: list[str]
+    ) -> None:
+        spec = model_specs.get_model_spec(key)
+        assert spec.zones == zones
+        assert list(spec.zone_configs) == zones
+        assert set(spec.zone_labels) == set(zones)
+        assert set(spec.zone_colors) == set(zones)
+
+    def test_chemistry_configs(self) -> None:
+        for spec in model_specs.MODEL_SPECS.values():
+            for zone in spec.zones:
+                cfg = spec.zone_configs[zone]
+                if zone in spec.snow_zones:
+                    assert (cfg.do_reactions, cfg.do_speciation) == (
+                        False,
+                        False,
+                    )
+                else:
+                    assert (cfg.do_reactions, cfg.do_speciation) == (
+                        True,
+                        True,
+                    )
+
+    def test_snow_reactive_and_speciation_zones(self) -> None:
+        hbv = model_specs.get_model_spec("hbv")
+        assert hbv.snow_zones == ["snow"]
+        assert hbv.reactive_zones == ["surface", "shallow", "deep"]
+        assert hbv.speciation_zones == ["surface", "shallow", "deep"]
+
+    def test_stack_order_is_deepest_first(self) -> None:
+        assert model_specs.get_model_spec(
+            "lateral_three_layer"
+        ).stack_order == [
+            "ground_hs",
+            "ground_rp",
+            "surface_hs",
+            "surface_rp",
+            "snow_hs",
+            "snow_rp",
+        ]
+        assert model_specs.get_model_spec("hbv").stack_order == [
+            "deep",
+            "shallow",
+            "surface",
+            "snow",
+        ]
+
+    def test_zone_layer_index(self) -> None:
+        spec = model_specs.get_model_spec("hbv")
+        assert spec.zone_layer_index == {
+            "snow": 0,
+            "surface": 1,
+            "shallow": 2,
+            "deep": 3,
+        }
+
+    def test_unknown_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="lateral_three_layer"):
+            model_specs.get_model_spec("nope")
+
+    def test_class_name_maps_to_key(self) -> None:
+        assert (
+            model_specs.model_key_for_class_name(
+                "potions.common_models.LateralThreeLayerModel"
+            )
+            == "lateral_three_layer"
+        )
+        assert (
+            model_specs.model_key_for_class_name(
+                "potions.common_models.HbvLateralModel"
+            )
+            == "hbv_lateral"
+        )
+        assert model_specs.model_key_for_class_name("UnknownModel") is None
