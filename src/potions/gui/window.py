@@ -3,11 +3,12 @@ The main window of the East River lateral-model calibration GUI.
 
 The window stacks two sections: the figure panel (the model's
 figures, one visible at a time, flipped by the panel's arrow
-buttons or the main window's Left / Right keys: the three
-full-mode figures, or the streamflow and zone-storage figures in
-hydrology-only mode, plus the gradient job's matrix and a line
-search's value profile as extra pages when those jobs have
-finished) and, below it, a row holding the fixed-size per-run
+buttons or the main window's Left / Right keys: the hydrology,
+storage, and partitioning figures, joined by the river
+concentrations, river loads, concentration vs. discharge, zone
+concentrations, and reaction rates figures in full mode, plus the
+gradient job's matrix and a line search's value profile as extra
+pages when those jobs have finished) and, below it, a row holding the fixed-size per-run
 objective-function table on the left and the parameter panel on
 the right.
 
@@ -130,7 +131,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from potions.gui.common import HYDRO_THEME, METRIC_NOTES, RT_MODE_TINT
+from potions.gui.common import (
+    HYDRO_THEME,
+    METRIC_NOTES,
+    RT_MODE_TINT,
+    water_year_window,
+)
 from potions.gui.data import (
     DEFAULT_CSV_PATH,
     GuiInputData,
@@ -160,11 +166,16 @@ from potions.gui.model_pool import map_model_runs
 from potions.gui.param_panel import ParamPanel
 from potions.gui.plots import (
     build_objective_table,
+    make_conc_discharge_figure,
     make_gradient_figure,
+    make_hydrology_figure,
     make_line_search_figure,
+    make_partitioning_figure,
     make_rate_figure,
-    make_time_series_figure,
-    make_zone_figure,
+    make_river_concentrations_figure,
+    make_river_loads_figure,
+    make_storage_figure,
+    make_zone_concentrations_figure,
 )
 from potions.gui.state import (
     MODE_FULL,
@@ -1783,10 +1794,12 @@ class MainWindow(QMainWindow):
     The main window of the East River lateral-model calibration GUI.
 
     The window stacks two non-collapsible sections: the figure
-    panel (the model's figures, one visible at a time: the three
-    full-mode figures, or the streamflow and zone-storage figures
-    in hydrology-only mode, plus the gradient and line search
-    pages when those jobs have finished) and, below it, a row
+    panel (the model's figures, one visible at a time: the
+    hydrology, storage, and partitioning figures, joined by the
+    river concentrations, river loads, concentration vs.
+    discharge, zone concentrations, and reaction rates figures in
+    full mode, plus the gradient and line search pages when those
+    jobs have finished) and, below it, a row
     with the fixed-size per-run objective-function table on the
     left and the parameter panel on the right.  The header row
     carries the title, a *Hydrology only* checkbox next to it (off
@@ -3671,24 +3684,36 @@ class MainWindow(QMainWindow):
         Rebuild the figures and the objective table from the last
         results.
 
-        Every figure honors the current plot selection, so a
-        selection change refreshes them without a re-run.  A
-        hydrology-only run's results carry no reactive-transport
-        simulation, so the streamflow figure and a figure of each
-        zone's water storage are shown and the objective table
-        carries only the streamflow column.  A previous run
-        selected in the panel's *History* group (with its overlay
-        checkbox on) is drawn faintly on every figure, behind the
-        current run's series.  When a gradient job has finished,
-        its difference matrix is drawn as an extra page after the
-        mode's own figures, and when a line search has finished,
-        its value profile rides along as a further page.
+        Every figure honors the current plot selection — the river
+        species, the zones, the mineral, the streamflow toggle, and
+        the water-year window — so a selection change refreshes
+        them without a re-run.  A hydrology-only run's results
+        carry no reactive-transport simulation, so the three
+        hydrology figures (hydrology, storage, partitioning) are
+        shown and the objective table carries only the streamflow
+        column; a full run adds the five reactive-transport
+        figures (river concentrations, river loads, concentration
+        vs. discharge, zone concentrations, and the selected
+        mineral's reaction rates).  A previous run selected in the
+        panel's *History* group (with its overlay checkbox on) is
+        drawn faintly on every figure, behind the current run's
+        series.  When a gradient job has finished, its difference
+        matrix is drawn as an extra page after the mode's own
+        figures, and when a line search has finished, its value
+        profile rides along as a further page.
         """
         if self._results is None:
             return
         hydro: pt.HydroModelResults = self._results.hydro
         rt: pt.RtModelResults | None = self._results.rt
         selection: PlotSelection = self._param_panel.selection()
+
+        # Every figure is clipped to the panel's water-year window,
+        # so a range past the record's last day (the partial 2025
+        # water year) still plots only the days the record carries.
+        window: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(
+            selection.water_years_from, selection.water_years_to
+        )
 
         # The previous run selected in the *History* group (or None
         # when the overlay is off or no run is selected), drawn
@@ -3704,60 +3729,86 @@ class MainWindow(QMainWindow):
         )
 
         hydro_sim: pd.DataFrame = hydro.simulation
+        hydrology: Figure = make_hydrology_figure(
+            hydro_sim,
+            self._input_data.q_meas,
+            window,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        storage: Figure = make_storage_figure(
+            hydro_sim,
+            selection.zones,
+            window,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        partitioning: Figure = make_partitioning_figure(
+            hydro_sim,
+            self._input_data.q_meas,
+            window,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        figures: tuple[tuple[str, Figure], ...] = (
+            ("Hydrology", hydrology),
+            ("Storage", storage),
+            ("Partitioning", partitioning),
+        )
         if rt is None:
-            # A hydrology-only run shows the streamflow figure and
-            # each zone's water storage, with no reactive-transport
-            # column in the table.
-            time_series: Figure = make_time_series_figure(
-                hydro_sim,
-                None,
-                self._input_data.q_meas,
-                self._input_data.conc_df,
-                selection.time_series,
-                overlay_hydro_sim=overlay_hydro,
-                overlay_rt_sim=overlay_rt,
-            )
-            storage: Figure = make_zone_figure(
-                None,
-                hydro_sim,
-                [],
-                selection.zones,
-                overlay_rt_sim=overlay_rt,
-                overlay_hydro_sim=overlay_hydro,
-            )
-            figures: tuple[tuple[str, Figure], ...] = (
-                ("Streamflow", time_series),
-                ("Zone storage", storage),
-            )
+            # A hydrology-only run shows the three hydrology
+            # figures, with no reactive-transport column in the
+            # table.
             table: pd.DataFrame = build_objective_table(
                 hydro.objective_functions, None
             )
         else:
             rt_sim: pd.DataFrame = rt.simulation
-            time_series = make_time_series_figure(
-                hydro_sim,
-                rt_sim,
-                self._input_data.q_meas,
-                self._input_data.conc_df,
-                selection.time_series,
-                overlay_hydro_sim=overlay_hydro,
-                overlay_rt_sim=overlay_rt,
+            river_concentrations: Figure = (
+                make_river_concentrations_figure(
+                    rt_sim,
+                    hydro_sim,
+                    self._input_data.q_meas,
+                    self._input_data.conc_df,
+                    selection.species,
+                    selection.streamflow,
+                    window,
+                    overlay_rt_sim=overlay_rt,
+                    overlay_hydro_sim=overlay_hydro,
+                )
             )
-            zone: Figure = make_zone_figure(
+            river_loads: Figure = make_river_loads_figure(
                 rt_sim,
                 hydro_sim,
                 selection.species,
-                selection.zones,
+                window,
                 overlay_rt_sim=overlay_rt,
                 overlay_hydro_sim=overlay_hydro,
             )
-            rate: Figure = make_rate_figure(
-                rt_sim, selection.minerals, overlay_rt_sim=overlay_rt
+            conc_discharge: Figure = make_conc_discharge_figure(
+                rt_sim,
+                hydro_sim,
+                self._input_data.q_meas,
+                self._input_data.conc_df,
+                selection.species,
+                window,
             )
-            figures = (
-                ("Streamflow and river concentrations", time_series),
-                ("Zone concentrations and storage", zone),
-                ("Mineral reaction rates", rate),
+            zone_concentrations: Figure = make_zone_concentrations_figure(
+                rt_sim,
+                selection.species,
+                selection.zones,
+                window,
+                overlay_rt_sim=overlay_rt,
+            )
+            rate: Figure = make_rate_figure(
+                rt_sim,
+                selection.mineral,
+                window,
+                overlay_rt_sim=overlay_rt,
+            )
+            figures = figures + (
+                ("River concentrations", river_concentrations),
+                ("River loads", river_loads),
+                ("Concentration vs. discharge", conc_discharge),
+                ("Zone concentrations", zone_concentrations),
+                (f"Reaction rates ({selection.mineral})", rate),
             )
             table = build_objective_table(
                 hydro.objective_functions, rt.objective_functions

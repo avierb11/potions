@@ -73,9 +73,10 @@ from ..gui.common import (
     HYDRO_THEME,
     METRIC_LABELS,
     METRIC_NAMES,
+    RIVER_SPECIES,
     RT_THEME,
     SPECIATION_ZONES,
-    TIME_SERIES_OPTIONS,
+    WATER_YEARS,
     param_label,
 )
 from ..gui.data import PlotSelection
@@ -394,12 +395,17 @@ class TestMainWindowStartup:
             # than its children.
             assert win._progress_strip.isHidden()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert panel.page_count() == 3
+            assert panel.page_count() == 8
             assert panel.current_page() == 0
             assert panel._titles == [
-                "Streamflow and river concentrations",
-                "Zone concentrations and storage",
-                "Mineral reaction rates",
+                "Hydrology",
+                "Storage",
+                "Partitioning",
+                "River concentrations",
+                "River loads",
+                "Concentration vs. discharge",
+                "Zone concentrations",
+                "Reaction rates (SOC(s))",
             ]
             # The table is transposed: one row per metric, one column
             # per measured target (the streamflow and the species).
@@ -754,7 +760,7 @@ class TestMainWindowStartup:
             assert total > 0
             for size, target in zip(sizes, (300, 600)):
                 assert size / total == pytest.approx(target / 900, abs=0.05)
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
         finally:
             _close_window(win)
 
@@ -840,12 +846,16 @@ class TestMainWindowStartup:
             assert panel._groups["reactive"].isHidden()
             assert panel._groups["initial"].isHidden()
             assert not panel._groups["hydrology"].isHidden()
-            # Streamflow and zone-storage figures, one target column.
+            # The three hydrology figures, one target column.
             figure: gui_figure_panel.FigurePanel = win._figure_panel
-            assert figure.page_count() == 2
-            assert figure._titles == ["Streamflow", "Zone storage"]
-            assert figure._title_label.text() == "Streamflow"
-            assert figure._page_label.text() == "1 / 2"
+            assert figure.page_count() == 3
+            assert figure._titles == [
+                "Hydrology",
+                "Storage",
+                "Partitioning",
+            ]
+            assert figure._title_label.text() == "Hydrology"
+            assert figure._page_label.text() == "1 / 3"
             assert win._objective_model.columnCount() == 1
             assert win._results is not None
             assert win._results.rt is None
@@ -1111,7 +1121,7 @@ class TestMainWindowRuns:
             assert len(saves) == 1
             assert saves[0]["results_dir"] is None
             assert win._status_label.text() == (
-                f"Saved run to {run_dir}; 3 figure page(s) saved to "
+                f"Saved run to {run_dir}; 8 figure page(s) saved to "
                 f"{run_dir / 'figures'}."
             )
             # The figures are saved as plotted, named after their
@@ -1121,9 +1131,14 @@ class TestMainWindowRuns:
                 path.name for path in (run_dir / "figures").glob("*.png")
             )
             assert figure_names == [
-                "Mineral_reaction_rates.png",
-                "Streamflow_and_river_concentrations.png",
-                "Zone_concentrations_and_storage.png",
+                "Concentration_vs_discharge.png",
+                "Hydrology.png",
+                "Partitioning.png",
+                "Reaction_rates_SOC_s.png",
+                "River_concentrations.png",
+                "River_loads.png",
+                "Storage.png",
+                "Zone_concentrations.png",
             ]
 
             saved = read_gui_state(run_dir)
@@ -1271,19 +1286,21 @@ class TestMainWindowRuns:
             assert panel.current_page() == 0
             actions["Next figure"].triggered.emit()
             assert panel.current_page() == 1
-            assert panel._title_label.text() == "Zone concentrations and storage"
-            assert panel._page_label.text() == "2 / 3"
+            assert panel._title_label.text() == "Storage"
+            assert panel._page_label.text() == "2 / 8"
             actions["Next figure"].triggered.emit()
             assert panel.current_page() == 2
-            assert panel._title_label.text() == "Mineral reaction rates"
-            assert panel._page_label.text() == "3 / 3"
+            assert panel._title_label.text() == "Partitioning"
+            assert panel._page_label.text() == "3 / 8"
             # Wrap-around in both directions.
-            actions["Next figure"].triggered.emit()
+            for _ in range(6):
+                actions["Next figure"].triggered.emit()
             assert panel.current_page() == 0
-            assert panel._page_label.text() == "1 / 3"
+            assert panel._page_label.text() == "1 / 8"
             actions["Previous figure"].triggered.emit()
-            assert panel.current_page() == 2
-            assert panel._page_label.text() == "3 / 3"
+            assert panel.current_page() == 7
+            assert panel._title_label.text() == "Reaction rates (SOC(s))"
+            assert panel._page_label.text() == "8 / 8"
         finally:
             _close_window(win)
 
@@ -1321,7 +1338,7 @@ class TestMainWindowRuns:
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert not panel._groups["reactive"].isHidden()
             assert not panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
             assert win._objective_model.columnCount() == 4
 
             # Switching to hydrology-only re-runs in that mode and
@@ -1341,10 +1358,11 @@ class TestMainWindowRuns:
             # The hidden checkboxes keep their state, so the plot
             # selection is unchanged.
             assert panel.selection() == gui_data.default_plot_selection()
-            assert win._figure_panel.page_count() == 2
+            assert win._figure_panel.page_count() == 3
             assert win._figure_panel._titles == [
-                "Streamflow",
-                "Zone storage",
+                "Hydrology",
+                "Storage",
+                "Partitioning",
             ]
             assert win._objective_model.columnCount() == 1
             assert win._save_button.isEnabled()
@@ -1404,7 +1422,7 @@ class TestMainWindowRuns:
             assert len(saves) == 1
             assert saves[0]["results_dir"] is None
             assert win._status_label.text() == (
-                f"Saved run to {run_dir}; 2 figure page(s) saved to "
+                f"Saved run to {run_dir}; 3 figure page(s) saved to "
                 f"{run_dir / 'figures'}."
             )
             saved = read_gui_state(run_dir)
@@ -1423,7 +1441,7 @@ class TestMainWindowRuns:
             assert full_calls[1][index] == pytest.approx(0.775)
             assert not panel._groups["reactive"].isHidden()
             assert not panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
             assert win._objective_model.columnCount() == 4
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -1734,7 +1752,7 @@ class TestHistory:
             assert results.rt is not None
             assert not win._param_panel._groups["reactive"].isHidden()
             assert not win._param_panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
             assert win._objective_model.columnCount() == 4
             assert len(full_calls) == 1
             assert len(hydro_calls) == 1
@@ -1750,7 +1768,7 @@ class TestHistory:
             assert results.rt is None
             assert win._param_panel._groups["reactive"].isHidden()
             assert win._param_panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 2
+            assert win._figure_panel.page_count() == 3
             assert win._objective_model.columnCount() == 1
             assert len(full_calls) == 1
             assert len(hydro_calls) == 1
@@ -1787,16 +1805,23 @@ class TestHistory:
             panel._history_overlay_checkbox.setChecked(True)
             _pump()
 
-            # Page 0 is the streamflow figure: the previous run's
+            # Page 0 is the hydrology figure: the previous run's
             # line sits behind the current one, half transparent.
             figure: Figure = win._figure_panel._canvases[0].figure
             hydro_lines = _lines(figure.axes[0])
             assert len(hydro_lines) == 2
             assert hydro_lines[0].get_alpha() == 0.5
             assert _alpha(hydro_lines[1]) == 1.0
-            assert hydro_lines[1].get_label() == "Streamflow (sim)"
+            # Both lines draw in the simulated-discharge color; the
+            # alpha is what sets the previous run's apart.
+            assert np.array_equal(
+                hydro_lines[0].get_color(), hydro_lines[1].get_color()
+            )
             # The legend still lists only the current run's series.
-            assert len(figure.legends[0].get_texts()) == 8
+            assert [t.get_text() for t in figure.legends[0].get_texts()] == [
+                "Streamflow (sim)",
+                "Streamflow (meas)",
+            ]
 
             # Unchecking the overlay removes the previous run's lines.
             panel._history_overlay_checkbox.setChecked(False)
@@ -2389,7 +2414,7 @@ class TestParamPanel:
                     assert _band_of(single_cell) == expected_band
 
             # The neutral group's widgets keep the default look.
-            box: QCheckBox = panel._time_series_boxes["Streamflow"]
+            box: QCheckBox = panel._streamflow_box
             assert box.styleSheet() == ""
             assert box.objectName() == ""
         finally:
@@ -2647,55 +2672,73 @@ class TestParamPanel:
     def test_plot_selection(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
     ) -> None:
-        """Toggling a box emits the recomputed selection; set_selection is silent."""
+        """Toggling a control emits the recomputed selection; set_selection is silent."""
         panel = self._make_panel(input_data)
         try:
             selections: list[PlotSelection] = []
             panel.selection_changed.connect(selections.append)
-            panel._species_boxes["HCO3-"].setChecked(True)
+            panel._species_boxes["DIC"].setChecked(False)
             assert len(selections) == 1
             selection = selections[0]
-            assert selection.species == ["DOC", "HCO3-"]
+            assert selection.species == ["DOC", "Ca++"]
             assert selection.zones == SPECIATION_ZONES
-            assert selection.minerals == ["SOC(s)"]
-            assert selection.time_series == list(TIME_SERIES_OPTIONS)
+            assert selection.mineral == "SOC(s)"
+            assert selection.streamflow is True
 
-            # set_selection updates the boxes without emitting and
-            # ignores names the network does not know.
+            # set_selection updates the controls without emitting
+            # and ignores names the panel does not offer.
             panel.set_selection(
                 PlotSelection(
                     species=["DOC", "Bogus"],
                     zones=SPECIATION_ZONES,
-                    minerals=["SOC(s)"],
-                    time_series=["Streamflow", "DIC"],
+                    mineral="Calcite(s)",
+                    streamflow=False,
+                    water_years_from=2016,
+                    water_years_to=2020,
                 )
             )
             assert len(selections) == 1
             assert panel.selection().species == ["DOC"]
-            assert panel.selection().time_series == ["Streamflow", "DIC"]
+            assert panel.selection().mineral == "Calcite(s)"
+            assert panel.selection().streamflow is False
+            assert panel.selection().water_years_from == 2016
+            assert panel.selection().water_years_to == 2020
         finally:
             panel.deleteLater()
             _pump()
 
-    def test_time_series_boxes(
+    def test_water_year_window(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
     ) -> None:
-        """Toggling the time-series boxes re-emits in option order."""
+        """Moving the water-year pickers keeps from below to and re-emits."""
         panel = self._make_panel(input_data)
         try:
             selections: list[PlotSelection] = []
             panel.selection_changed.connect(selections.append)
             assert [
-                box.isChecked() for box in panel._time_series_boxes.values()
-            ] == [True, True, True, True]
+                box.isChecked() for box in panel._species_boxes.values()
+            ] == [True, True, True]
 
-            panel._time_series_boxes["DIC"].setChecked(False)
+            # Lower the to year; the from year (the record's start)
+            # stays put.
+            panel._window_to_combo.setCurrentIndex(WATER_YEARS.index(2019))
             assert len(selections) == 1
-            assert selections[0].time_series == ["Streamflow", "DOC", "Ca++"]
+            assert selections[0].water_years_from == 2015
+            assert selections[0].water_years_to == 2019
 
-            panel._time_series_boxes["Streamflow"].setChecked(False)
+            # Raise the from year past the to year: the to year
+            # lifts to it.
+            panel._window_from_combo.setCurrentIndex(WATER_YEARS.index(2020))
             assert len(selections) == 2
-            assert selections[1].time_series == ["DOC", "Ca++"]
+            assert selections[1].water_years_from == 2020
+            assert selections[1].water_years_to == 2020
+
+            # Lower the to year below the from year: the from year
+            # lowers to it.
+            panel._window_to_combo.setCurrentIndex(WATER_YEARS.index(2016))
+            assert len(selections) == 3
+            assert selections[2].water_years_from == 2016
+            assert selections[2].water_years_to == 2016
         finally:
             panel.deleteLater()
             _pump()
@@ -3119,7 +3162,7 @@ class TestGradients:
                 for j in range(2, len(free)):
                     assert loaded.iloc[i, j] == pytest.approx(0.0)
 
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Gradients (full)"
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -3201,7 +3244,7 @@ class TestGradients:
                 for j in range(2, len(free)):
                     assert loaded.iloc[i, j] == pytest.approx(0.0)
 
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 4
             assert win._figure_panel._titles[-1] == "Gradients (hydro)"
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -3303,7 +3346,7 @@ class TestGradients:
                 f" 1 of {total} points failed; their values are shown "
                 f"as missing."
             )
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Gradients (full)"
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
@@ -3382,7 +3425,7 @@ class TestGradients:
                 == "Gradients failed: ValueError: point failed"
             )
             assert win._gradient_state is None
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
             # The base never arrived, so the results stay stale:
             # the save button stays down and the run button stays
             # up.
@@ -3837,7 +3880,7 @@ class TestLineSearch:
             assert len(csvs) == 1
             assert win._line_search_state.csv_path is not None
             assert tmp_path / win._line_search_state.csv_path == csvs[0]
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert re.fullmatch(
@@ -4059,7 +4102,7 @@ class TestLineSearch:
             assert len(csvs) == 1
             assert state.csv_path is not None
             assert tmp_path / state.csv_path == csvs[0]
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
         finally:
             gate.touch()
@@ -4233,7 +4276,7 @@ class TestLineSearch:
             state: gui_window._LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert win._line_search_button.isEnabled()
@@ -4334,7 +4377,7 @@ class TestLineSearch:
             state: gui_window._LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert win._line_search_button.isEnabled()
@@ -4474,7 +4517,7 @@ class TestLineSearch:
             )
 
             # Both jobs' pages ride along, in order.
-            assert win._figure_panel.page_count() == 5
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-2:] == [
                 "Gradients (full)",
                 "Line search (full)",
@@ -4562,7 +4605,7 @@ class TestLineSearch:
                 profile["Streamflow: KGE"] + profile["Streamflow: NSE"],
             )
 
-            assert win._figure_panel.page_count() == 4
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
             figure: Figure = win._figure_panel._canvases[-1].figure
             lines = _lines(figure.axes[0])
@@ -4665,7 +4708,7 @@ class TestLineSearch:
 
             # Hydro mode's own pages are the streamflow figure and
             # the water-storage figure: two, plus the search page.
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 4
             assert win._figure_panel._titles[-1] == "Line search (hydro)"
             assert re.fullmatch(
                 r"Line search finished in \d+(?:\.\d+)? s: "
@@ -4938,7 +4981,7 @@ class TestLineSearch:
             _pump()
             assert win._results_are_up_to_date()
             assert win._line_search_state is None
-            assert win._figure_panel.page_count() == 3
+            assert win._figure_panel.page_count() == 8
             assert re.fullmatch(
                 r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
             ) is not None

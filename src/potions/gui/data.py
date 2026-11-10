@@ -33,7 +33,7 @@ hydrology-only mode).
 """
 
 import gc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Final
@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 import potions as pt
 from potions.calibration import build_rt_bounds
-from potions.gui.common import SNOW_ZONES, TIME_SERIES_OPTIONS, ZONE_ORDER
+from potions.gui.common import RIVER_SPECIES, SNOW_ZONES, WATER_YEARS, ZONE_ORDER
 from potions.hydro_model import HydrologicalModel
 from potions.reactive_transport.common_networks import get_soc_calcite_network
 from scipy.optimize import root_scalar
@@ -123,23 +123,34 @@ MINERAL_CONCENTRATION: Final[float] = 1.0
 @dataclass(frozen=True)
 class PlotSelection:
     """
-    The user's choices of which series to draw.
+    The user's choices of which series to draw and over which period.
+
+    The species set is shared by the river-concentration and
+    zone-concentration figures, and the zone set by the storage and
+    zone-concentration figures; the remaining fields select the
+    river-concentration figure's streamflow axis, the
+    reaction-rate figure's mineral, and the water-year window every
+    figure is clipped to.
 
     Attributes:
-        species: The network species to plot in the zone figure.
-        zones: The zones to plot in the zone figure.
-        minerals: The minerals to plot in the rate figure.
-        time_series: The series to draw in the time-series figure
-            (the streamflow and the river concentrations); by
-            default every selectable series.
+        species: The river species to plot in the river- and
+            zone-concentration figures.
+        zones: The zones to plot in the storage and
+            zone-concentration figures.
+        mineral: The mineral to plot in the reaction-rate figure.
+        streamflow: Whether the river-concentration figure's inverted
+            streamflow axis is on.
+        water_years_from: The first water year of the plotting window,
+            in `potions.gui.common.WATER_YEARS`.
+        water_years_to: The last water year of the plotting window.
     """
 
     species: list[str]
     zones: list[str]
-    minerals: list[str]
-    time_series: list[str] = field(
-        default_factory=lambda: list(TIME_SERIES_OPTIONS)
-    )
+    mineral: str
+    streamflow: bool = True
+    water_years_from: int = WATER_YEARS[0]
+    water_years_to: int = WATER_YEARS[-1]
 
 
 @dataclass(frozen=True)
@@ -633,15 +644,18 @@ def arr_to_hydro_results(
 
 def default_plot_selection() -> PlotSelection:
     """
-    The default figure selections: every time-series series, DOC,
-    every non-snow zone, and the dominant SOC mineral.
+    The default figure selections: every river species (streamflow
+    on) in the river-concentration figure, every non-snow zone in the
+    storage and zone-concentration figures, the dominant SOC mineral
+    in the reaction-rate figure, and the whole water-year record as
+    the plotting window.
 
     Returns:
         The default `PlotSelection`.
     """
     return PlotSelection(
-        species=["DOC"],
+        species=list(RIVER_SPECIES),
         zones=[zone for zone in ZONE_ORDER if zone not in SNOW_ZONES],
-        minerals=["SOC(s)"],
+        mineral="SOC(s)",
     )
 # =================== #

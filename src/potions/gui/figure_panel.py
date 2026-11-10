@@ -1,11 +1,12 @@
 """
 The figure panel of the East River lateral-model calibration GUI.
 
-Holds the model's figures — the streamflow and river
-concentrations, the zone concentrations and storages, and the
-mineral reaction rates in full mode, the streamflow and zone
-storages in hydrology-only mode, plus a gradient job's matrix and
-a line search's value profile as extra pages when those jobs have
+Holds the model's figures — the hydrology, storage, and
+partitioning figures, joined by the river concentrations, river
+loads, concentration vs. discharge, zone concentrations, and
+reaction rates figures in full mode, the first three in
+hydrology-only mode, plus a gradient job's matrix and a line
+search's value profile as extra pages when those jobs have
 finished — in a single panel: only one figure is visible at a
 time, and the previous / next buttons of the panel's header — or
 the main window's Left / Right arrow keys, which are wired to the
@@ -22,7 +23,10 @@ recent versions keep the rcParams' publication dpi in it, which
 would otherwise render every font three times too large and cover
 the plot.  The canvas then tracks the panel size through
 matplotlib's built-in resize handling, so the visible figure
-always fills the panel.
+always fills the panel; because that rescaling changes how much
+of the figure a point-based legend row occupies, the canvas
+re-lays out the figure's below-axes legend rows on every resize,
+keeping them inside the figure.
 """
 
 import re
@@ -32,6 +36,7 @@ from typing import Final
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -41,6 +46,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from potions.gui.plots import relayout_below_axes_legends
+
 # The dpi the interactive canvases draw at (the package's rcParams set
 # a 300 dpi for publication-quality output; restated at this dpi, a
 # fifteen-inch figure is a 1500-pixel canvas instead of a 4500-pixel
@@ -49,6 +56,36 @@ CANVAS_DPI: Final[int] = 100
 
 
 # ==== Types ==== #
+class _FigureCanvas(FigureCanvasQTAgg):
+    """
+    A canvas that re-lays out its figure's below-axes legend rows
+    whenever it is resized.
+
+    Matplotlib's resize handling restates the figure at the new
+    canvas size, but a legend row is a fixed number of points of
+    text: the figure-fraction anchor and the axes' bottom margin
+    the builders measured at the construction size no longer hold
+    at the new size, so the lowest row would sink past the figure's
+    bottom edge.  The relayout re-measures and re-anchors the rows
+    at the new size, keeping them inside the figure (and in the
+    panel's fixed-size page export) at any size the panel gives
+    the figure.
+    """
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        # The canvas class is untyped source inside the py.typed
+        # matplotlib package, so both calls carry type-ignores.
+        super().resizeEvent(event)  # type: ignore[no-untyped-call]
+        if event.size().width() <= 0 or event.size().height() <= 0:
+            return
+        # Draw once so the rows' extents are measured against a
+        # canvas laid out at the new size, re-anchor them, and
+        # draw the result.
+        self.draw()  # type: ignore[no-untyped-call]
+        relayout_below_axes_legends(self.figure)
+        self.draw()  # type: ignore[no-untyped-call]
+
+
 class FigurePanel(QWidget):
     """
     The single figure panel of the main window.
@@ -129,10 +166,10 @@ class FigurePanel(QWidget):
             # of a stale stamp).  The stamp is private, hence the
             # ignore.
             fig._original_dpi = CANVAS_DPI  # type: ignore[attr-defined]
-            # The Qt canvas is untyped source inside the py.typed
+            # The canvas is untyped source inside the py.typed
             # matplotlib package, so the constructor call carries a
             # type-ignore.
-            canvas: FigureCanvasQTAgg = FigureCanvasQTAgg(
+            canvas: _FigureCanvas = _FigureCanvas(
                 fig
             )  # type: ignore[no-untyped-call]
             self._stack.addWidget(canvas)

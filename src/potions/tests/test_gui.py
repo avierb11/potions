@@ -58,20 +58,25 @@ from ..gui import plots as gui_plots
 from ..gui import state as gui_state
 from ..gui.common import (
     HYDRO_PARAMS,
+    LINESTYLE_CYCLE,
+    MEAS_Q_COLOR,
     METRIC_LABELS,
     METRIC_NAMES,
     PARAM_LABELS,
-    PLOT_START,
-    PLOT_START_DATE,
+    RIVER_SPECIES,
+    RIVER_SPECIES_MEAS_COLORS,
     RIVER_SPECIES_SIM_COLORS,
+    SIM_Q_COLOR,
+    SNOW_ZONES,
     SPECIATION_ZONES,
-    TIME_SERIES_OPTIONS,
+    WATER_YEARS,
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
     bound_decimals,
     param_label,
     param_symbol,
+    water_year_window,
 )
 from ..gui.state import (
     GUI_STATE_VERSION,
@@ -105,8 +110,14 @@ def _synthetic_hydro_sim(index: pd.Index) -> pd.DataFrame:
     data: dict[str, np.ndarray] = {
         "streamflow_sim": np.arange(len(index), dtype=float)
     }
-    for zone in ZONE_ORDER:
+    for i, zone in enumerate(ZONE_ORDER):
+        share: float = (i + 1) * 0.1
         data[f"s_{zone}"] = np.arange(len(index), dtype=float)
+        data[f"q_lat_{zone}"] = share * data["streamflow_sim"]
+        # Only the river zones partition the streamflow (the snow
+        # zones discharge to the ground zones, not to the river).
+        if zone not in SNOW_ZONES:
+            data[f"prop_q_{zone}"] = np.full(len(index), share)
     return pd.DataFrame(data, index=index)
 
 
@@ -473,25 +484,66 @@ class TestParamSymbol:
         assert str(excinfo.value) == "Unrecognized parameter key: 'bogus'"
 
 
+class TestWaterYearWindow:
+    """The picker's water years and the plotting window they span."""
+
+    def test_water_years_are_the_site_record(self) -> None:
+        # The site record runs 2014-05-02 to 2025-09-18: the water
+        # years the picker offers are 2015 through 2025 (the last
+        # one partial, ending with the record).
+        assert WATER_YEARS == list(range(2015, 2026))
+
+    def test_full_range_is_the_site_record(self) -> None:
+        start, end = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        # The start of water year 2015: the first day of the site
+        # record the loader keeps (the simulation's two-year
+        # spin-up ends before it).
+        assert start == pd.Timestamp(2014, 10, 1)
+        assert end == pd.Timestamp(2025, 9, 30)
+
+    def test_single_year_window(self) -> None:
+        start, end = water_year_window(2018, 2018)
+        assert start == pd.Timestamp(2017, 10, 1)
+        assert end == pd.Timestamp(2018, 9, 30)
+
+    def test_partial_range(self) -> None:
+        start, end = water_year_window(2017, 2020)
+        assert start == pd.Timestamp(2016, 10, 1)
+        assert end == pd.Timestamp(2020, 9, 30)
+
+    def test_year_before_record_rejected(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            water_year_window(2014, 2015)
+        assert "2014" in str(excinfo.value)
+
+    def test_year_after_record_rejected(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            water_year_window(2015, 2026)
+        assert "2026" in str(excinfo.value)
+
+    def test_reversed_range_rejected(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            water_year_window(2020, 2017)
+        assert "2020" in str(excinfo.value)
+        assert "2017" in str(excinfo.value)
+
+
 class TestDefaultPlotSelection:
     """The panel's starting selection matches the app's defaults."""
 
     def test_defaults(self, input_data: gui_data.GuiInputData) -> None:
         selection = gui_data.default_plot_selection()
-        assert selection.time_series == [
-            "Streamflow",
-            "DOC",
-            "DIC",
-            "Ca++",
-        ]
-        assert selection.species == ["DOC"]
+        assert selection.species == list(RIVER_SPECIES)
         assert selection.zones == [
             "surface_hs",
             "surface_rp",
             "ground_hs",
             "ground_rp",
         ]
-        assert selection.minerals == ["SOC(s)"]
+        assert selection.mineral == "SOC(s)"
+        assert selection.streamflow is True
+        assert selection.water_years_from == WATER_YEARS[0]
+        assert selection.water_years_to == WATER_YEARS[-1]
 
 
 
@@ -519,20 +571,23 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 3
-        assert state.to_dict()["version"] == 3
+        assert GUI_STATE_VERSION == 4
+        assert state.to_dict()["version"] == 4
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 3
+        assert raw["version"] == 4
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         param_values = _as_dict(raw, "param_values")
         assert param_values["proportion.1"] == 0.7
         param_bounds = _as_dict(raw, "param_bounds")
         assert param_bounds["proportion.1"] == [0.25, 0.95]
         selection = _as_dict(raw, "selection")
-        assert selection["species"] == ["DOC"]
-        assert selection["time_series"] == ["Streamflow", "DOC", "DIC", "Ca++"]
+        assert selection["species"] == list(RIVER_SPECIES)
+        assert selection["mineral"] == "SOC(s)"
+        assert selection["streamflow"] is True
+        assert selection["water_years_from"] == WATER_YEARS[0]
+        assert selection["water_years_to"] == WATER_YEARS[-1]
         # The main vertical splitter's two sections: the figure and
         # the lower (table-and-parameters) row.
         assert raw["splitter_sizes"] == [300, 600]
@@ -659,7 +714,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4]).",
             ),
             (
                 {"csv_path": 12},
@@ -758,31 +813,108 @@ class TestFromDictErrors:
             == "gui_state.json selection field 'zones' is not a list of strings."
         )
 
-    def test_time_series_field_not_strings(
+    def test_streamflow_field_not_boolean(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         raw: dict[str, object] = self._base(input_data)
         selection: dict[object, object] = _as_dict(raw, "selection")
-        selection["time_series"] = ["Streamflow", 1]
+        selection["streamflow"] = "yes"
         raw["selection"] = selection
         with pytest.raises(ValueError) as excinfo:
             GuiState.from_dict(raw)
         assert (
             str(excinfo.value)
-            == "gui_state.json selection field 'time_series' "
-            "is not a list of strings."
+            == "gui_state.json selection field 'streamflow' is not a boolean."
         )
 
-    def test_time_series_absent_keeps_all_on(
+    def test_water_year_field_not_a_year(
         self, input_data: gui_data.GuiInputData
     ) -> None:
-        """A state saved before the checkboxes existed draws every series."""
         raw: dict[str, object] = self._base(input_data)
         selection: dict[object, object] = _as_dict(raw, "selection")
-        del selection["time_series"]
+        selection["water_years_from"] = 1999
+        raw["selection"] = selection
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == (
+                "gui_state.json selection field 'water_years_from' "
+                "is not a water year."
+            )
+        )
+
+    def test_legacy_selection_migrates(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A version-3 shape migrates onto the current one."""
+        raw: dict[str, object] = self._base(input_data)
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        # The version-3 shape: the zone figure's species, the
+        # time-series figure's streamflow and river-species list, and
+        # a list of minerals (no single mineral, no streamflow, no
+        # water years).
+        selection.pop("mineral")
+        selection.pop("streamflow")
+        selection.pop("water_years_from")
+        selection.pop("water_years_to")
+        selection["minerals"] = ["SOC(s)", "Calcite(s)"]
+        selection["species"] = ["DIC"]
+        selection["time_series"] = ["DIC", "DOC"]
         raw["selection"] = selection
         restored = GuiState.from_dict(raw)
-        assert restored.selection.time_series == list(TIME_SERIES_OPTIONS)
+        # The river species are the union of the two old lists, in
+        # the panel's order (DOC before DIC).
+        assert restored.selection.species == ["DOC", "DIC"]
+        assert restored.selection.zones == selection["zones"]
+        # The mineral is the first of the old list.
+        assert restored.selection.mineral == "SOC(s)"
+        # The streamflow axis is off: the old time-series list
+        # carried no Streamflow entry.
+        assert restored.selection.streamflow is False
+        # The plotting window is the whole record.
+        assert restored.selection.water_years_from == WATER_YEARS[0]
+        assert restored.selection.water_years_to == WATER_YEARS[-1]
+
+    def test_legacy_selection_time_series_absent(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """An absent time-series list keeps every series on, as before."""
+        raw: dict[str, object] = self._base(input_data)
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        # The version-3 shape, as written by a state saved before the
+        # time-series list existed: no mineral, no streamflow, no
+        # water years, and no time-series list.
+        selection.pop("mineral")
+        selection.pop("streamflow")
+        selection.pop("water_years_from")
+        selection.pop("water_years_to")
+        selection["minerals"] = ["SOC(s)"]
+        raw["selection"] = selection
+        restored = GuiState.from_dict(raw)
+        assert restored.selection.species == list(RIVER_SPECIES)
+        assert restored.selection.mineral == "SOC(s)"
+        assert restored.selection.streamflow is True
+        assert restored.selection.water_years_from == WATER_YEARS[0]
+        assert restored.selection.water_years_to == WATER_YEARS[-1]
+
+    def test_legacy_minerals_not_strings(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = self._base(input_data)
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        selection.pop("mineral")
+        selection.pop("streamflow")
+        selection.pop("water_years_from")
+        selection.pop("water_years_to")
+        selection["minerals"] = "SOC(s)"
+        raw["selection"] = selection
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json selection field 'minerals' is not a list of strings."
+        )
 
     def test_state_from_dict_objective_terms_validation(
         self, input_data: gui_data.GuiInputData
@@ -836,7 +968,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4]).\n"
         )
 
     def test_top_level_not_object(
@@ -857,7 +989,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 3,")
+        assert text.startswith("{\n  \"version\": 4,")
         assert text.endswith("\n")
 
 
@@ -1304,11 +1436,13 @@ class TestObjectivesFromResults:
 
 from matplotlib import colors as mcolors
 from matplotlib.axes import Axes
-from matplotlib.collections import PathCollection
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.collections import PathCollection, PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
+from matplotlib.transforms import Bbox
 
 
 def _day_number(timestamp: pd.Timestamp) -> float:
@@ -1368,670 +1502,1753 @@ def _alpha(line: Line2D) -> float:
 
 
 def _scatters(ax: object) -> list[PathCollection]:
-    """The PathCollection artists of an axes, in draw order."""
+    """The scatter PathCollections of an axes, in draw order."""
     assert isinstance(ax, Axes)
     return [
-        artist for artist in ax.collections if isinstance(artist, PathCollection)
+        artist
+        for artist in ax.collections
+        if isinstance(artist, PathCollection)
+        and not isinstance(artist, PolyCollection)
     ]
 
 
-class TestTimeSeriesFigure:
-    """The streamflow / river-concentration figure on synthetic data."""
+def _fills(ax: object) -> list[PolyCollection]:
+    """The fill_between PolyCollections of an axes, in draw order."""
+    assert isinstance(ax, Axes)
+    return [
+        artist
+        for artist in ax.collections
+        if isinstance(artist, PolyCollection)
+    ]
+
+
+def _fill_band_y(fill: PolyCollection) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The bottom and top y-values of a fill_between band, in x order.
+
+    The band's path is a closed loop: the top's start point, the
+    bottom curve, the top's end point, and the top curve in reverse
+    (see `FillBetweenPolyCollection._make_verts_for_region`).  The
+    synthetic and clipped frames have no gaps, so each band is one
+    path.
+    """
+    verts: np.ndarray = np.asarray(fill.get_paths()[0].vertices)
+    n: int = (len(verts) - 2) // 2
+    bottom: np.ndarray = verts[1 : n + 1, 1]
+    top: np.ndarray = verts[n + 2 : 2 * n + 2, 1][::-1]
+    return bottom, top
+
+
+class TestClipHelpers:
+    """The window clipping every figure builder applies before drawing."""
+
+    def test_frame_clipped_to_window(self) -> None:
+        index: pd.Index = pd.date_range("2014-01-01", periods=10, freq="D")
+        frame: pd.DataFrame = pd.DataFrame(
+            {"a": np.arange(10, dtype=float)}, index=index
+        )
+        window: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp(2014, 1, 3),
+            pd.Timestamp(2014, 1, 6),
+        )
+        clipped: pd.DataFrame = gui_plots._clip_frame(frame, window)
+        assert clipped.index[0] == pd.Timestamp(2014, 1, 3)
+        assert clipped.index[-1] == pd.Timestamp(2014, 1, 6)
+        assert list(clipped["a"]) == [2.0, 3.0, 4.0, 5.0]
+
+    def test_series_clipped_to_window(self) -> None:
+        index: pd.Index = pd.date_range("2014-01-01", periods=10, freq="D")
+        series: pd.Series = pd.Series(np.arange(10, dtype=float), index=index)
+        window: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp(2014, 1, 3),
+            pd.Timestamp(2014, 1, 6),
+        )
+        clipped: pd.Series = gui_plots._clip_series(series, window)
+        assert list(clipped) == [2.0, 3.0, 4.0, 5.0]
+
+    def test_clipping_keeps_nan_rows(self) -> None:
+        """Missing observations survive the clip; the builders drop them."""
+        index: pd.Index = pd.date_range("2014-01-01", periods=4, freq="D")
+        series: pd.Series = pd.Series([1.0, np.nan, 3.0, 4.0], index=index)
+        window: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp(2014, 1, 1),
+            pd.Timestamp(2014, 1, 4),
+        )
+        clipped: pd.Series = gui_plots._clip_series(series, window)
+        assert clipped.isna().tolist() == [False, True, False, False]
+
+
+def _legend_extent_fractions(fig: Figure, legend: Legend) -> tuple[float, float]:
+    """The drawn legend's top and bottom edges, in figure fractions."""
+    extent = legend.get_window_extent()
+    fig_height: float = fig.get_figheight() * fig.dpi
+    return (float(extent.y1) / fig_height, float(extent.y0) / fig_height)
+
+
+class TestLegendPlacement:
+    """The shared frameless legend the figure builders attach below."""
+
+    def test_legend_is_frameless_and_below_the_axes(self) -> None:
+        fig = Figure(figsize=(15, 5))
+        ax = fig.gca()
+        ax.plot([0.0, 1.0], [0.0, 1.0])
+        legend = gui_plots._attach_legend(
+            fig,
+            [Line2D([], [], color="k", linewidth=2)],
+            ["a series"],
+            title="Series",
+        )
+        # The plotting guidelines: the legend frame is off, and the
+        # legend never overlaps the drawn series (it sits below the
+        # axes, whose interior holds the data) and stays inside the
+        # figure (the panel's page export saves at the figure size).
+        assert legend.get_frame().get_visible() is False
+        top, bottom = _legend_extent_fractions(fig, legend)
+        assert top <= ax.get_position().y0
+        assert bottom >= 0.0
+        assert legend.get_title().get_text() == "Series"
+
+    def test_second_row_stacks_above_the_first(self) -> None:
+        fig = Figure(figsize=(15, 5))
+        ax = fig.gca()
+        ax.plot([0.0, 1.0], [0.0, 1.0])
+        first = gui_plots._attach_legend(
+            fig,
+            [Line2D([], [], color="k", linewidth=2)],
+            ["a"],
+            title="First",
+        )
+        second = gui_plots._attach_legend(
+            fig,
+            [Line2D([], [], color="k", linewidth=2)],
+            ["b"],
+            title="Second",
+            above=first,
+        )
+        first_top, _first_bottom = _legend_extent_fractions(fig, first)
+        _second_top, second_bottom = _legend_extent_fractions(fig, second)
+        # The second row's bottom edge sits at or above the first
+        # row's top edge: the rows do not overlap.
+        assert second_bottom >= first_top
+
+    def test_relayout_keeps_rows_inside_after_a_resize(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """
+        The panel rescales the figure to fit its canvas, and a
+        point-based row occupies more of a shorter figure, so the
+        construction-size anchor no longer holds; the relayout
+        keeps the row inside the figure and the axes above it.
+        """
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_hydrology_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        # The construction layout holds: the row's bottom edge
+        # sits above the figure's bottom edge.
+        legend: Legend = fig.legends[0]
+        _top, bottom = _legend_extent_fractions(fig, legend)
+        assert bottom >= 0.0
+
+        # The panel's rescale: the canvas is wide and short.
+        fig.set_size_inches(13.33, 2.89)
+        fig.canvas.draw()
+        # The construction-size anchor no longer holds: the row
+        # sinks past the figure's bottom edge.
+        _top, bottom = _legend_extent_fractions(fig, legend)
+        assert bottom < 0.0
+
+        # The relayout re-anchors the row and restates the margin:
+        # the row is inside the figure and the axes sit above it.
+        gui_plots.relayout_below_axes_legends(fig)
+        fig.canvas.draw()
+        top, bottom = _legend_extent_fractions(fig, legend)
+        assert bottom >= 0.0
+        assert top <= 1.0
+        assert fig.axes[0].get_position().y0 >= top
+
+    def test_relayout_keeps_stacked_rows_inside_after_a_resize(
+        self,
+    ) -> None:
+        """The stacked-row relayout keeps every row inside, in order."""
+        fig = Figure(figsize=(15, 5))
+        ax = fig.gca()
+        ax.plot([0.0, 1.0], [0.0, 1.0])
+        first = gui_plots._attach_legend(
+            fig,
+            [Line2D([], [], color="k", linewidth=2)],
+            ["a"],
+            title="First",
+        )
+        second = gui_plots._attach_legend(
+            fig,
+            [Line2D([], [], color="k", linewidth=2)],
+            ["b"],
+            title="Second",
+            above=first,
+        )
+        # The builders' margin, as `make_conc_discharge_figure`
+        # states it: the gap above the topmost row, grown to
+        # clear the axes' tick labels.
+        fig.subplots_adjust(
+            bottom=gui_plots._legend_top_edge(fig, second)
+            + gui_plots._axes_gap(fig)
+        )
+        fig.set_size_inches(13.33, 2.89)
+        fig.canvas.draw()
+        gui_plots.relayout_below_axes_legends(fig)
+        fig.canvas.draw()
+        first_top, first_bottom = _legend_extent_fractions(fig, first)
+        second_top, second_bottom = _legend_extent_fractions(fig, second)
+        # Every row is inside the figure, the rows do not overlap,
+        # and the axes sit above the topmost row.
+        assert first_bottom >= 0.0
+        assert second_bottom >= first_top
+        assert second_top <= 1.0
+        assert ax.get_position().y0 >= second_top
+
+    def test_relayout_clears_the_axes_tick_labels(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """
+        The x tick labels hang below the axes' bottom edge in a
+        point-based depth; after the panel's rescale that depth
+        occupies more of the figure than the construction-size gap
+        reserved, so the relayout grows the margin above the
+        topmost row to clear the tick labels.
+
+        The growth is measured against the figure's own renderer,
+        which always carries the figure's current dpi: the gap
+        must equal the labels' true current-dpi depth plus the
+        margin (at least the builders' row gap), and this test
+        fails both when a stale cached renderer over-reserves the
+        gap (shrinking the drawn plot area) and when a too-small
+        one lets the labels sit on the legend row.
+
+        The figure is prepared the way the app prepares it: the
+        entry point builds it under the publication rcParams
+        (300 dpi), and the panel's canvas restates it at its
+        canvas dpi and attaches a drawing canvas before the
+        wide, short rescale.  The construction-time measurement
+        and the relayout's measurement then happen at different
+        dpi, as in the app.
+        """
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        # The entry point's publication rcParam, restated only
+        # around the build so the other figures' tests keep the
+        # default.
+        saved_dpi: float = matplotlib.rcParams["figure.dpi"]
+        matplotlib.rcParams["figure.dpi"] = 300
+        try:
+            fig: Figure = gui_plots.make_hydrology_figure(
+                _synthetic_hydro_sim(index),
+                input_data.q_meas,
+                window,
+            )
+        finally:
+            matplotlib.rcParams["figure.dpi"] = saved_dpi
+        fig.set_dpi(100)  # figure_panel.CANVAS_DPI
+        canvas: FigureCanvasAgg = FigureCanvasAgg(fig)
+        # The panel's rescale: the canvas is wide and short.
+        fig.set_size_inches(13.33, 2.89)
+        canvas.draw()  # type: ignore[no-untyped-call]
+        gui_plots.relayout_below_axes_legends(fig)
+        canvas.draw()  # type: ignore[no-untyped-call]
+        legend: Legend = fig.legends[0]
+        fig_height: float = float(fig.get_window_extent().height)
+        legend_top: float = float(legend.get_window_extent().y1)
+        # The figure's own renderer always carries the current
+        # dpi, so the labels' true current-dpi depth is measured
+        # against it.
+        renderer = fig._get_renderer()  # type: ignore[attr-defined]
+        ax: Axes = fig.axes[0]
+        ax_bottom: float = float(ax.get_window_extent().y0)
+        depth: float = 0.0
+        for label in [*ax.get_xticklabels(), ax.xaxis.get_label()]:
+            if not label.get_visible():
+                continue
+            extent: Bbox = label.get_window_extent(renderer)
+            # A label with empty text occupies no space and keeps
+            # no margin.
+            if extent.height <= 0.0:
+                continue
+            # Every hanging label keeps the margin above the
+            # topmost row.
+            assert float(extent.y0) >= legend_top + (
+                gui_plots._TICK_LABEL_MARGIN * fig_height
+            ) - 0.5
+            depth = max(depth, float(ax_bottom - extent.y0) / fig_height)
+        # The relayout reserved exactly that depth plus the
+        # margin, at least the builders' row gap.
+        reserved: float = float(ax.get_position().y0) - legend_top / fig_height
+        assert reserved == pytest.approx(
+            max(
+                gui_plots._LEGEND_ROW_GAP,
+                depth + gui_plots._TICK_LABEL_MARGIN,
+            ),
+            abs=1e-5,
+        )
+
+
+class TestStorageFigure:
+    """The per-zone water-storage figure on synthetic data."""
 
     def test_axes_and_labels(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_storage_figure(
             _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
+            ["surface_hs", "ground_rp"],
+            window,
         )
-        assert len(fig.axes) == 2
-        hydro_ax = fig.axes[0]
-        species_ax = fig.axes[1]
-        assert hydro_ax.get_title() == "Streamflow"
-        # The species title sits on the right; the center slot is empty.
-        assert species_ax.get_title("right") == "River concentrations"
-        assert species_ax.get_title() == ""
-        assert hydro_ax.get_ylabel() == "Discharge (mm/d)"
-        assert species_ax.get_ylabel() == "Concentration (mol/L)"
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Storage"
+        assert ax.get_ylabel() == "Storage (mm)"
 
-    def test_streamflow_series(
+    def test_one_line_per_zone_clipped_to_window(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_storage_figure(
             _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
+            ["surface_hs", "ground_rp"],
+            window,
         )
-        hydro_ax = fig.axes[0]
-
-        sim = _lines(hydro_ax)
-        assert len(sim) == 1
-        assert sim[0].get_label() == "Streamflow (sim)"
-        assert mcolors.to_rgba(sim[0].get_color()) == mcolors.to_rgba(
-            "cornflowerblue"
-        )
-        assert sim[0].get_linewidth() == 1
-        # Clipped to PLOT_START: the full record minus the spin-up.
-        # (The artists' data getters are typed with the broad ArrayLike
-        # union, so the numpy conversion is for mypy's benefit.)
-        assert len(np.asarray(sim[0].get_xdata())) == 2557
-
-        meas = _scatters(hydro_ax)
-        assert len(meas) == 1
-        assert meas[0].get_label() == "Streamflow (meas)"
-        facecolors: np.ndarray = np.asarray(meas[0].get_facecolor())
-        assert mcolors.to_rgba(facecolors[0]) == mcolors.to_rgba("black")
-        assert list(meas[0].get_sizes()) == [5]
-        expected_meas = int(
-            input_data.q_meas.loc[input_data.q_meas.index >= PLOT_START]
-            .dropna()
-            .size
-        )
-        offsets: np.ndarray = np.asarray(meas[0].get_offsets())
-        assert len(offsets) == expected_meas
-
-    def test_river_species_series(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
-        )
-        species_ax = fig.axes[1]
-
-        sim = _lines(species_ax)
-        assert [line.get_label() for line in sim] == [
-            "DOC (sim)",
-            "DIC (sim)",
-            "Ca++ (sim)",
-        ]
-        for line, species in zip(sim, ["DOC", "DIC", "Ca++"]):
+        ax = fig.axes[0]
+        lines = _lines(ax)
+        assert len(lines) == 2
+        for line, zone in zip(lines, ["surface_hs", "ground_rp"]):
             assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
-                RIVER_SPECIES_SIM_COLORS[species]
+                ZONE_COLORS[zone]
             )
-
-        meas = _scatters(species_ax)
-        assert [scatter.get_label() for scatter in meas] == [
-            "DOC (meas)",
-            "DIC (meas)",
-            "Ca++ (meas)",
-        ]
-        for scatter, species in zip(meas, ["DOC", "DIC", "Ca++"]):
-            expected = int(
-                input_data.conc_df[species]
-                .loc[input_data.conc_df.index >= PLOT_START]
-                .dropna()
-                .size
-            )
-            scatter_offsets: np.ndarray = np.asarray(scatter.get_offsets())
-            assert len(scatter_offsets) == expected
-
-    def test_limits_and_clipping(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
+            assert line.get_linewidth() == 1
+        # Clipped to the window: the full record minus the spin-up.
+        assert len(np.asarray(lines[0].get_ydata())) == 2557
+        # The record ends before the window's end (the partial 2025
+        # water year), so the right limit is the record's last day.
+        assert ax.get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
         )
-        last_day: float = _day_number(index[-1])
-        assert fig.axes[0].get_xlim() == (PLOT_START_DATE, last_day)
-        assert fig.axes[1].get_xlim() == (PLOT_START_DATE, last_day)
-        # The streamflow axis is inverted (discharge grows downward)
-        # and spans twice the data maximum (plus the autoscale margin).
-        top: float = fig.axes[0].get_ylim()[0]
-        bottom: float = fig.axes[0].get_ylim()[1]
-        assert bottom == 0.0
-        data_max: float = len(index) - 1
-        assert 2 * data_max < top < 3 * data_max
 
-    def test_single_figure_legend(
+    def test_partial_window_limits(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
+        window = water_year_window(2017, 2020)
+        fig = gui_plots.make_storage_figure(
             _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
+            ["surface_hs"],
+            window,
+        )
+        # Both limits come from the window; the record spans it.
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(window[1]),
+        )
+
+    def test_legend_below_the_axes(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_storage_figure(
+            _synthetic_hydro_sim(index),
+            ["surface_hs", "ground_rp"],
+            window,
         )
         assert len(fig.legends) == 1
         legend = fig.legends[0]
-        assert legend.get_title().get_text() == ""
+        assert legend.get_frame().get_visible() is False
+        assert legend.get_title().get_text() == "Zone"
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Streamflow (sim)",
-            "Streamflow (meas)",
-            "DOC (sim)",
-            "DOC (meas)",
-            "DIC (sim)",
-            "DIC (meas)",
-            "Ca++ (sim)",
-            "Ca++ (meas)",
+            "Surface (HS)",
+            "Ground (RP)",
         ]
-        # `_ncols` is a private matplotlib attribute, hence getattr.
-        assert getattr(legend, "_ncols") == 5
-        # One row, above the top edge of the figure, horizontally centered.
-        np.testing.assert_allclose(
-            legend.get_bbox_to_anchor().extents,
-            _figure_anchor(fig, 0.5, 1.02),
-        )
-
-    def test_subset_selection(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """The selection draws only the chosen series."""
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
-            ["Streamflow", "DOC"],
-        )
-        assert len(fig.axes) == 2
-        assert [line.get_label() for line in _lines(fig.axes[0])] == [
-            "Streamflow (sim)",
-        ]
-        assert [
-            scatter.get_label() for scatter in _scatters(fig.axes[0])
-        ] == ["Streamflow (meas)"]
-        assert [line.get_label() for line in _lines(fig.axes[1])] == [
-            "DOC (sim)",
-        ]
-        assert [
-            scatter.get_label() for scatter in _scatters(fig.axes[1])
-        ] == ["DOC (meas)"]
-        legend = fig.legends[0]
-        assert [text.get_text() for text in legend.get_texts()] == [
-            "Streamflow (sim)",
-            "Streamflow (meas)",
-            "DOC (sim)",
-            "DOC (meas)",
-        ]
-
-    def test_streamflow_only(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """Without any river species, the right axis is not created."""
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
-            ["Streamflow"],
-        )
-        assert len(fig.axes) == 1
-        assert fig.axes[0].get_title() == "Streamflow"
-        assert len(_lines(fig.axes[0])) == 1
-        assert len(_scatters(fig.axes[0])) == 1
-        legend = fig.legends[0]
-        assert [text.get_text() for text in legend.get_texts()] == [
-            "Streamflow (sim)",
-            "Streamflow (meas)",
-        ]
-
-    def test_no_series(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """With nothing selected, the figure is empty and legend-less."""
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            input_data.q_meas,
-            input_data.conc_df,
-            [],
-        )
-        assert len(fig.axes) == 1
-        assert fig.axes[0].get_title() == ""
-        assert len(_lines(fig.axes[0])) == 0
-        assert len(_scatters(fig.axes[0])) == 0
-        assert len(fig.legends) == 0
-
-    def test_no_rt_results(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """A hydrology-only run: one axis even with species selected."""
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_time_series_figure(
-            _synthetic_hydro_sim(index),
-            None,
-            input_data.q_meas,
-            input_data.conc_df,
-            ["Streamflow", "DOC", "DIC", "Ca++"],
-        )
-        assert len(fig.axes) == 1
-        assert fig.axes[0].get_title() == "Streamflow"
-        assert [line.get_label() for line in _lines(fig.axes[0])] == [
-            "Streamflow (sim)",
-        ]
-        assert [
-            scatter.get_label() for scatter in _scatters(fig.axes[0])
-        ] == ["Streamflow (meas)"]
+        # The legend sits below the axes, with the axes' reserved
+        # bottom margin keeping the two apart.
+        top, bottom = _legend_extent_fractions(fig, legend)
+        assert top <= fig.axes[0].get_position().y0
+        assert bottom >= 0.0
+        assert fig.subplotpars.bottom >= top
 
     def test_overlay_previous_run(
         self, input_data: gui_data.GuiInputData
     ) -> None:
-        """The previous run's series draw behind, faintly, out of the legend."""
+        """The previous run's storages draw behind, faintly, out of the legend."""
         index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
         hydro_sim = _synthetic_hydro_sim(index)
-        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-        # Distinguishable overlay frames (same columns, shifted values).
         overlay_hydro: pd.DataFrame = _synthetic_hydro_sim(index) + 10.0
-        overlay_rt: pd.DataFrame = (
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-            + 10.0
-        )
 
-        fig = gui_plots.make_time_series_figure(
+        fig = gui_plots.make_storage_figure(
             hydro_sim,
-            rt_sim,
-            input_data.q_meas,
-            input_data.conc_df,
+            ["surface_hs", "ground_rp"],
+            window,
             overlay_hydro_sim=overlay_hydro,
-            overlay_rt_sim=overlay_rt,
         )
-        hydro_ax = fig.axes[0]
-        species_ax = fig.axes[1]
-
-        # The overlay streamflow line is drawn first (behind) and
-        # half transparent; the current line keeps its label and its
-        # full opacity, and the overlay data survives the clipping.
-        hydro_lines = _lines(hydro_ax)
-        assert len(hydro_lines) == 2
-        assert hydro_lines[0].get_alpha() == 0.5
-        assert _alpha(hydro_lines[1]) == 1.0
-        assert hydro_lines[1].get_label() == "Streamflow (sim)"
+        lines = _lines(fig.axes[0])
+        # The overlay lines are drawn first (behind) and half
+        # transparent; the current lines keep their full opacity.
+        assert len(lines) == 4
+        assert [line.get_alpha() for line in lines[:2]] == [0.5, 0.5]
+        assert [_alpha(line) for line in lines[2:]] == [1.0, 1.0]
         expected: np.ndarray = np.asarray(
             overlay_hydro.loc[
-                overlay_hydro.index >= PLOT_START, "streamflow_sim"
+                (overlay_hydro.index >= window[0])
+                & (overlay_hydro.index <= window[1]),
+                "s_surface_hs",
             ]
         )
         np.testing.assert_allclose(
-            np.asarray(hydro_lines[0].get_ydata()), expected
+            np.asarray(lines[0].get_ydata()), expected
         )
 
-        # The right axis carries the overlay species lines first, in
-        # species order, then the current ones with their labels.
-        species_lines = _lines(species_ax)
-        assert len(species_lines) == 6
-        assert [line.get_alpha() for line in species_lines[:3]] == [0.5] * 3
-        assert [_alpha(line) for line in species_lines[3:]] == [1.0] * 3
-        assert [line.get_label() for line in species_lines[3:]] == [
-            "DOC (sim)",
-            "DIC (sim)",
-            "Ca++ (sim)",
-        ]
+    def test_overlay_skips_missing_columns(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A previous frame that lacks a zone's column contributes no line."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+        overlay_hydro: pd.DataFrame = _synthetic_hydro_sim(index).drop(
+            columns=["s_ground_rp"]
+        )
 
-        # The legend still lists only the current run's series.
-        legend = fig.legends[0]
-        assert [text.get_text() for text in legend.get_texts()] == [
-            "Streamflow (sim)",
-            "Streamflow (meas)",
-            "DOC (sim)",
-            "DOC (meas)",
-            "DIC (sim)",
-            "DIC (meas)",
-            "Ca++ (sim)",
-            "Ca++ (meas)",
+        fig = gui_plots.make_storage_figure(
+            hydro_sim,
+            ["surface_hs", "ground_rp"],
+            window,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        # One overlay line (surface_hs only), then the two current.
+        assert len(_lines(fig.axes[0])) == 3
+
+
+class TestPartitioningFigure:
+    """The stacked discharge-partitioning figure on synthetic data."""
+
+    # The stack order: ground zones under surface zones, ZONE_ORDER
+    # within a family (the spec's ground-then-surface example).
+    STACK_ZONES: tuple[str, ...] = (
+        "ground_hs",
+        "ground_rp",
+        "surface_hs",
+        "surface_rp",
+    )
+
+    def test_axes_and_labels(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Partitioning"
+        assert ax.get_ylabel() == "Discharge (mm/d)"
+
+    def test_stacked_layers(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """One filled band per river zone: cumulative components, ground first."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        frame: pd.DataFrame = _synthetic_hydro_sim(index)
+        clipped: pd.DataFrame = gui_plots._clip_frame(frame, window)
+        flow: pd.Series = clipped["streamflow_sim"]
+
+        fig = gui_plots.make_partitioning_figure(
+            frame,
+            input_data.q_meas,
+            window,
+        )
+        fills = _fills(fig.axes[0])
+        assert len(fills) == 4
+        # The fixture's per-zone streamflow shares (0.1 x zone index).
+        shares: tuple[float, ...] = (0.5, 0.6, 0.3, 0.4)
+        running: pd.Series = pd.Series(0.0, index=clipped.index)
+        for fill, zone, share in zip(fills, self.STACK_ZONES, shares):
+            assert np.allclose(
+                fill.get_facecolor(), mcolors.to_rgba(ZONE_COLORS[zone])
+            )
+            band_bottom, band_top = _fill_band_y(fill)
+            assert np.allclose(band_bottom, running.to_numpy())
+            running = running + share * flow
+            assert np.allclose(band_top, running.to_numpy())
+
+    def test_measured_scatter(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The measured streamflow plots as scatter points, never a line."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        scatters = _scatters(fig.axes[0])
+        assert len(scatters) == 1
+        assert np.allclose(
+            scatters[0].get_facecolor(), mcolors.to_rgba(MEAS_Q_COLOR)
+        )
+        measured: pd.Series = (
+            gui_plots._clip_series(input_data.q_meas, window).dropna()
+        )
+        offsets: np.ndarray = np.asarray(scatters[0].get_offsets())
+        assert np.allclose(offsets[:, 1], measured.to_numpy())
+        assert len(_lines(fig.axes[0])) == 0
+
+    def test_window_clipping_and_limits(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        # The clipped record: the full record minus the spin-up.
+        assert len(_fill_band_y(_fills(fig.axes[0])[0])[0]) == 2557
+        # The record ends before the window's end (the partial 2025
+        # water year), so the right limit is the record's last day.
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
+        )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            inner,
+        )
+        assert inner_fig.axes[0].get_xlim() == (
+            _day_number(inner[0]),
+            _day_number(inner[1]),
+        )
+
+    def test_legend_rows(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        assert len(fig.legends) == 2
+        zone_row, discharge_row = fig.legends
+        assert zone_row.get_frame().get_visible() is False
+        assert zone_row.get_title().get_text() == "Zone"
+        assert [text.get_text() for text in zone_row.get_texts()] == [
+            ZONE_LABELS[zone] for zone in self.STACK_ZONES
         ]
+        assert discharge_row.get_frame().get_visible() is False
+        assert discharge_row.get_title().get_text() == "Discharge"
+        assert [text.get_text() for text in discharge_row.get_texts()] == [
+            "Discharge (meas)"
+        ]
+        # Both rows sit below the axes, the discharge row above the
+        # zone row, without overlapping it.
+        zone_top, _zone_bottom = _legend_extent_fractions(fig, zone_row)
+        _discharge_top, discharge_bottom = _legend_extent_fractions(
+            fig, discharge_row
+        )
+        assert zone_top <= fig.axes[0].get_position().y0
+        assert discharge_bottom >= zone_top
+
+    def test_overlay_previous_run(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The previous run's stack draws behind, faintly, out of the legends."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        frame: pd.DataFrame = _synthetic_hydro_sim(index)
+        # A previous run differs in the simulated discharge, not in
+        # the zones' streamflow shares.
+        overlay: pd.DataFrame = frame.copy()
+        overlay["streamflow_sim"] = frame["streamflow_sim"] + 10.0
+
+        fig = gui_plots.make_partitioning_figure(
+            frame,
+            input_data.q_meas,
+            window,
+            overlay_hydro_sim=overlay,
+        )
+        fills = _fills(fig.axes[0])
+        # Four overlay bands first (half transparent), four current.
+        assert len(fills) == 8
+        assert [
+            float(np.asarray(fill.get_facecolor())[0, 3]) for fill in fills
+        ] == [0.5] * 4 + [1.0] * 4
+        clipped_overlay: pd.DataFrame = gui_plots._clip_frame(overlay, window)
+        overlay_flow: pd.Series = clipped_overlay["streamflow_sim"]
+        shares: tuple[float, ...] = (0.5, 0.6, 0.3, 0.4)
+        running: pd.Series = pd.Series(0.0, index=clipped_overlay.index)
+        for fill, share in zip(fills[:4], shares):
+            running = running + share * overlay_flow
+            assert np.allclose(_fill_band_y(fill)[1], running.to_numpy())
+
+    def test_overlay_skips_missing_columns(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A previous frame that lacks a zone's column contributes no band."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        frame: pd.DataFrame = _synthetic_hydro_sim(index)
+        overlay: pd.DataFrame = frame.drop(
+            columns=[
+                "prop_q_ground_rp",
+                "q_lat_ground_rp",
+                "s_ground_rp",
+            ]
+        )
+
+        fig = gui_plots.make_partitioning_figure(
+            frame,
+            input_data.q_meas,
+            window,
+            overlay_hydro_sim=overlay,
+        )
+        # Three overlay bands (ground_rp missing), four current.
+        assert len(_fills(fig.axes[0])) == 7
+
+
+class TestRiverLoadsFigure:
+    """The river loads (simulated concentration x discharge) figure."""
+
+    SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+
+    def test_axes_and_labels(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_river_loads_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            list(self.SPECIES),
+            window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "River loads"
+        assert ax.get_ylabel() == "Load (mm·mol/L/d)"
+
+    def test_one_line_per_species(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Each river species' load: its concentration times the discharge."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = gui_plots.make_river_loads_figure(
+            rt_sim,
+            hydro_sim,
+            list(self.SPECIES),
+            window,
+        )
+        lines = _lines(fig.axes[0])
+        assert len(lines) == 3
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        hydro_plot: pd.DataFrame = gui_plots._clip_frame(hydro_sim, window)
+        for line, species in zip(lines, self.SPECIES):
+            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
+                RIVER_SPECIES_SIM_COLORS[species]
+            )
+            assert line.get_linewidth() == 1
+            expected: np.ndarray = (
+                rt_plot[f"{species}_riv"] * hydro_plot["streamflow_sim"]
+            ).to_numpy()
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()), expected
+            )
+        assert len(_scatters(fig.axes[0])) == 0
+
+    def test_window_clipping_and_limits(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_river_loads_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            list(self.SPECIES),
+            window,
+        )
+        # The clipped record: the full record minus the spin-up.
+        assert len(np.asarray(_lines(fig.axes[0])[0].get_ydata())) == 2557
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
+        )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_river_loads_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            list(self.SPECIES),
+            inner,
+        )
+        assert inner_fig.axes[0].get_xlim() == (
+            _day_number(inner[0]),
+            _day_number(inner[1]),
+        )
+
+    def test_legend_below_the_axes(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_river_loads_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            list(self.SPECIES),
+            window,
+        )
+        assert len(fig.legends) == 1
+        legend = fig.legends[0]
+        assert legend.get_frame().get_visible() is False
+        assert legend.get_title().get_text() == "Species"
+        assert [text.get_text() for text in legend.get_texts()] == list(
+            self.SPECIES
+        )
+        top, bottom = _legend_extent_fractions(fig, legend)
+        assert top <= fig.axes[0].get_position().y0
+        assert bottom >= 0.0
+
+    def test_overlay_previous_run(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The previous run's loads draw behind, faintly, out of the legend."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        overlay_rt: pd.DataFrame = rt_sim.copy()
+        overlay_hydro: pd.DataFrame = hydro_sim.copy()
+        for species in self.SPECIES:
+            overlay_rt[f"{species}_riv"] = (
+                rt_sim[f"{species}_riv"] + 1.0
+            )
+        overlay_hydro["streamflow_sim"] = (
+            hydro_sim["streamflow_sim"] + 10.0
+        )
+
+        fig = gui_plots.make_river_loads_figure(
+            rt_sim,
+            hydro_sim,
+            list(self.SPECIES),
+            window,
+            overlay_rt_sim=overlay_rt,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        lines = _lines(fig.axes[0])
+        # Three overlay lines first (half transparent), three current.
+        assert len(lines) == 6
+        assert [_alpha(line) for line in lines] == [0.5] * 3 + [1.0] * 3
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        hydro_plot: pd.DataFrame = gui_plots._clip_frame(hydro_sim, window)
+        overlay_rt_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_rt, window
+        )
+        overlay_hydro_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_hydro, window
+        )
+        for line, species in zip(lines[:3], self.SPECIES):
+            expected: np.ndarray = (
+                overlay_rt_plot[f"{species}_riv"]
+                * overlay_hydro_plot["streamflow_sim"]
+            ).to_numpy()
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()), expected
+            )
+
+    def test_overlay_skips_missing_columns(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A previous frame that lacks a species contributes no line."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+        overlay_rt: pd.DataFrame = rt_sim.drop(columns=["Ca++_riv"])
+        overlay_hydro: pd.DataFrame = hydro_sim.copy()
+        overlay_hydro["streamflow_sim"] = (
+            hydro_sim["streamflow_sim"] + 10.0
+        )
+
+        fig = gui_plots.make_river_loads_figure(
+            rt_sim,
+            hydro_sim,
+            list(self.SPECIES),
+            window,
+            overlay_rt_sim=overlay_rt,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        # Two overlay lines (Ca++ missing), three current.
+        assert len(_lines(fig.axes[0])) == 5
+
+
+class TestConcDischargeFigure:
+    """The concentration-discharge scatter panels on synthetic data."""
+
+    SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+
+    def test_panels_and_axes(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_conc_discharge_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            window,
+        )
+        assert len(fig.axes) == 3
+        for ax, species in zip(fig.axes, self.SPECIES):
+            assert isinstance(ax, Axes)
+            assert ax.get_title() == species
+            assert ax.get_xlabel() == "Discharge (mm/d)"
+            assert ax.get_ylabel() == "Concentration (mol/L)"
+            assert ax.get_xscale() == "log"
+            assert ax.get_yscale() == "log"
+
+    def test_sim_points(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The simulated points pair the simulated q with the simulated conc."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = gui_plots.make_conc_discharge_figure(
+            rt_sim,
+            hydro_sim,
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            window,
+        )
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        hydro_plot: pd.DataFrame = gui_plots._clip_frame(hydro_sim, window)
+        for ax, species in zip(fig.axes, self.SPECIES):
+            scatters = _scatters(ax)
+            assert len(scatters) == 2
+            sim = scatters[0]
+            sim_face: np.ndarray = np.asarray(sim.get_facecolor())
+            assert mcolors.to_rgba(sim_face[0]) == mcolors.to_rgba(
+                RIVER_SPECIES_SIM_COLORS[species]
+            )
+            offsets: np.ndarray = np.asarray(sim.get_offsets())
+            # The synthetic record is strictly positive in the window, so
+            # every clipped day plots.
+            assert np.allclose(
+                offsets[:, 0], hydro_plot["streamflow_sim"].to_numpy()
+            )
+            assert np.allclose(
+                offsets[:, 1], rt_plot[f"{species}_riv"].to_numpy()
+            )
+            assert len(_lines(ax)) == 0
+
+    def test_meas_points(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The observed points pair the measured q with the measured conc."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_conc_discharge_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            window,
+        )
+        q_plot: pd.Series = gui_plots._clip_series(input_data.q_meas, window)
+        conc_plot: pd.DataFrame = gui_plots._clip_frame(
+            input_data.conc_df, window
+        )
+        for ax, species in zip(fig.axes, self.SPECIES):
+            scatters = _scatters(ax)
+            meas = scatters[1]
+            meas_face: np.ndarray = np.asarray(meas.get_facecolor())
+            assert mcolors.to_rgba(meas_face[0]) == mcolors.to_rgba(
+                RIVER_SPECIES_MEAS_COLORS[species]
+            )
+            conc: pd.Series = conc_plot[species]
+            mask: pd.Series = (q_plot > 0) & (conc > 0)
+            offsets = np.asarray(meas.get_offsets())
+            assert np.allclose(offsets[:, 0], q_plot[mask].to_numpy())
+            assert np.allclose(offsets[:, 1], conc[mask].to_numpy())
+
+    def test_positive_values_only(self) -> None:
+        """Zeros and negative values drop out of the log-log panels."""
+        index = pd.date_range("2015-10-01", periods=6, freq="D")
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = pd.DataFrame(
+            {
+                "streamflow_sim": np.array([0.0, 1.0, -2.0, 3.0, 4.0, 5.0])
+            },
+            index=index,
+        )
+        rt_sim = pd.DataFrame(
+            {
+                "DOC_riv": np.array([1.0, 0.0, -3.0, 4.0, 5.0, 6.0]),
+            },
+            index=index,
+        )
+        q_meas = pd.Series(
+            [0.5, -1.0, 2.0, 3.0, 4.0, 5.0],
+            index=index,
+            name="q_meas",
+        )
+        conc_df = pd.DataFrame(
+            {"DOC": np.array([1.0, 2.0, -3.0, 4.0, 5.0, 0.0])}, index=index
+        )
+
+        fig = gui_plots.make_conc_discharge_figure(
+            rt_sim,
+            hydro_sim,
+            q_meas,
+            conc_df,
+            ["DOC"],
+            window,
+        )
+        scatters = _scatters(fig.axes[0])
+        # The first three days carry a zero or negative value on at
+        # least one side of each pair: three points per cloud.
+        sim_offsets: np.ndarray = np.asarray(scatters[0].get_offsets())
+        assert np.allclose(
+            sim_offsets, [[3.0, 4.0], [4.0, 5.0], [5.0, 6.0]]
+        )
+        meas_offsets: np.ndarray = np.asarray(scatters[1].get_offsets())
+        assert np.allclose(
+            meas_offsets, [[0.5, 1.0], [3.0, 4.0], [4.0, 5.0]]
+        )
+
+    def test_window_clipping(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = gui_plots.make_conc_discharge_figure(
+            rt_sim,
+            hydro_sim,
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            inner,
+        )
+        expected: int = int(((index >= inner[0]) & (index <= inner[1])).sum())
+        # The synthetic frames are strictly positive: every day in the
+        # window plots, the record outside it does not.
+        for ax, species in zip(fig.axes, self.SPECIES):
+            sim, meas = _scatters(ax)
+            assert len(np.asarray(sim.get_offsets())) == expected
+            conc: pd.Series = input_data.conc_df[species]
+            mask: pd.Series = (index >= inner[0]) & (index <= inner[1])
+            positive: pd.Series = (
+                (input_data.q_meas > 0) & (conc > 0)
+            ) & mask
+            assert len(np.asarray(meas.get_offsets())) == int(
+                positive.sum()
+            )
+
+    def test_legends(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_conc_discharge_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            window,
+        )
+        assert len(fig.legends) == 2
+        sim_row, meas_row = fig.legends
+        assert sim_row.get_frame().get_visible() is False
+        assert sim_row.get_title().get_text() == "Simulated"
+        assert [text.get_text() for text in sim_row.get_texts()] == list(
+            self.SPECIES
+        )
+        assert meas_row.get_frame().get_visible() is False
+        assert meas_row.get_title().get_text() == "Measured"
+        assert [text.get_text() for text in meas_row.get_texts()] == list(
+            self.SPECIES
+        )
+        # Both rows sit below the axes, the measured row above the
+        # simulated row, without overlapping it.
+        sim_top, _sim_bottom = _legend_extent_fractions(fig, sim_row)
+        _meas_top, meas_bottom = _legend_extent_fractions(fig, meas_row)
+        assert sim_top <= fig.axes[0].get_position().y0
+        assert meas_bottom >= sim_top
+        assert fig.subplotpars.bottom >= _meas_top
+
+
+class TestZoneConcentrationsFigure:
+    """The zone concentrations figure on synthetic data."""
+
+    SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+    ZONES: tuple[str, ...] = tuple(ZONE_ORDER)
+
+    def test_axes_and_labels(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_zone_concentrations_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Concentration"
+        assert ax.get_ylabel() == "Concentration (mol/L)"
+
+    def test_lines_and_encoding(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """One line per zone-species pair: color is zone, linestyle species."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        fig = gui_plots.make_zone_concentrations_figure(
+            rt_sim,
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
+        )
+        lines = _lines(fig.axes[0])
+        assert len(lines) == len(self.ZONES) * len(self.SPECIES)
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        for position, line in enumerate(lines):
+            zone = self.ZONES[position // len(self.SPECIES)]
+            species = self.SPECIES[position % len(self.SPECIES)]
+            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
+                ZONE_COLORS[zone]
+            )
+            assert line.get_linestyle() == LINESTYLE_CYCLE[
+                self.SPECIES.index(species) % len(LINESTYLE_CYCLE)
+            ]
+            assert line.get_linewidth() == 1
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                rt_plot[f"{species}_{zone}"].to_numpy(),
+            )
+        assert len(_scatters(fig.axes[0])) == 0
+
+    def test_window_clipping_and_limits(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        fig = gui_plots.make_zone_concentrations_figure(
+            rt_sim,
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
+        )
+        assert len(np.asarray(_lines(fig.axes[0])[0].get_ydata())) == 2557
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
+        )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_zone_concentrations_figure(
+            rt_sim,
+            list(self.SPECIES),
+            list(self.ZONES),
+            inner,
+        )
+        assert inner_fig.axes[0].get_xlim() == (
+            _day_number(inner[0]),
+            _day_number(inner[1]),
+        )
+
+    def test_legend_rows(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_zone_concentrations_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
+        )
+        assert len(fig.legends) == 2
+        zone_row, species_row = fig.legends
+        assert zone_row.get_frame().get_visible() is False
+        assert zone_row.get_title().get_text() == "Zone"
+        assert [text.get_text() for text in zone_row.get_texts()] == [
+            ZONE_LABELS[zone] for zone in self.ZONES
+        ]
+        assert species_row.get_frame().get_visible() is False
+        assert species_row.get_title().get_text() == "Species"
+        assert [text.get_text() for text in species_row.get_texts()] == list(
+            self.SPECIES
+        )
+        # The species row's handles carry the species' linestyles.
+        for handle, i in zip(
+            species_row.legend_handles, range(len(self.SPECIES))
+        ):
+            assert isinstance(handle, Line2D)
+            assert handle.get_linestyle() == LINESTYLE_CYCLE[
+                i % len(LINESTYLE_CYCLE)
+            ]
+        # Both rows sit below the axes, the species row above the zone
+        # row, without overlapping it.
+        zone_top, _zone_bottom = _legend_extent_fractions(fig, zone_row)
+        _species_top, species_bottom = _legend_extent_fractions(fig, species_row)
+        assert zone_top <= fig.axes[0].get_position().y0
+        assert species_bottom >= zone_top
+
+    def test_overlay_previous_run(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The previous run's concentrations draw behind, faintly, unlabeled."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        overlay_rt: pd.DataFrame = rt_sim.copy()
+        for species in self.SPECIES:
+            for zone in self.ZONES:
+                overlay_rt[f"{species}_{zone}"] = (
+                    rt_sim[f"{species}_{zone}"] + 1.0
+                )
+
+        fig = gui_plots.make_zone_concentrations_figure(
+            rt_sim,
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
+            overlay_rt_sim=overlay_rt,
+        )
+        lines = _lines(fig.axes[0])
+        expected_count: int = len(self.ZONES) * len(self.SPECIES)
+        # The overlay's lines first (half transparent), then the current.
+        assert len(lines) == 2 * expected_count
+        assert [_alpha(line) for line in lines] == [
+            0.5
+        ] * expected_count + [1.0] * expected_count
+        overlay_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_rt, window
+        )
+        for position, line in enumerate(lines[:expected_count]):
+            zone = self.ZONES[position // len(self.SPECIES)]
+            species = self.SPECIES[position % len(self.SPECIES)]
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                overlay_plot[f"{species}_{zone}"].to_numpy(),
+            )
 
     def test_overlay_skips_missing_columns(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         """A previous frame that lacks a column contributes no line for it."""
         index: pd.Index = input_data.forc.precip.index
-        hydro_sim = _synthetic_hydro_sim(index)
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
         rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-        # The overlay carries streamflow but no river-species columns.
-        overlay_hydro: pd.DataFrame = _synthetic_hydro_sim(index)
+        overlay_rt: pd.DataFrame = rt_sim.drop(columns=["DOC_snow_hs"])
 
-        fig = gui_plots.make_time_series_figure(
-            hydro_sim,
+        fig = gui_plots.make_zone_concentrations_figure(
             rt_sim,
-            input_data.q_meas,
-            input_data.conc_df,
-            overlay_hydro_sim=overlay_hydro,
-        )
-        hydro_lines = _lines(fig.axes[0])
-        assert len(hydro_lines) == 2
-        assert hydro_lines[0].get_alpha() == 0.5
-        # No overlay species lines on the right axis.
-        assert len(_lines(fig.axes[1])) == 3
-
-    def test_hydro_only_overlay(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """A hydrology-only figure can still carry the streamflow overlay."""
-        index: pd.Index = input_data.forc.precip.index
-        hydro_sim = _synthetic_hydro_sim(index)
-        overlay_hydro: pd.DataFrame = _synthetic_hydro_sim(index) + 10.0
-
-        fig = gui_plots.make_time_series_figure(
-            hydro_sim,
-            None,
-            input_data.q_meas,
-            input_data.conc_df,
-            overlay_hydro_sim=overlay_hydro,
-        )
-        assert len(fig.axes) == 1
-        lines = _lines(fig.axes[0])
-        assert len(lines) == 2
-        assert lines[0].get_alpha() == 0.5
-        assert lines[1].get_label() == "Streamflow (sim)"
-        legend = fig.legends[0]
-        assert [text.get_text() for text in legend.get_texts()] == [
-            "Streamflow (sim)",
-            "Streamflow (meas)",
-        ]
-
-
-class TestZoneFigure:
-    """The zone concentrations / storage figure on synthetic data."""
-
-    def test_axes_and_labels(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_zone_figure(
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            _synthetic_hydro_sim(index),
-            ["DOC"],
-            ["surface_hs", "ground_rp"],
-        )
-        assert len(fig.axes) == 2
-        assert fig.axes[0].get_title() == "Concentration"
-        assert fig.axes[0].get_ylabel() == "Concentration (mol/L)"
-        assert fig.axes[1].get_title() == "Storage"
-        assert fig.axes[1].get_ylabel() == "Storage (mm)"
-
-    def test_series_colors_and_linestyles(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_zone_figure(
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            _synthetic_hydro_sim(index),
-            ["DOC", "DIC"],
-            ["surface_hs", "ground_rp"],
-        )
-        conc_ax = fig.axes[0]
-        conc_lines = _lines(conc_ax)
-        # One line per (zone, species) pair, zones in selection order.
-        assert len(conc_lines) == 4
-        for line, zone in zip(
-            conc_lines, ["surface_hs", "surface_hs", "ground_rp", "ground_rp"]
-        ):
-            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
-                ZONE_COLORS[zone]
-            )
-        # The species index drives the linestyle.
-        assert [line.get_linestyle() for line in conc_lines] == [
-            "-",
-            "--",
-            "-",
-            "--",
-        ]
-
-        storage_lines = _lines(fig.axes[1])
-        assert len(storage_lines) == 2
-        for line, zone in zip(
-            storage_lines, ["surface_hs", "ground_rp"]
-        ):
-            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
-                ZONE_COLORS[zone]
-            )
-
-    def test_legends_and_layout(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_zone_figure(
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            _synthetic_hydro_sim(index),
-            ["DOC", "DIC"],
-            ["surface_hs", "ground_rp"],
-        )
-        assert len(fig.legends) == 2
-        zone_legend, species_legend = fig.legends
-        assert zone_legend.get_title().get_text() == "Zone"
-        assert [t.get_text() for t in zone_legend.get_texts()] == [
-            "Surface (HS)",
-            "Ground (RP)",
-        ]
-        assert species_legend.get_title().get_text() == "Species"
-        assert [t.get_text() for t in species_legend.get_texts()] == [
-            "DOC",
-            "DIC",
-        ]
-        # The zone row sits above the species row, both above the panels.
-        np.testing.assert_allclose(
-            zone_legend.get_bbox_to_anchor().extents,
-            _figure_anchor(fig, 0.5, 0.93),
-        )
-        np.testing.assert_allclose(
-            species_legend.get_bbox_to_anchor().extents,
-            _figure_anchor(fig, 0.5, 0.83),
-        )
-
-        pars = fig.subplotpars
-        assert (pars.left, pars.right, pars.bottom, pars.top) == (
-            0.07,
-            0.96,
-            0.07,
-            0.76,
-        )
-
-    def test_overlay_previous_run(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
-        """The previous run's series draw behind, faintly, out of the legend."""
-        index: pd.Index = input_data.forc.precip.index
-        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-        hydro_sim = _synthetic_hydro_sim(index)
-        overlay_rt: pd.DataFrame = (
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-            + 10.0
-        )
-        overlay_hydro: pd.DataFrame = _synthetic_hydro_sim(index) + 10.0
-
-        fig = gui_plots.make_zone_figure(
-            rt_sim,
-            hydro_sim,
-            ["DOC", "DIC"],
-            ["surface_hs", "ground_rp"],
+            list(self.SPECIES),
+            list(self.ZONES),
+            window,
             overlay_rt_sim=overlay_rt,
-            overlay_hydro_sim=overlay_hydro,
         )
-
-        # Both panels: the overlay lines (4 concentration, 2 storage)
-        # draw first and half transparent, in the same zone-species
-        # order as the current lines that follow.
-        conc_lines = _lines(fig.axes[0])
-        assert len(conc_lines) == 8
-        assert [line.get_alpha() for line in conc_lines[:4]] == [0.5] * 4
-        assert [_alpha(line) for line in conc_lines[4:]] == [1.0] * 4
-        assert [line.get_linestyle() for line in conc_lines[:4]] == [
-            "-",
-            "--",
-            "-",
-            "--",
-        ]
-        storage_lines = _lines(fig.axes[1])
-        assert len(storage_lines) == 4
-        assert [line.get_alpha() for line in storage_lines[:2]] == [0.5] * 2
-        assert [_alpha(line) for line in storage_lines[2:]] == [1.0] * 2
-
-        # The legends still describe only the current run.
-        zone_legend, species_legend = fig.legends
-        assert [t.get_text() for t in zone_legend.get_texts()] == [
-            "Surface (HS)",
-            "Ground (RP)",
-        ]
-        assert [t.get_text() for t in species_legend.get_texts()] == [
-            "DOC",
-            "DIC",
-        ]
+        expected_count: int = len(self.ZONES) * len(self.SPECIES)
+        # One overlay line missing, all current lines present.
+        assert len(_lines(fig.axes[0])) == (expected_count - 1) + expected_count
 
 
 class TestRateFigure:
-    """The mineral reaction-rate figure on synthetic data."""
+    """The single-mineral reaction-rate figure on synthetic data."""
 
-    def test_series_and_legends(
-        self, input_data: gui_data.GuiInputData
-    ) -> None:
+    MINERAL: str = "SOC(s)"
+    # The model emits a mineral's rate columns only for the zones in
+    # which its reactions run: here, all four non-snow zones.
+    REACTION_ZONES: tuple[str, ...] = tuple(ZONE_ORDER[2:])
+
+    def test_axes_and_labels(self, input_data: gui_data.GuiInputData) -> None:
         index: pd.Index = input_data.forc.precip.index
-        minerals: list[str] = ["SOC(s)", "Calcite(s)"]
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
         fig: Figure = gui_plots.make_rate_figure(
             _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
-            minerals,
+            self.MINERAL,
+            window,
         )
         assert len(fig.axes) == 1
-        ax = fig.axes[0]
-        assert ax.get_title() == "Mineral reaction rates"
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == f"Reaction rates ({self.MINERAL})"
         assert ax.get_ylabel() == "Reaction rate (mol/L/day)"
-        assert ax.get_xlim() == (PLOT_START_DATE, _day_number(index[-1]))
 
-        # The synthetic frame carries rate columns in all four
-        # non-snow zones, so both selected minerals plot 4 lines each.
-        lines = _lines(ax)
-        assert len(lines) == 8
-        assert [line.get_linestyle() for line in lines] == [
-            "-",
-            "-",
-            "-",
-            "-",
-            "--",
-            "--",
-            "--",
-            "--",
-        ]
+    def test_one_line_per_reacting_zone(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """One zone-colored line per zone carrying the mineral's rate."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
 
-        legends = _axis_legends(ax)
-        assert len(legends) == 2
-        zone_legend, mineral_legend = legends
-        assert zone_legend.get_title().get_text() == "Zone"
-        assert [t.get_text() for t in zone_legend.get_texts()] == [
-            "Surface (HS)",
-            "Surface (RP)",
-            "Ground (HS)",
-            "Ground (RP)",
-        ]
-        # The zone legend hangs below the axes.
-        np.testing.assert_allclose(
-            zone_legend.get_bbox_to_anchor().extents,
-            _axis_anchor(fig, ax, 0.5, -0.18),
-        )
-        assert mineral_legend.get_title().get_text() == "Mineral"
-        assert [t.get_text() for t in mineral_legend.get_texts()] == minerals
-        # The mineral legend anchors to the axes' upper-right corner.
-        mineral_box = mineral_legend.get_bbox_to_anchor().extents
-        position = ax.get_position()
-        width = fig.get_figwidth() * fig.dpi
-        height = fig.get_figheight() * fig.dpi
-        assert mineral_box[2] == pytest.approx((position.x0 + position.width) * width)
-        assert mineral_box[3] == pytest.approx((position.y0 + position.height) * height)
+        fig = gui_plots.make_rate_figure(rt_sim, self.MINERAL, window)
+        lines = _lines(fig.axes[0])
+        assert len(lines) == len(self.REACTION_ZONES)
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        for line, zone in zip(lines, self.REACTION_ZONES):
+            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
+                ZONE_COLORS[zone]
+            )
+            assert line.get_linewidth() == 1
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                rt_plot[f"{self.MINERAL}_rate_{zone}"].to_numpy(),
+            )
+        assert len(_scatters(fig.axes[0])) == 0
 
     def test_overlay_previous_run(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         """The previous run's rates draw behind, faintly, out of the legend."""
         index: pd.Index = input_data.forc.precip.index
-        minerals: list[str] = ["SOC(s)", "Calcite(s)"]
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
         rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-        overlay_rt: pd.DataFrame = (
-            _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-            + 10.0
-        )
+        # A previous run differs in the mineral's rates, not in the
+        # rest of the frame.
+        overlay_rt: pd.DataFrame = rt_sim.copy()
+        for zone in self.REACTION_ZONES:
+            overlay_rt[f"{self.MINERAL}_rate_{zone}"] = (
+                rt_sim[f"{self.MINERAL}_rate_{zone}"] + 10.0
+            )
 
         fig = gui_plots.make_rate_figure(
-            rt_sim, minerals, overlay_rt_sim=overlay_rt
+            rt_sim,
+            self.MINERAL,
+            window,
+            overlay_rt_sim=overlay_rt,
         )
-        ax = fig.axes[0]
-        lines = _lines(ax)
-        # The overlay (4 zones x 2 minerals) draws first and half
-        # transparent, in the same mineral-zone order as the current
-        # lines that follow.
-        assert len(lines) == 16
-        assert [line.get_alpha() for line in lines[:8]] == [0.5] * 8
-        assert [_alpha(line) for line in lines[8:]] == [1.0] * 8
-        assert [line.get_linestyle() for line in lines[:8]] == [
-            "-",
-            "-",
-            "-",
-            "-",
-            "--",
-            "--",
-            "--",
-            "--",
-        ]
+        lines = _lines(fig.axes[0])
+        # The overlay's lines first (half transparent), then the
+        # current ones.
+        assert len(lines) == 2 * len(self.REACTION_ZONES)
+        assert [_alpha(line) for line in lines] == [
+            0.5
+        ] * len(self.REACTION_ZONES) + [1.0] * len(self.REACTION_ZONES)
+        overlay_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_rt, window
+        )
+        for line, zone in zip(
+            lines[: len(self.REACTION_ZONES)], self.REACTION_ZONES
+        ):
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                overlay_plot[f"{self.MINERAL}_rate_{zone}"].to_numpy(),
+            )
 
-        # The legends still describe only the current run.
-        zone_legend, mineral_legend = _axis_legends(ax)
-        assert [t.get_text() for t in mineral_legend.get_texts()] == minerals
+    def test_window_clipping_and_limits(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        fig = gui_plots.make_rate_figure(rt_sim, self.MINERAL, window)
+        assert len(np.asarray(_lines(fig.axes[0])[0].get_ydata())) == 2557
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
+        )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_rate_figure(rt_sim, self.MINERAL, inner)
+        assert inner_fig.axes[0].get_xlim() == (
+            _day_number(inner[0]),
+            _day_number(inner[1]),
+        )
+
+    def test_zone_legend_below_the_axes(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_rate_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            self.MINERAL,
+            window,
+        )
+        assert len(fig.legends) == 1
+        zone_row = fig.legends[0]
+        assert zone_row.get_frame().get_visible() is False
+        assert zone_row.get_title().get_text() == "Zone"
+        assert [text.get_text() for text in zone_row.get_texts()] == [
+            ZONE_LABELS[zone] for zone in self.REACTION_ZONES
+        ]
+        top, bottom = _legend_extent_fractions(fig, zone_row)
+        assert top <= fig.axes[0].get_position().y0
+        assert bottom >= 0.0
 
     def test_overlay_skips_missing_columns(
         self, input_data: gui_data.GuiInputData
     ) -> None:
-        """A previous frame that lacks a rate column contributes no line."""
+        """A previous frame that lacks a zone's rate column contributes no line."""
         index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
         rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
-        # The overlay carries the first non-snow zone's rate column
+        # The overlay carries the first reacting zone's rate column
         # only.
-        overlay_rt: pd.DataFrame = _synthetic_rt_sim(
-            index, ["SOC(s)"]
-        ).drop(
+        overlay_rt: pd.DataFrame = rt_sim.drop(
             columns=[
-                f"SOC(s)_rate_{zone}" for zone in ZONE_ORDER[3:]
+                f"{self.MINERAL}_rate_{zone}"
+                for zone in self.REACTION_ZONES[1:]
             ]
         )
 
-        fig = gui_plots.make_rate_figure(rt_sim, ["SOC(s)"], overlay_rt)
-        ax = fig.axes[0]
-        lines = _lines(ax)
+        fig = gui_plots.make_rate_figure(
+            rt_sim,
+            self.MINERAL,
+            window,
+            overlay_rt_sim=overlay_rt,
+        )
         # One overlay line (the zone the frame carries), then the four
         # current ones.
-        assert len(lines) == 5
-        assert lines[0].get_alpha() == 0.5
-        assert [_alpha(line) for line in lines[1:]] == [1.0] * 4
+        lines = _lines(fig.axes[0])
+        assert len(lines) == len(self.REACTION_ZONES) + 1
+        assert [_alpha(line) for line in lines] == [
+            0.5
+        ] + [1.0] * len(self.REACTION_ZONES)
 
-    def test_mineral_without_rate_column_is_skipped(
+    def test_mineral_without_rate_column(
         self, input_data: gui_data.GuiInputData
     ) -> None:
+        """A mineral no zone carries plots no lines and no legend."""
         index: pd.Index = input_data.forc.precip.index
-        rt_sim = _synthetic_rt_sim(index, ["SOC(s)"]).drop(
-            columns=[f"SOC(s)_rate_{zone}" for zone in ZONE_ORDER[2:]]
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, [self.MINERAL]).drop(
+            columns=[
+                f"{self.MINERAL}_rate_{zone}" for zone in self.REACTION_ZONES
+            ]
         )
-        fig: Figure = gui_plots.make_rate_figure(rt_sim, ["SOC(s)"])
+
+        fig: Figure = gui_plots.make_rate_figure(rt_sim, self.MINERAL, window)
+        assert len(fig.axes) == 1
+        assert len(_lines(fig.axes[0])) == 0
+        assert len(fig.legends) == 0
+
+
+class TestHydrologyFigure:
+    """The hydrology figure on synthetic data."""
+
+    def test_axes_and_labels(self, input_data: gui_data.GuiInputData) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig: Figure = gui_plots.make_hydrology_figure(
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Streamflow"
+        assert ax.get_ylabel() == "Discharge (mm/d)"
+        # The discharge axis is upright: the old figure inverted it to
+        # hang from a shared top legend, which this standalone figure
+        # no longer carries.
+        lower, upper = ax.get_ylim()
+        assert lower == 0.0
+        assert upper > 0.0
+
+    def test_sim_line_and_meas_scatter(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The simulation is a line and the measurement is scatter."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = gui_plots.make_hydrology_figure(
+            hydro_sim, input_data.q_meas, window
+        )
         ax = fig.axes[0]
-        assert len(_lines(ax)) == 0
-        legends = _axis_legends(ax)
-        assert [t.get_text() for t in legends[0].get_texts()] == []
-        assert [t.get_text() for t in legends[1].get_texts()] == ["SOC(s)"]
 
-    def test_single_mineral_legend(
+        lines = _lines(ax)
+        assert len(lines) == 1
+        assert mcolors.to_rgba(lines[0].get_color()) == mcolors.to_rgba(
+            SIM_Q_COLOR
+        )
+        assert lines[0].get_linewidth() == 1
+        hydro_plot: pd.DataFrame = gui_plots._clip_frame(hydro_sim, window)
+        np.testing.assert_allclose(
+            np.asarray(lines[0].get_ydata()),
+            hydro_plot["streamflow_sim"].to_numpy(),
+        )
+
+        scatters = _scatters(ax)
+        assert len(scatters) == 1
+        facecolors: np.ndarray = np.asarray(scatters[0].get_facecolor())
+        assert mcolors.to_rgba(facecolors[0]) == mcolors.to_rgba(MEAS_Q_COLOR)
+        assert list(scatters[0].get_sizes()) == [5]
+        q_plot: pd.Series = (
+            gui_plots._clip_series(input_data.q_meas, window).dropna()
+        )
+        offsets: np.ndarray = np.asarray(scatters[0].get_offsets())
+        assert len(offsets) == len(q_plot)
+        np.testing.assert_allclose(offsets[:, 1], q_plot.to_numpy())
+
+    def test_window_clipping_and_limits(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         index: pd.Index = input_data.forc.precip.index
-        fig: Figure = gui_plots.make_rate_figure(
-            _synthetic_rt_sim(index, ["SOC(s)"]), ["SOC(s)"]
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = gui_plots.make_hydrology_figure(
+            hydro_sim, input_data.q_meas, window
         )
-        mineral_legend = _axis_legends(fig.axes[0])[1]
-        assert [t.get_text() for t in mineral_legend.get_texts()] == ["SOC(s)"]
-        # `_ncols` is a private matplotlib attribute, hence getattr.
-        assert getattr(mineral_legend, "_ncols") == 1
+        assert len(np.asarray(_lines(fig.axes[0])[0].get_ydata())) == 2557
+        assert fig.axes[0].get_xlim() == (
+            _day_number(window[0]),
+            _day_number(index[-1]),
+        )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_hydrology_figure(
+            hydro_sim, input_data.q_meas, inner
+        )
+        assert inner_fig.axes[0].get_xlim() == (
+            _day_number(inner[0]),
+            _day_number(inner[1]),
+        )
+
+    def test_legend_below_the_axes(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        fig = gui_plots.make_hydrology_figure(
+            _synthetic_hydro_sim(index), input_data.q_meas, window
+        )
+        assert len(fig.legends) == 1
+        row = fig.legends[0]
+        assert row.get_frame().get_visible() is False
+        assert row.get_title().get_text() == ""
+        assert [text.get_text() for text in row.get_texts()] == [
+            "Streamflow (sim)",
+            "Streamflow (meas)",
+        ]
+        # The row sits below the axes, without overlapping them.
+        top, bottom = _legend_extent_fractions(fig, row)
+        assert top <= fig.axes[0].get_position().y0
+        assert fig.subplotpars.bottom >= bottom
+
+    def test_overlay_previous_run(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The previous run's streamflow draws behind, faintly, unlabeled."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        overlay_hydro: pd.DataFrame = hydro_sim.copy()
+        overlay_hydro["streamflow_sim"] = hydro_sim["streamflow_sim"] + 10.0
+
+        fig = gui_plots.make_hydrology_figure(
+            hydro_sim,
+            input_data.q_meas,
+            window,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        lines = _lines(fig.axes[0])
+        # One overlay line (half transparent), then the current one.
+        assert len(lines) == 2
+        assert [_alpha(line) for line in lines] == [0.5, 1.0]
+        overlay_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_hydro, window
+        )
+        np.testing.assert_allclose(
+            np.asarray(lines[0].get_ydata()),
+            overlay_plot["streamflow_sim"].to_numpy(),
+        )
+
+
+class TestRiverConcentrationsFigure:
+    """The twin-axis streamflow / river-concentrations figure."""
+
+    SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+
+    def _fig(
+        self,
+        input_data: gui_data.GuiInputData,
+        streamflow: bool,
+        species: list[str] | None = None,
+        **kwargs: object,
+    ) -> Figure:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        return gui_plots.make_river_concentrations_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES) if species is None else species,
+            streamflow,
+            window,
+            **kwargs,
+        )
+
+    def test_twin_axes_and_labels(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        fig = self._fig(input_data, streamflow=True)
+        assert len(fig.axes) == 2
+        hydro_ax, species_ax = fig.axes
+        assert hydro_ax.get_title() == "Streamflow"
+        # The species title sits on the right, so it does not
+        # overlap the streamflow title on the left.
+        assert species_ax.get_title("right") == "River concentrations"
+        assert species_ax.get_title() == ""
+        assert hydro_ax.get_ylabel() == "Discharge (mm/d)"
+        assert species_ax.get_ylabel() == "Concentration (mol/L)"
+        # The twin axes share one panel.
+        left = hydro_ax.get_position()
+        right = species_ax.get_position()
+        assert right.x0 == pytest.approx(left.x0)
+        assert right.y0 == pytest.approx(left.y0)
+        assert right.width == pytest.approx(left.width)
+        assert right.height == pytest.approx(left.height)
+
+    def test_left_axis_inverted_streamflow(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The left axis carries the inverted streamflow series."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        fig = self._fig(input_data, streamflow=True)
+        hydro_ax = fig.axes[0]
+
+        # Inverted: the top of the axis is at zero.
+        lower, upper = hydro_ax.get_ylim()
+        assert lower > upper
+        assert upper == 0.0
+
+        lines = _lines(hydro_ax)
+        assert len(lines) == 1
+        assert mcolors.to_rgba(lines[0].get_color()) == mcolors.to_rgba(
+            SIM_Q_COLOR
+        )
+        hydro_plot: pd.DataFrame = gui_plots._clip_frame(hydro_sim, window)
+        np.testing.assert_allclose(
+            np.asarray(lines[0].get_ydata()),
+            hydro_plot["streamflow_sim"].to_numpy(),
+        )
+
+        scatters = _scatters(hydro_ax)
+        assert len(scatters) == 1
+        facecolors: np.ndarray = np.asarray(scatters[0].get_facecolor())
+        assert mcolors.to_rgba(facecolors[0]) == mcolors.to_rgba(MEAS_Q_COLOR)
+        q_plot: pd.Series = (
+            gui_plots._clip_series(input_data.q_meas, window).dropna()
+        )
+        offsets: np.ndarray = np.asarray(scatters[0].get_offsets())
+        assert len(offsets) == len(q_plot)
+        np.testing.assert_allclose(offsets[:, 1], q_plot.to_numpy())
+
+    def test_species_series(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """One sim line and one meas scatter per selected species."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        fig = self._fig(input_data, streamflow=True)
+        species_ax = fig.axes[1]
+
+        lines = _lines(species_ax)
+        assert [line.get_label() for line in lines] == [
+            f"{species} (sim)" for species in self.SPECIES
+        ]
+        rt_plot: pd.DataFrame = gui_plots._clip_frame(rt_sim, window)
+        for line, species in zip(lines, self.SPECIES):
+            assert mcolors.to_rgba(line.get_color()) == mcolors.to_rgba(
+                RIVER_SPECIES_SIM_COLORS[species]
+            )
+            assert line.get_linewidth() == 1
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                rt_plot[f"{species}_riv"].to_numpy(),
+            )
+
+        scatters = _scatters(species_ax)
+        assert [scatter.get_label() for scatter in scatters] == [
+            f"{species} (meas)" for species in self.SPECIES
+        ]
+        conc_plot: pd.DataFrame = gui_plots._clip_frame(input_data.conc_df, window)
+        for scatter, species in zip(scatters, self.SPECIES):
+            facecolors: np.ndarray = np.asarray(scatter.get_facecolor())
+            assert mcolors.to_rgba(facecolors[0]) == mcolors.to_rgba(
+                RIVER_SPECIES_MEAS_COLORS[species]
+            )
+            assert list(scatter.get_sizes()) == [5]
+            conc: pd.Series = conc_plot[species].dropna()
+            offsets = np.asarray(scatter.get_offsets())
+            assert len(offsets) == len(conc)
+            np.testing.assert_allclose(offsets[:, 1], conc.to_numpy())
+
+    def test_species_only_axis(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """With streamflow off, the figure carries the species axis alone."""
+        fig = self._fig(input_data, streamflow=False)
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "River concentrations"
+        assert ax.get_ylabel() == "Concentration (mol/L)"
+        assert len(_lines(ax)) == len(self.SPECIES)
+        assert len(_scatters(ax)) == len(self.SPECIES)
+
+    def test_window_clipping_and_limits(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        hydro_sim = _synthetic_hydro_sim(index)
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+
+        fig = self._fig(input_data, streamflow=True)
+        hydro_ax, species_ax = fig.axes
+        assert len(np.asarray(_lines(hydro_ax)[0].get_ydata())) == 2557
+        for ax in fig.axes:
+            assert ax.get_xlim() == (
+                _day_number(window[0]),
+                _day_number(index[-1]),
+            )
+        # A window the record spans keeps both limits from the window.
+        inner: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(2017, 2020)
+        inner_fig = gui_plots.make_river_concentrations_figure(
+            rt_sim,
+            hydro_sim,
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            True,
+            inner,
+        )
+        for ax in inner_fig.axes:
+            assert ax.get_xlim() == (
+                _day_number(inner[0]),
+                _day_number(inner[1]),
+            )
+
+    def test_legend_below_the_axes(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        fig = self._fig(input_data, streamflow=True)
+        assert len(fig.legends) == 1
+        row = fig.legends[0]
+        assert row.get_frame().get_visible() is False
+        assert row.get_title().get_text() == ""
+        expected: list[str] = ["Streamflow (sim)", "Streamflow (meas)"]
+        for species in self.SPECIES:
+            expected.extend([f"{species} (sim)", f"{species} (meas)"])
+        assert [text.get_text() for text in row.get_texts()] == expected
+        # The row sits below the axes, inside the figure's bounds.
+        top, bottom = _legend_extent_fractions(fig, row)
+        assert top <= fig.axes[0].get_position().y0
+        assert fig.subplotpars.bottom >= bottom
+
+    def test_overlay_previous_run(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The previous run's series draw behind, faintly, unlabeled."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        rt_sim = _synthetic_rt_sim(index, list(input_data.network.mineral_names))
+        hydro_sim = _synthetic_hydro_sim(index)
+
+        overlay_rt: pd.DataFrame = rt_sim.copy()
+        for species in self.SPECIES:
+            overlay_rt[f"{species}_riv"] = rt_sim[f"{species}_riv"] + 1.0
+        overlay_hydro: pd.DataFrame = hydro_sim.copy()
+        overlay_hydro["streamflow_sim"] = hydro_sim["streamflow_sim"] + 10.0
+
+        fig = gui_plots.make_river_concentrations_figure(
+            rt_sim,
+            hydro_sim,
+            input_data.q_meas,
+            input_data.conc_df,
+            list(self.SPECIES),
+            True,
+            window,
+            overlay_rt_sim=overlay_rt,
+            overlay_hydro_sim=overlay_hydro,
+        )
+        hydro_ax, species_ax = fig.axes
+
+        hydro_lines = _lines(hydro_ax)
+        # One overlay streamflow line (half transparent), then the
+        # current one.
+        assert len(hydro_lines) == 2
+        assert [_alpha(line) for line in hydro_lines] == [0.5, 1.0]
+        overlay_hydro_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_hydro, window
+        )
+        np.testing.assert_allclose(
+            np.asarray(hydro_lines[0].get_ydata()),
+            overlay_hydro_plot["streamflow_sim"].to_numpy(),
+        )
+
+        species_lines = _lines(species_ax)
+        # Three overlay lines (half transparent), then the current
+        # three.
+        assert len(species_lines) == 2 * len(self.SPECIES)
+        assert [_alpha(line) for line in species_lines] == [
+            0.5
+        ] * len(self.SPECIES) + [1.0] * len(self.SPECIES)
+        overlay_rt_plot: pd.DataFrame = gui_plots._clip_frame(
+            overlay_rt, window
+        )
+        for line, species in zip(
+            species_lines[: len(self.SPECIES)], self.SPECIES
+        ):
+            np.testing.assert_allclose(
+                np.asarray(line.get_ydata()),
+                overlay_rt_plot[f"{species}_riv"].to_numpy(),
+            )
+
+    def test_empty_selection(self, input_data: gui_data.GuiInputData) -> None:
+        """Nothing selected: the figure carries no axes."""
+        fig = self._fig(input_data, streamflow=False, species=[])
+        assert len(fig.axes) == 0
 
 
 class TestObjectiveTable:

@@ -62,20 +62,12 @@ SITE: Final[str] = "EastRiver"
 TEST_WYS: Final[list[int]] = [2017, 2020]
 VAL_WY: Final[int] = 2018
 
-# The first day plotted by the figures: the start of the forcing
-# window the loader keeps from the CSV record (the start of water
-# year 2015; a water year runs from October 1 to September 30 and is
-# labelled by the year it ends in).  The simulation prepends a
-# two-year spin-up before this date, so clipping the figures at this
-# date shows the site record exactly and drops the spin-up.
-PLOT_START: Final[pd.Timestamp] = pd.Timestamp(2014, 10, 1)
-# The same boundary as a matplotlib date number: days since
-# 1970-01-01, the unit matplotlib stores for datetime axes (the
-# ``Timestamp.value`` nanoseconds since that epoch, converted to
-# days).  ``Axes.set_xlim`` is typed to accept floats only, so the
-# figure builders pass this pre-converted value instead of the
-# Timestamp.
-PLOT_START_DATE: Final[float] = float(PLOT_START.value / 1e9 / 86400)
+# The water years the site record contains, in order: the plotting
+# range the figure panel's from / to pickers offer.  The record
+# (the East River series CSV) runs 2014-05-02 to 2025-09-18, so the
+# first full water year is 2015 and the last, 2025, is partial — it
+# ends with the record rather than on September 30.
+WATER_YEARS: Final[list[int]] = list(range(2015, 2026))
 
 # The six lateral zones, in model order.
 ZONE_ORDER: Final[list[str]] = [
@@ -172,6 +164,11 @@ PARAM_LABELS: Final[dict[str, str]] = {
     "k_a": "dissolution rate constant (k_a) [1/m³/day]",
 }
 
+# The river species, in the panel's checkbox order: DOC first, then
+# the inorganic-carbon family, then calcium.  The color maps below
+# are keyed by this order.
+RIVER_SPECIES: Final[tuple[str, ...]] = ("DOC", "DIC", "Ca++")
+
 # The river species and their colors: the hue encodes the chemical
 # family (brown for DOC, teal for the inorganic-carbon family, crimson
 # for Ca++) and the lightness encodes the series — the simulated lines
@@ -192,14 +189,6 @@ RIVER_SPECIES_MEAS_COLORS: Final[dict[str, str]] = {
 # Streamflow colors, matching the project's published figures.
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
 MEAS_Q_COLOR: Final[str] = "black"
-
-# The series selectable in the time-series figure, in checkbox order:
-# the streamflow first, then the river species in the right axis's
-# color-map order.
-TIME_SERIES_OPTIONS: Final[tuple[str, ...]] = (
-    "Streamflow",
-    *RIVER_SPECIES_SIM_COLORS,
-)
 
 # ==== Types ==== #
 @dataclass(frozen=True, slots=True)
@@ -271,6 +260,56 @@ LINESTYLE_CYCLE: Final[tuple[Linestyle, ...]] = ("-", "--", ":", "-.")
 
 
 # ==== Functions ==== #
+def water_year_window(
+    from_year: int,
+    to_year: int,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    The plotting window spanning water years `from_year` through
+    `to_year`, inclusive.
+
+    A water year runs from October 1 of the previous calendar year to
+    September 30 of the year it is labelled by, so the full 2015 to
+    2025 range starts on 2014-10-01 and ends on 2025-09-30.  The
+    window is a requested span, not a clip: the figure builders
+    intersect it with each record, so a range that ends after the
+    record's last day (the partial 2025 water year) still plots only
+    the days the record carries.
+
+    Args:
+        from_year: The first water year to include.
+        to_year: The last water year to include.
+
+    Returns:
+        The window's start and end as Timestamps: October 1 of
+        ``from_year - 1`` and September 30 of ``to_year``.
+
+    Raises:
+        ValueError:
+            Raised when either year lies outside
+            `WATER_YEARS`, or when `from_year` is after `to_year`.
+    """
+    if from_year not in WATER_YEARS:
+        raise ValueError(
+            f"Water year {from_year} is outside the site record's "
+            f"plotting range, {WATER_YEARS[0]} to {WATER_YEARS[-1]}."
+        )
+    if to_year not in WATER_YEARS:
+        raise ValueError(
+            f"Water year {to_year} is outside the site record's "
+            f"plotting range, {WATER_YEARS[0]} to {WATER_YEARS[-1]}."
+        )
+    if from_year > to_year:
+        raise ValueError(
+            f"The first water year ({from_year}) is after the last "
+            f"({to_year})."
+        )
+    return (
+        pd.Timestamp(from_year - 1, 10, 1),
+        pd.Timestamp(to_year, 9, 30),
+    )
+
+
 def set_rc_params() -> None:
     """
     Configure the matplotlib rcParams for the GUI figures.

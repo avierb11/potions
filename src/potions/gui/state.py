@@ -46,7 +46,7 @@ from typing import Final
 import pandas as pd
 import potions as pt
 
-from potions.gui.common import TIME_SERIES_OPTIONS
+from potions.gui.common import RIVER_SPECIES, WATER_YEARS
 from potions.gui.data import (
     GuiInputData,
     GuiRunResults,
@@ -58,7 +58,7 @@ from potions.gui.data import (
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 3
+GUI_STATE_VERSION: Final[int] = 4
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -71,11 +71,12 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one (3), version 2 (the last version this GUI has
-# written), and version 1 (the two-splitter layout, whose splitter
-# sizes are mapped onto the current one).
+# the current one (4), version 3 (the time-series figure's selection
+# list), version 2 (the last version this GUI has written), and
+# version 1 (the two-splitter layout, whose splitter sizes are mapped
+# onto the current one).
 _ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
-    {1, 2, GUI_STATE_VERSION}
+    {1, 2, 3, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
@@ -153,8 +154,10 @@ class GuiState:
             "selection": {
                 "species": list(self.selection.species),
                 "zones": list(self.selection.zones),
-                "minerals": list(self.selection.minerals),
-                "time_series": list(self.selection.time_series),
+                "mineral": self.selection.mineral,
+                "streamflow": self.selection.streamflow,
+                "water_years_from": self.selection.water_years_from,
+                "water_years_to": self.selection.water_years_to,
             },
             "window_geometry": (
                 dict(self.window_geometry)
@@ -339,6 +342,20 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
     """
     The ``selection`` field of a gui_state.json mapping.
 
+    A mapping saved by the current version carries the current
+    shape: the shared river species, the zones, the single
+    rate-figure mineral, the streamflow toggle, and the water-year
+    window.  A mapping saved by an older version (version 3 or
+    earlier) carries the previous shape — the zone figure's species,
+    the time-series figure's streamflow and river-species list, and
+    a list of minerals — and is migrated onto the current shape: the
+    species are the river species that either of the old figures had
+    on (in the panel's order), the mineral is the first of the old
+    list (the dominant SOC mineral when the list is absent), the
+    streamflow axis is on when the old time-series list carried it
+    (every series stays on when the list is absent, as before), and
+    the plotting window is the whole record.
+
     Args:
         data: The parsed JSON mapping.
 
@@ -346,10 +363,9 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
         The restored `PlotSelection`.
 
     Raises:
-        ValueError: Raised when the field is missing or one of the
-            selection lists (the time-series list is optional; an
-            absent one keeps every series on) is not a list of
-            strings.
+        ValueError: Raised when the field is missing or a selection
+            entry is not of its expected type (a string list, a
+            string, a boolean, or a water year).
     """
     raw: object = data.get("selection")
     if not isinstance(raw, dict):
@@ -373,13 +389,61 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
             )
         return list(entry)
 
+    def _bool(key: str, default: bool) -> bool:
+        entry: object = raw.get(key)
+        if entry is None:
+            return default
+        if not isinstance(entry, bool):
+            raise ValueError(
+                f"gui_state.json selection field {key!r} is not a "
+                f"boolean."
+            )
+        return entry
+
+    def _year(key: str, default: int) -> int:
+        entry: object = raw.get(key)
+        if entry is None:
+            return default
+        if not _is_int(entry) or entry not in WATER_YEARS:
+            raise ValueError(
+                f"gui_state.json selection field {key!r} is not a "
+                f"water year."
+            )
+        return int(entry)
+
+    # The current shape carries a single `mineral` string; version 3
+    # and earlier carry a `minerals` list and no `streamflow` or
+    # water-year fields.
+    if isinstance(raw.get("mineral"), str):
+        return PlotSelection(
+            species=_strings("species"),
+            zones=_strings("zones"),
+            mineral=str(raw["mineral"]),
+            streamflow=_bool("streamflow", True),
+            water_years_from=_year("water_years_from", WATER_YEARS[0]),
+            water_years_to=_year("water_years_to", WATER_YEARS[-1]),
+        )
+
+    # The version 3 or earlier shape: migrate it onto the current
+    # one (see the docstring for the mapping).
+    legacy_species: list[str] = _strings("species")
+    legacy_time_series: list[str] = _strings(
+        "time_series", optional_default=["Streamflow", *RIVER_SPECIES]
+    )
+    legacy_minerals: list[str] = _strings("minerals")
     return PlotSelection(
-        species=_strings("species"),
+        species=[
+            name
+            for name in RIVER_SPECIES
+            if name in legacy_species or name in legacy_time_series
+        ],
         zones=_strings("zones"),
-        minerals=_strings("minerals"),
-        time_series=_strings(
-            "time_series", optional_default=TIME_SERIES_OPTIONS
-        ),
+        mineral=legacy_minerals[0]
+        if legacy_minerals
+        else "SOC(s)",
+        streamflow="Streamflow" in legacy_time_series,
+        water_years_from=WATER_YEARS[0],
+        water_years_to=WATER_YEARS[-1],
     )
 
 

@@ -4,10 +4,11 @@ Interactive GUI for `potions`.
 The package provides one GUI: the East River lateral-model
 calibration workbench (`potions.gui.window`).  It is a PySide6
 desktop app: the model's figures in a single panel (flipped by
-arrow buttons or the Left / Right keys: the streamflow, zone, and
-mineral figures in full mode, or the streamflow and zone-storage
-figures in hydrology-only mode, plus the gradient and line search
-pages when those jobs have finished) over a row that holds the
+arrow buttons or the Left / Right keys: the hydrology, storage,
+and partitioning figures, joined by the river concentrations,
+river loads, concentration vs. discharge, zone concentrations,
+and reaction rates figures in full mode, plus the gradient and
+line search pages when those jobs have finished) over a row that holds the
 fixed-size per-run objective-function table on the left and every
 calibrated parameter on the right, grouped by zone (hydrology in
 blue, reactive transport in red).  Parameter changes re-run the

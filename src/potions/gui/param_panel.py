@@ -20,11 +20,13 @@ and is drawn with a thin border and an alternating row shading, so
 the grid reads as a table of cells.  Every group's title is
 left-aligned, so the titles line up at the panel's left edge.
 
-The "Plots" group carries the checkboxes that select the series
-drawn in each of the three figures (the time-series figure's
-streamflow and river concentrations first, then the species, zones,
-and minerals of the zone and reaction-rate figures), and emits
-`selection_changed` whenever one of them is toggled.
+The "Plots" group carries the controls that select what the figures
+draw: the river-concentration figure's streamflow toggle and river
+species (shared with the zone-concentration figure), the zone
+checkboxes (shared with the storage figure), the reaction-rate
+figure's single mineral, and the two water-year pickers that set the
+plotting window of every figure.  It emits `selection_changed`
+whenever one of the controls changes.
 
 The final group, "History", lists the previous runs in a dropdown
 (the saved run directories and the session's in-memory runs, newest
@@ -34,6 +36,7 @@ the *Use these parameters* button asks it to restore that run's
 parameters to the panel without a re-run.
 """
 
+from collections.abc import Sequence
 from typing import Final
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
@@ -60,12 +63,13 @@ from potions.gui.common import (
     HYDRO_PARAMS,
     HYDRO_THEME,
     MINERAL_PARAMS,
+    RIVER_SPECIES,
     RT_DIM_PARAMS,
     RT_THEME,
     SNOW_ZONES,
     SPECIATION_ZONES,
-    TIME_SERIES_OPTIONS,
     Theme,
+    WATER_YEARS,
     ZONE_COLORS,
     ZONE_LABELS,
     ZONE_ORDER,
@@ -405,6 +409,34 @@ class _BoldHeader(QLabel):
         super().__init__(parent)
         self.setText(f"<b>{text}</b>")
         self.setContentsMargins(4, top_margin, 4, 0)
+
+
+def _labeled_combo(
+    label: str, items: Sequence[int]
+) -> tuple[QWidget, QComboBox]:
+    """
+    A row widget of a label and a combo box holding the `items`.
+
+    The *Plots* group's water-year pickers are built this way, so a
+    picker's label and combo share one cell of the group's two-
+    column grid instead of taking a cell each.
+
+    Args:
+        label: The label text, left of the combo.
+        items: The combo items, in order.
+
+    Returns:
+        The row widget and the combo it holds.
+    """
+    row: QWidget = QWidget()
+    layout: QHBoxLayout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(QLabel(label))
+    combo: QComboBox = QComboBox()
+    for item in items:
+        combo.addItem(str(item))
+    layout.addWidget(combo)
+    return row, combo
 
 
 class _ZoneHeader(QLabel):
@@ -907,7 +939,7 @@ class ParamPanel(QScrollArea):
     """
     The parameter panel of the main window: every adjustable model
     parameter, grouped by zone below the figure, plus the
-    figure-selection checkboxes.
+    figure-selection controls.
 
     The groups, in order, are: *Hydrology* (blue-themed; one cell
     per zone parameter in `ZONE_ORDER`), *Catchment proportion*
@@ -915,21 +947,23 @@ class ParamPanel(QScrollArea):
     (red-themed; per-zone storage parameters and per-mineral kinetic
     parameters in every non-snow zone), *Initial state* (red-themed;
     the calibrated exchange-site state per zone), *Plots* (the
-    time-series checkboxes for the streamflow and river-concentration
-    figure, and the species / zone / mineral checkboxes for the zone
-    and reaction-rate figures), and *History* (the previous-runs
-    dropdown, the *Overlay previous results* checkbox, and the *Use
-    these parameters* button).  The history group keeps no parameter
+    streamflow toggle and river-species checkboxes of the
+    river-concentration figure, the zone checkboxes of the storage
+    and zone-concentration figures, the single mineral of the
+    reaction-rate figure, and the two water-year pickers of the
+    plotting window), and *History* (the previous-runs dropdown, the
+    *Overlay previous results* checkbox, and the *Use these
+    parameters* button).  The history group keeps no parameter
     cells, so a bounds reset leaves it in place, and the window
     fills its dropdown and answers its two controls.
 
     In hydrology-only mode (the main window's *Hydrology only*
     checkbox), the *Reactive transport* and *Initial state* groups
-    and the species / zone / mineral checkboxes of the *Plots*
-    group are hidden by `set_hydro_only`; the streamflow checkbox
-    stays visible.  The hidden checkboxes keep their checked state,
-    so `selection()` still reports it (the window needs it when the
-    user switches back to full mode).
+    and the streamflow, river-species, and mineral controls of the
+    *Plots* group are hidden by `set_hydro_only`; the zone checkboxes
+    and the water-year window stay visible.  The hidden controls keep
+    their state, so `selection()` still reports it (the window needs
+    it when the user switches back to full mode).
 
     The four parameter groups lay their cells out in a five-column
     grid: each cell (the symbol to the left of one parameter's
@@ -937,7 +971,7 @@ class ParamPanel(QScrollArea):
     parameters any zone carries, and a zone or mineral header spans
     all of them.  Every group's title is left-aligned, so the
     titles line up at the panel's left edge.  The *Plots* group's
-    checkboxes take two per row.  In a themed group the cells are
+    controls take two per row.  In a themed group the cells are
     drawn as a visible grid (a thin border and an alternating row
     shading; see `ThemedGroup`).  Free parameters (distinct
     bounds) are editable spin-box cells; degenerate parameters
@@ -953,7 +987,7 @@ class ParamPanel(QScrollArea):
             (lower, upper) bounds when a range is edited or a pinned
             parameter is unlocked.
         selection_changed: Emitted with the current `PlotSelection`
-            whenever a plot checkbox is toggled.
+            whenever a plot control changes.
         history_changed: Emitted (with no payload) whenever the
             history dropdown's selection or the overlay checkbox
             changes; the window then rebuilds the figures from the
@@ -1036,16 +1070,18 @@ class ParamPanel(QScrollArea):
 
     def selection(self) -> PlotSelection:
         """
-        The current figure selection, as held by the checkbox state.
+        The current figure selection, as held by the controls' state.
 
         Returns:
-            The `PlotSelection` of the checked time-series series,
-            species, zones, and minerals, each in its option order.
+            The `PlotSelection` of the checked river species (in the
+            panel's order), the checked zones (in model order), the
+            selected mineral, the streamflow toggle, and the
+            water-year window.
         """
         return PlotSelection(
             species=[
                 name
-                for name in self._input_data.network.species_names
+                for name in RIVER_SPECIES
                 if self._species_boxes[name].isChecked()
             ],
             zones=[
@@ -1053,31 +1089,29 @@ class ParamPanel(QScrollArea):
                 for zone in ZONE_ORDER
                 if self._zone_boxes[zone].isChecked()
             ],
-            minerals=[
-                name
-                for name in self._input_data.network.mineral_names
-                if self._mineral_boxes[name].isChecked()
-            ],
-            time_series=[
-                name
-                for name in TIME_SERIES_OPTIONS
-                if self._time_series_boxes[name].isChecked()
-            ],
+            mineral=self._mineral_combo.currentText(),
+            streamflow=self._streamflow_box.isChecked(),
+            water_years_from=int(self._window_from_combo.currentText()),
+            water_years_to=int(self._window_to_combo.currentText()),
         )
 
     def set_selection(self, selection: PlotSelection) -> None:
         """
-        Set the checkbox state to `selection`.
+        Set the controls' state to `selection`.
 
-        The checkboxes' signals are blocked while this runs, so the
+        The controls' signals are blocked while this runs, so the
         panel does not re-emit `selection_changed`.  Names not in the
-        panel's checkboxes (a selection saved against a different
-        network, or series names that have since been removed) are
-        ignored.
+        panel's controls (a selection saved against a different
+        network, or species that have since been removed) are
+        ignored, and the water-year window is clamped so the from
+        year does not exceed the to year.
 
         Args:
             selection: The plot selection to apply.
         """
+        self._streamflow_box.blockSignals(True)
+        self._streamflow_box.setChecked(selection.streamflow)
+        self._streamflow_box.blockSignals(False)
         for name, box in self._species_boxes.items():
             box.blockSignals(True)
             box.setChecked(name in selection.species)
@@ -1086,25 +1120,38 @@ class ParamPanel(QScrollArea):
             box.blockSignals(True)
             box.setChecked(zone in selection.zones)
             box.blockSignals(False)
-        for name, box in self._mineral_boxes.items():
-            box.blockSignals(True)
-            box.setChecked(name in selection.minerals)
-            box.blockSignals(False)
-        for name, box in self._time_series_boxes.items():
-            box.blockSignals(True)
-            box.setChecked(name in selection.time_series)
-            box.blockSignals(False)
+        # The combo keeps its current entry when the saved mineral
+        # is not among its items.
+        self._mineral_combo.blockSignals(True)
+        mineral_index: int = self._mineral_combo.findText(selection.mineral)
+        if mineral_index >= 0:
+            self._mineral_combo.setCurrentIndex(mineral_index)
+        self._mineral_combo.blockSignals(False)
+        for combo, year in (
+            (self._window_from_combo, selection.water_years_from),
+            (self._window_to_combo, selection.water_years_to),
+        ):
+            # A year the picker does not offer (a selection saved
+            # against a different record) is ignored.
+            combo.blockSignals(True)
+            year_index: int = WATER_YEARS.index(year) if year in WATER_YEARS else -1
+            if year_index >= 0:
+                combo.setCurrentIndex(year_index)
+            combo.blockSignals(False)
+        self._clamp_window()
 
     def set_hydro_only(self, enabled: bool) -> None:
         """
         Hide (or show) the reactive-transport parts of the panel.
 
         In hydrology-only mode the *Reactive transport* and
-        *Initial state* groups and the species, zone, and mineral
-        checkboxes of the *Plots* group are hidden; the streamflow
-        checkbox stays visible.  The hidden checkboxes keep their
-        checked state, so `selection()` still reports it (the window
-        needs it when the user switches back to full mode).
+        *Initial state* groups and the streamflow, river-species,
+        and mineral controls of the *Plots* group are hidden; the
+        zone checkboxes and the water-year window stay visible (the
+        hydrology figures are drawn from them too).  The hidden
+        controls keep their state, so `selection()` still reports it
+        (the window needs it when the user switches back to full
+        mode).
 
         Args:
             enabled: True for hydrology-only mode.
@@ -1113,19 +1160,15 @@ class ParamPanel(QScrollArea):
         for name in ("reactive", "initial"):
             self._groups[name].setVisible(not enabled)
         for header in (
+            self._streamflow_header,
             self._species_header,
-            self._zone_header,
             self._mineral_header,
         ):
             header.setVisible(not enabled)
+        self._streamflow_box.setVisible(not enabled)
         for box in self._species_boxes.values():
             box.setVisible(not enabled)
-        for box in self._zone_boxes.values():
-            box.setVisible(not enabled)
-        for box in self._mineral_boxes.values():
-            box.setVisible(not enabled)
-        for name, box in self._time_series_boxes.items():
-            box.setVisible(not enabled or name == "Streamflow")
+        self._mineral_combo.setVisible(not enabled)
 
     def reset_bounds(self) -> dict[str, float]:
         """
@@ -1309,38 +1352,49 @@ class ParamPanel(QScrollArea):
 
     def _build_plots_group(self, selection: PlotSelection) -> ThemedGroup:
         """
-        The neutral "Plots" group: the checkboxes of the three
-        figures (two per row), in figure order: the time-series
-        figure's streamflow and river concentrations, the zone
-        figure's species and zones, and the reaction-rate figure's
-        minerals.
+        The neutral "Plots" group: the controls that select what the
+        figures draw, in figure order — the river-concentration
+        figure's streamflow toggle, the river-species checkboxes
+        (shared with the zone-concentration figure), the zone
+        checkboxes (shared with the storage figure), the
+        reaction-rate figure's single mineral, and the two
+        water-year pickers that set the plotting window of every
+        figure.
+
+        The streamflow, species, and mineral headers are hidden
+        together with their controls in hydrology-only mode, so
+        they are kept for `set_hydro_only`; the zone and window
+        sections stay visible in both modes.
 
         Args:
-            selection: The checkbox state to start from.
+            selection: The control state to start from.
         """
         group: ThemedGroup = ThemedGroup("Plots", None, grid_columns=2)
 
-        group.add_header(_BoldHeader("Series (time-series figure)"))
-        self._time_series_boxes: dict[str, QCheckBox] = {}
-        for name in TIME_SERIES_OPTIONS:
-            box: QCheckBox = QCheckBox(name)
-            box.toggled.connect(self._on_selection_changed)
-            self._time_series_boxes[name] = box
-            group.add_widget(box)
+        self._streamflow_header: QWidget = _BoldHeader(
+            "Streamflow (river-concentration figure)"
+        )
+        group.add_header(self._streamflow_header)
+        self._streamflow_box: QCheckBox = QCheckBox(
+            "Simulated and measured streamflow (inverted axis)"
+        )
+        self._streamflow_box.toggled.connect(self._on_selection_changed)
+        group.add_widget(self._streamflow_box)
 
-        # The three headers below (unlike the time-series one) are
-        # hidden together with their checkboxes in hydrology-only
-        # mode, so they are kept for `set_hydro_only`.
-        self._species_header: QWidget = _BoldHeader("Species (zone figure)")
+        self._species_header: QWidget = _BoldHeader(
+            "River species (river- and zone-concentration figures)"
+        )
         group.add_header(self._species_header)
         self._species_boxes: dict[str, QCheckBox] = {}
-        for name in self._input_data.network.species_names:
-            box = QCheckBox(name)
+        for name in RIVER_SPECIES:
+            box: QCheckBox = QCheckBox(name)
             box.toggled.connect(self._on_selection_changed)
             self._species_boxes[name] = box
             group.add_widget(box)
 
-        self._zone_header: QWidget = _BoldHeader("Zones (zone figure)")
+        self._zone_header: QWidget = _BoldHeader(
+            "Zones (storage and zone-concentration figures)"
+        )
         group.add_header(self._zone_header)
         self._zone_boxes: dict[str, QCheckBox] = {}
         for zone in ZONE_ORDER:
@@ -1349,14 +1403,40 @@ class ParamPanel(QScrollArea):
             self._zone_boxes[zone] = box
             group.add_widget(box)
 
-        self._mineral_header: QWidget = _BoldHeader("Minerals (rate figure)")
+        self._mineral_header: QWidget = _BoldHeader(
+            "Mineral (reaction-rate figure)"
+        )
         group.add_header(self._mineral_header)
-        self._mineral_boxes: dict[str, QCheckBox] = {}
+        self._mineral_combo: QComboBox = QComboBox()
         for name in self._input_data.network.mineral_names:
-            box = QCheckBox(name)
-            box.toggled.connect(self._on_selection_changed)
-            self._mineral_boxes[name] = box
-            group.add_widget(box)
+            self._mineral_combo.addItem(name)
+        self._mineral_combo.currentIndexChanged.connect(
+            self._on_mineral_changed
+        )
+        group.add_widget(self._mineral_combo)
+
+        self._window_header: QWidget = _BoldHeader(
+            "Plotting period (all figures, water years)"
+        )
+        group.add_header(self._window_header)
+        self._window_from_row: QWidget
+        self._window_from_combo: QComboBox
+        self._window_from_row, self._window_from_combo = _labeled_combo(
+            "From (water year)", WATER_YEARS
+        )
+        self._window_from_combo.currentIndexChanged.connect(
+            self._on_window_from_changed
+        )
+        group.add_widget(self._window_from_row)
+        self._window_to_row: QWidget
+        self._window_to_combo: QComboBox
+        self._window_to_row, self._window_to_combo = _labeled_combo(
+            "To (water year)", WATER_YEARS
+        )
+        self._window_to_combo.currentIndexChanged.connect(
+            self._on_window_to_changed
+        )
+        group.add_widget(self._window_to_row)
 
         self.set_selection(selection)
         return group
@@ -1536,8 +1616,55 @@ class ParamPanel(QScrollArea):
         self.value_changed.emit(key)
 
     def _on_selection_changed(self, _checked: bool) -> None:
-        """Recompute the selection in option order and emit it."""
+        """A plot checkbox was toggled: recompute and emit the selection."""
         self.selection_changed.emit(self.selection())
+
+    def _on_mineral_changed(self, _index: int) -> None:
+        """The mineral combo moved: recompute and emit the selection."""
+        self.selection_changed.emit(self.selection())
+
+    def _on_window_from_changed(self, _index: int) -> None:
+        """
+        The water-year *from* picker moved: lift the *to* year to at
+        least the *from* year, then emit the new window.
+        """
+        if self._window_to_combo.currentIndex() < self._window_from_combo.currentIndex():
+            self._window_to_combo.blockSignals(True)
+            self._window_to_combo.setCurrentIndex(
+                self._window_from_combo.currentIndex()
+            )
+            self._window_to_combo.blockSignals(False)
+        self.selection_changed.emit(self.selection())
+
+    def _on_window_to_changed(self, _index: int) -> None:
+        """
+        The water-year *to* picker moved: lower the *from* year to at
+        most the *to* year, then emit the new window.
+        """
+        if self._window_from_combo.currentIndex() > self._window_to_combo.currentIndex():
+            self._window_from_combo.blockSignals(True)
+            self._window_from_combo.setCurrentIndex(
+                self._window_to_combo.currentIndex()
+            )
+            self._window_from_combo.blockSignals(False)
+        self.selection_changed.emit(self.selection())
+
+    def _clamp_window(self) -> None:
+        """
+        Keep the water-year window ordered without emitting: when the
+        *from* picker stands past the *to* picker, the *to* picker is
+        lifted to it.  Used by `set_selection`, whose signal blocks
+        make the emitted change redundant.
+        """
+        if (
+            self._window_to_combo.currentIndex()
+            < self._window_from_combo.currentIndex()
+        ):
+            self._window_to_combo.blockSignals(True)
+            self._window_to_combo.setCurrentIndex(
+                self._window_from_combo.currentIndex()
+            )
+            self._window_to_combo.blockSignals(False)
 
     def _on_history_changed(self) -> None:
         """Re-emit a change of the history dropdown or the overlay checkbox."""
