@@ -87,6 +87,20 @@ MINERAL_CONCENTRATION: Final[float] = 1.0
 # measured columns only when the network carries all three.
 CARBONATE_TRIO: Final[tuple[str, ...]] = ("CO2(aq)", "CO3--", "HCO3-")
 
+# The record's column roles: each role's canonical column name and
+# its aliases, in descending priority order (the canonical name
+# first, then the aliases in table order).  Matching is
+# case-insensitive and trims surrounding whitespace.  The ``date``
+# role owns the record's index (the reader resolves it); the other
+# data roles are resolved by `resolve_columns`.
+BASE_COLUMN_ROLES: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
+    "date": ("date", ("datetime", "timestamp", "time")),
+    "precip": ("precip", ("precipitation", "ppt", "rainfall", "rain")),
+    "temp": ("temp", ("temperature", "tair", "air_temperature")),
+    "pet": ("pet", ("etp", "et0", "epot", "potential_evapotranspiration")),
+    "q_meas": ("q_meas", ("streamflow", "discharge", "flow")),
+}
+
 # The default plotting window: the first and last day of the site
 # record's water years, as ISO dates.
 _DEFAULT_WINDOW: Final[tuple[pd.Timestamp, pd.Timestamp]] = (
@@ -380,6 +394,180 @@ def _measured_columns(
     if set(CARBONATE_TRIO) <= carried and "DIC" in df.columns:
         columns.append("DIC")
     return columns
+
+
+def _species_alias(species: str) -> str:
+    """
+    The spreadsheet column alias for a measured-species record role.
+
+    The species name lowercased with every non-alphanumeric character
+    removed, followed by ``"_molL"`` — the bundled record's naming
+    convention (``"DOC"`` → ``"doc_molL"``, ``"Ca++"`` →
+    ``"ca_molL"``, ``"HCO3-"`` → ``"hco3_molL"``).
+
+    Args:
+        species: The measured-species name.
+
+    Returns:
+        The alias column name.
+    """
+    stem: str = "".join(ch for ch in species.lower() if ch.isalnum())
+    return stem + "_molL"
+
+
+def _role_names(role: str) -> tuple[str, ...]:
+    """
+    The column names that resolve a record role, in priority order.
+
+    The canonical name first, then the aliases in table order (the
+    canonical name wins a tie).  A measured-species role's names are
+    the species name itself, then its `_species_alias` form.
+
+    Args:
+        role: A record role key: a key of `BASE_COLUMN_ROLES` or a
+            measured-species name from `measured_roles`.
+
+    Returns:
+        The candidate column names, in resolution order.
+    """
+    if role in BASE_COLUMN_ROLES:
+        canonical, aliases = BASE_COLUMN_ROLES[role]
+        return (canonical, *aliases)
+    return (role, _species_alias(role))
+
+
+def measured_roles(network: pt.ReactionNetwork) -> list[str]:
+    """
+    The measured-species record roles a network can carry, in plot
+    order.
+
+    The network's primary and secondary species that the GUI plots
+    as river concentrations (its intersection with `RIVER_SPECIES`),
+    in the network's species order, followed by ``"DIC"`` when the
+    network carries the whole carbonate trio (DIC is derived from the
+    trio, as the figures derive it).
+
+    Args:
+        network: The run's reaction network.
+
+    Returns:
+        The species names, e.g. ``["DOC", "Ca++", "DIC"]`` for the
+        default network; empty for a network without river species.
+    """
+    aqueous: set[str] = set(network.primary_names) | set(network.secondary_names)
+    roles: list[str] = [
+        name
+        for name in network.species_order
+        if name in aqueous and name in RIVER_SPECIES
+    ]
+    if "DIC" not in roles and set(CARBONATE_TRIO) <= set(network.species_names):
+        roles.append("DIC")
+    return roles
+
+
+def resolve_columns(
+    df: pd.DataFrame,
+    network: pt.ReactionNetwork,
+    column_map: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    """
+    Resolve a record's data columns to its record roles.
+
+    Each role resolves, in order: the explicit `column_map` value
+    (a `None` value marks an optional role deliberately absent; a
+    string value must name an existing column), then the role's
+    canonical column name, then its aliases — the matching
+    case-insensitive and trims surrounding whitespace.  The ``date``
+    role is excluded: the reader owns the record's index.  The
+    resolved columns keep the record's original spelling.
+
+    Args:
+        df: The loaded record frame (any columns).
+        network: The run's reaction network: it selects the
+            measured-species roles to resolve.
+        column_map: The explicit role → column override, or None for
+            pure auto-detection.
+
+    Returns:
+        The resolved roles (``precip``, ``temp``, ``pet``,
+        ``q_meas``, then the measured species in plot order) as
+        role key → actual column name, in that key order.  Optional
+        roles that did not resolve are absent from the result.
+
+    Raises:
+        ValueError:
+            Raised when an explicit map value names a column the
+            record does not have (the message lists the columns that
+            do), when two roles resolve to the same column (the
+            message names the column and both roles), or when a
+            required role (precipitation, temperature, PET) does not
+            resolve (the message lists the missing roles and the
+            columns that exist).
+    """
+    columns: list[str] = [str(name) for name in df.columns]
+    lowered: dict[str, str] = {
+        str(name).strip().lower(): str(name) for name in df.columns
+    }
+    roles: list[str] = [
+        "precip",
+        "temp",
+        "pet",
+        "q_meas",
+        *measured_roles(network),
+    ]
+    resolved: dict[str, str] = {}
+    for role in roles:
+        if column_map is not None and role in column_map:
+            name: str | None = column_map[role]
+            if name is None:
+                continue
+            if name not in df.columns:
+                raise ValueError(
+                    f"The column map points the role {role!r} at the "
+                    f"column {name!r}, which the record does not have. "
+                    f"Available columns: {', '.join(columns)}."
+                )
+            resolved[role] = name
+            continue
+        for candidate in _role_names(role):
+            match: str | None = lowered.get(candidate.strip().lower())
+            if match is not None:
+                resolved[role] = match
+                break
+    for column, role_names in _roles_by_column(resolved).items():
+        if len(role_names) > 1:
+            raise ValueError(
+                f"Two record roles resolve to the same column {column!r}: "
+                f"{', '.join(role_names)}. Map them to different columns."
+            )
+    missing: list[str] = [
+        role for role in ("precip", "temp", "pet") if role not in resolved
+    ]
+    if missing:
+        raise ValueError(
+            f"Could not resolve the required record role(s) "
+            f"{', '.join(missing)} from the available columns: "
+            f"{', '.join(columns)}."
+        )
+    return resolved
+
+
+def _roles_by_column(
+    resolved: dict[str, str],
+) -> dict[str, list[str]]:
+    """
+    Invert a role resolution: actual column → the roles on it.
+
+    Args:
+        resolved: The role → column resolution from `resolve_columns`.
+
+    Returns:
+        The column → roles mapping, in resolution order.
+    """
+    by_column: dict[str, list[str]] = {}
+    for role, column in resolved.items():
+        by_column.setdefault(column, []).append(role)
+    return by_column
 
 
 def _with_spinup(
