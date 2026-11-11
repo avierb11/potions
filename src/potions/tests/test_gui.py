@@ -34,6 +34,7 @@ import multiprocessing
 import os
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Iterable
 
@@ -47,6 +48,10 @@ matplotlib.use("Agg")
 
 import potions as pt
 from potions.hydro_model import HydrologicalModel
+from potions.reactive_transport.common_networks import (
+    get_chloride_network,
+    get_soc_calcite_network,
+)
 from potions.result_saving import (
     DEFAULT_RESULTS_DIR,
     save_hydro_run,
@@ -59,6 +64,7 @@ from ..gui import gradients as gui_gradients
 from ..gui import main as gui_main
 from ..gui import model_pool
 from ..gui import model_specs
+from ..gui import network_editor as gui_network_editor
 from ..gui import network_specs
 from ..gui import plots as gui_plots
 from ..gui import state as gui_state
@@ -5253,3 +5259,256 @@ class TestNetworkCli:
             gui_main(["--network", "nope.txt"])
         assert excinfo.value.code == 2
         assert "must be a .yaml or .yml" in capsys.readouterr().err
+
+
+class TestNetworkDraft:
+    """
+    The T9 draft dataclasses: N1 normalization at seed time,
+    lossless seed → build round-trip, order-preserving upsert,
+    mineral-removal cascade, and the two-pass validation (raw
+    V3/V7 first, then the network pass's V1–V9/W1/W2).
+    """
+
+    W1_MESSAGE: ClassVar[str] = (
+        "no H+ primary species: the speciation solve has no "
+        "charge-balance row"
+    )
+
+    @staticmethod
+    def _seed_draft() -> gui_network_editor.NetworkDraft:
+        network: pt.ReactionNetwork = get_soc_calcite_network()
+        return gui_network_editor.NetworkDraft.from_network(network)
+
+    def test_seed_drops_uncarried_stoich_keys(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        co2: gui_network_editor.DraftSecondary = next(
+            entry
+            for entry in draft.secondary
+            if entry.name == "CO2(aq)"
+        )
+        keys: set[str] = {key for key, _ in co2.stoichiometry}
+        assert keys == {"CO2(aq)", "H+", "HCO3-"}
+        xdoc: gui_network_editor.DraftExchange = draft.exchange[0]
+        exchange_keys: set[str] = {
+            key for key, _ in xdoc.stoichiometry
+        }
+        assert "X-" in exchange_keys
+        assert "XDOC" in exchange_keys
+
+    def test_seed_to_network_round_trip_is_lossless(self) -> None:
+        network: pt.ReactionNetwork = get_soc_calcite_network()
+        draft: gui_network_editor.NetworkDraft = (
+            gui_network_editor.NetworkDraft.from_network(network)
+        )
+        rebuilt: pt.ReactionNetwork = draft.to_network()
+        assert rebuilt.species_names == network.species_names
+        carried: set[str] = set(network.species_names) | {"X-"}
+
+        def kept(stoichiometry: dict[str, float]) -> dict[str, float]:
+            return {
+                key: value
+                for key, value in stoichiometry.items()
+                if key in carried
+            }
+
+        for primary, new_primary in zip(
+            network.primary_aqueous, rebuilt.primary_aqueous
+        ):
+            assert primary.name == new_primary.name
+            assert primary.molar_mass == new_primary.molar_mass
+            assert primary.charge == new_primary.charge
+            assert primary.dh_size_param == new_primary.dh_size_param
+        for secondary, new_secondary in zip(
+            network.secondary, rebuilt.secondary
+        ):
+            assert secondary.name == new_secondary.name
+            assert secondary.molar_mass == new_secondary.molar_mass
+            assert secondary.charge == new_secondary.charge
+            assert secondary.dh_size_param == new_secondary.dh_size_param
+            assert (
+                tuple(secondary.eq_consts) == tuple(new_secondary.eq_consts)
+            )
+            assert kept(secondary.stoichiometry) == new_secondary.stoichiometry
+        for mineral, new_mineral in zip(network.mineral, rebuilt.mineral):
+            assert mineral.name == new_mineral.name
+            assert mineral.molar_mass == new_mineral.molar_mass
+            assert mineral.molar_volume == new_mineral.molar_volume
+            assert (
+                tuple(mineral.eq_consts) == tuple(new_mineral.eq_consts)
+            )
+            assert kept(mineral.stoichiometry) == new_mineral.stoichiometry
+        for exchange, new_exchange in zip(
+            network.exchange_species, rebuilt.exchange_species
+        ):
+            assert exchange.name == new_exchange.name
+            assert exchange.log10_k_eq == new_exchange.log10_k_eq
+            assert exchange.charge == new_exchange.charge
+            assert kept(exchange.stoichiometry) == new_exchange.stoichiometry
+        for mineral_name, original_tst in (
+            network.mineral_kinetics.tst_reactions.items()
+        ):
+            match_tst: pt.TstReaction | None = (
+                rebuilt.mineral_kinetics.tst_reactions.get(mineral_name)
+            )
+            assert match_tst is not None
+            assert match_tst.label == original_tst.label
+            assert match_tst.rate_constant == original_tst.rate_constant
+            assert dict(match_tst.dependence) == dict(original_tst.dependence)
+        for mineral_name, original_monod in (
+            network.mineral_kinetics.monod_reactions.items()
+        ):
+            match_monod: pt.MonodReaction | None = (
+                rebuilt.mineral_kinetics.monod_reactions.get(mineral_name)
+            )
+            assert match_monod is not None
+            assert match_monod.label == original_monod.label
+            assert match_monod.rate_constant == original_monod.rate_constant
+            assert (
+                dict(match_monod.monod_terms)
+                == dict(original_monod.monod_terms)
+            )
+            assert (
+                dict(match_monod.inhib_terms)
+                == dict(original_monod.inhib_terms)
+            )
+
+    def test_seed_draft_is_clean(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        errors, warnings = gui_network_editor.draft_validation(draft)
+        assert errors == []
+        assert warnings == []
+
+    def test_upsert_replaces_in_place_and_appends(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        replaced: gui_network_editor.DraftSecondary = (
+            gui_network_editor.DraftSecondary(
+                name="CO2(aq)",
+                stoichiometry=(("CO2(aq)", 1.0),),
+                eq_consts=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0),
+                molar_mass=44.0,
+                charge=0.0,
+                dh_size_param=0.0,
+            )
+        )
+        updated: gui_network_editor.NetworkDraft = (
+            draft.upsert_secondary(replaced)
+        )
+        assert [entry.name for entry in updated.secondary] == [
+            "CO2(aq)",
+            "CO3--",
+        ]
+        co2 = next(
+            entry for entry in updated.secondary
+            if entry.name == "CO2(aq)"
+        )
+        assert co2.eq_consts == (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+        added: gui_network_editor.DraftPrimary = (
+            gui_network_editor.DraftPrimary(
+                name="NewIon",
+                molar_mass=1.0,
+                charge=1.0,
+                dh_size_param=0.0,
+            )
+        )
+        with_new: gui_network_editor.NetworkDraft = (
+            draft.upsert_primary(added)
+        )
+        assert with_new.primary[-1].name == "NewIon"
+
+    def test_remove_mineral_cascades_into_kinetics(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        removed: gui_network_editor.NetworkDraft = (
+            draft.remove_mineral("SOC(s)")
+        )
+        assert "SOC(s)" not in [entry.name for entry in removed.mineral]
+        assert not any(
+            entry.mineral_name == "SOC(s)" for entry in removed.monod
+        )
+        assert not any(
+            entry.mineral_name == "SOC(s)" for entry in removed.tst
+        )
+
+    def test_upsert_tst_replaces_the_minerals_monod(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        entry: gui_network_editor.DraftTst = (
+            gui_network_editor.DraftTst(
+                mineral_name="SOC-lz(s)",
+                label="second",
+                log10_k=-1.0,
+                dependence=(),
+            )
+        )
+        updated: gui_network_editor.NetworkDraft = draft.upsert_tst(entry)
+        assert [t.mineral_name for t in updated.tst] == [
+            "Calcite(s)",
+            "SOC-lz(s)",
+        ]
+        assert [m.mineral_name for m in updated.monod] == ["SOC(s)"]
+
+    def test_dangling_hplus_surfaces_as_v3_and_w1(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        updated: gui_network_editor.NetworkDraft = (
+            draft.remove_primary("H+")
+        )
+        errors, warnings = gui_network_editor.draft_validation(updated)
+        assert errors == [
+            "V3: stoichiometry of secondary species 'CO2(aq)' "
+            "references unknown species 'H+'",
+            "V3: stoichiometry of secondary species 'CO3--' "
+            "references unknown species 'H+'",
+        ]
+        assert warnings == [f"W1: {self.W1_MESSAGE}"]
+
+    def test_v5_both_and_neither_kinds_block(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        both: gui_network_editor.NetworkDraft = replace(
+            draft,
+            tst=draft.tst
+            + (
+                gui_network_editor.DraftTst(
+                    mineral_name="SOC(s)",
+                    label="extra",
+                    log10_k=0.0,
+                    dependence=(),
+                ),
+            ),
+        )
+        errors, _ = gui_network_editor.draft_validation(both)
+        assert errors == [
+            "V5: mineral 'SOC(s)' has both TST and Monod kinetics "
+            "entries",
+        ]
+        neither: gui_network_editor.NetworkDraft = (
+            both.remove_mineral_kinetics("SOC(s)")
+        )
+        errors, _ = gui_network_editor.draft_validation(neither)
+        assert errors == [
+            "V5: mineral 'SOC(s)' has no kinetics entry",
+        ]
+
+    def test_v8_requires_two_eq_consts(self) -> None:
+        draft: gui_network_editor.NetworkDraft = self._seed_draft()
+        section: tuple[gui_network_editor.DraftSecondary, ...] = tuple(
+            replace(entry, eq_consts=(0.0,))
+            if entry.name == "CO2(aq)"
+            else entry
+            for entry in draft.secondary
+        )
+        short: gui_network_editor.NetworkDraft = replace(
+            draft,
+            secondary=section,
+        )
+        errors, _ = gui_network_editor.draft_validation(short)
+        assert (
+            "V8: secondary species 'CO2(aq)' carries fewer than two "
+            "eq_consts"
+        ) in errors
+
+    def test_chloride_draft_warns_w1_only(self) -> None:
+        network: pt.ReactionNetwork = get_chloride_network()
+        draft: gui_network_editor.NetworkDraft = (
+            gui_network_editor.NetworkDraft.from_network(network)
+        )
+        errors, warnings = gui_network_editor.draft_validation(draft)
+        assert errors == []
+        assert warnings == [f"W1: {self.W1_MESSAGE}"]

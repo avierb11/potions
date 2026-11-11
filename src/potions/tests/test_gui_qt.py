@@ -55,6 +55,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLayoutItem,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QStyleOptionViewItem,
@@ -64,12 +66,17 @@ from PySide6.QtWidgets import (
 
 import potions as pt
 from potions.hydro_model import HydrologicalModel
+from potions.reactive_transport.common_networks import (
+    get_carbon_network,
+    get_soc_calcite_network,
+)
 from potions.reactive_transport.rt_zone import WaterVolumeError
 
 from ..gui import data as gui_data
 from ..gui import calibration as gui_calibration
 from ..gui import figure_panel as gui_figure_panel
 from ..gui import model_specs
+from ..gui import network_editor as gui_network_editor
 from ..gui import param_panel as gui_param_panel
 from ..gui import window as gui_window
 from ..gui.common import (
@@ -5628,3 +5635,153 @@ class TestModelSelection:
             assert saved.model_key == "hbv"
         finally:
             _close_window(win)
+
+
+# Pinned W1 finding line (Task 2's implementation notes).
+_W1_LINE: str = (
+    "W1: no H+ primary species: the speciation solve has "
+    "no charge-balance row"
+)
+
+
+class TestNetworkEditorDialog:
+    """
+    The T9 modal editor dialog: seeding and preset detection, the
+    validation bar, the checkbox-driven remove/re-add flow, Apply
+    and the resulting fingerprint, and the preset re-seed
+    confirmation (the window's Yes/No idiom, faked with
+    `_FakeMessageBox`).
+    """
+
+    @staticmethod
+    def _make_dialog(
+        network: pt.ReactionNetwork,
+    ) -> gui_network_editor.NetworkEditorDialog:
+        database: pt.ChemicalDatabase = pt.ChemicalDatabase.load_default()
+        return gui_network_editor.NetworkEditorDialog(network, database)
+
+    @staticmethod
+    def _find_item(
+        list_widget: QListWidget, name: str
+    ) -> QListWidgetItem:
+        for index in range(list_widget.count()):
+            item: QListWidgetItem | None = list_widget.item(index)
+            assert item is not None
+            if item.text() == name:
+                return item
+        pytest.fail(f"no item named {name!r} in the browser list")
+
+    def test_seed_preset_and_ok_bar(self, qapp: QApplication) -> None:
+        seed: pt.ReactionNetwork = get_soc_calcite_network()
+        dialog: gui_network_editor.NetworkEditorDialog = (
+            self._make_dialog(seed)
+        )
+        try:
+            assert dialog.network is None
+            assert dialog._preset_combo.currentData() == "soc_calcite"
+            assert not dialog._ok_label.isHidden()
+            assert dialog._ok_label.text() == (
+                "OK — 11 species, 3 minerals, 1 exchange"
+            )
+            assert dialog._error_label.isHidden()
+            assert dialog._warning_label.isHidden()
+            assert dialog._apply_button.isEnabled()
+            assert dialog._save_as_button.isEnabled()
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_unchecking_hplus_flags_and_recovering(
+        self, qapp: QApplication
+    ) -> None:
+        seed: pt.ReactionNetwork = get_soc_calcite_network()
+        dialog: gui_network_editor.NetworkEditorDialog = (
+            self._make_dialog(seed)
+        )
+        try:
+            primary_list: QListWidget = dialog._browser_list["primary"]
+            item: QListWidgetItem = self._find_item(primary_list, "H+")
+            primary_list.setCurrentItem(item)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            assert dialog._dirty
+            assert not dialog._apply_button.isEnabled()
+            assert not dialog._save_as_button.isEnabled()
+            assert dialog._ok_label.isHidden()
+            assert dialog._error_label.text() == (
+                "V3: stoichiometry of secondary species 'CO2(aq)' "
+                "references unknown species 'H+'\n"
+                "V3: stoichiometry of secondary species 'CO3--' "
+                "references unknown species 'H+'"
+            )
+            assert dialog._warning_label.text() == _W1_LINE
+            # The rebuild replaced the list's items: look the (now
+            # unchecked) H+ row up again before re-checking it.
+            item = self._find_item(primary_list, "H+")
+            primary_list.setCurrentItem(item)
+            item.setCheckState(Qt.CheckState.Checked)
+            assert dialog._dirty
+            assert dialog._apply_button.isEnabled()
+            assert dialog._ok_label.text() == (
+                "OK — 11 species, 3 minerals, 1 exchange"
+            )
+            assert dialog._error_label.isHidden()
+            assert dialog._warning_label.isHidden()
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_apply_accepts_and_preserves_the_fingerprint(
+        self, qapp: QApplication
+    ) -> None:
+        seed: pt.ReactionNetwork = get_soc_calcite_network()
+        dialog: gui_network_editor.NetworkEditorDialog = (
+            self._make_dialog(seed)
+        )
+        try:
+            dialog._apply_button.click()
+            assert dialog.result() == QDialog.DialogCode.Accepted
+            assert not dialog._dirty
+            applied: pt.ReactionNetwork | None = dialog.network
+            assert applied is not None
+            assert (
+                gui_data.fingerprint_network(applied)
+                == gui_data.fingerprint_network(seed)
+            )
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_preset_reseed_confirms_or_restores(
+        self,
+        qapp: QApplication,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed: pt.ReactionNetwork = get_soc_calcite_network()
+        dialog: gui_network_editor.NetworkEditorDialog = (
+            self._make_dialog(seed)
+        )
+        monkeypatch.setattr(
+            gui_network_editor, "QMessageBox", _FakeMessageBox
+        )
+        try:
+            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.Yes
+            dialog._dirty = True
+            dialog._preset_combo.setCurrentIndex(
+                dialog._preset_combo.findData("carbon")
+            )
+            assert not dialog._dirty
+            assert dialog._preset_combo.currentData() == "carbon"
+            assert dialog._ok_label.text() == (
+                "OK — 8 species, 1 minerals, 1 exchange"
+            )
+            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
+            dialog._dirty = True
+            dialog._preset_combo.setCurrentIndex(
+                dialog._preset_combo.findData("chloride")
+            )
+            assert dialog._dirty
+            assert dialog._preset_combo.currentData() == "carbon"
+        finally:
+            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
+            dialog.deleteLater()
+            _pump()
