@@ -27,6 +27,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import dataclasses
 import json
 import re
 import threading
@@ -754,7 +755,9 @@ class TestMainWindowStartup:
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
             assert panel.current_bounds() == dict(input_data.bounds)
-            assert panel.selection() == gui_data.default_plot_selection()
+            assert panel.selection() == gui_data.default_plot_selection(
+                input_data.spec, window=input_data.window
+            )
             # The save-history toggle is part of the saved state.
             assert win._save_history_checkbox.isChecked()
             assert win.x() == 10
@@ -809,8 +812,12 @@ class TestMainWindowStartup:
             assert "parameters.csv (61 values, 4-decimal;" in status
             panel: gui_param_panel.ParamPanel = win._param_panel
             # Without a saved selection the defaults are used, and the
-            # initial-state parameters fall back to their midpoints.
-            assert panel.selection() == gui_data.default_plot_selection()
+            # initial-state parameters fall back to their midpoints.  The
+            # plotting window is the record's span: the default's later
+            # end is clamped by the date editors to the record's last day.
+            assert panel.selection() == gui_data.default_plot_selection(
+                input_data.spec, window=input_data.window
+            )
             for zone in SPECIATION_ZONES:
                 key: str = f"initial_state.{zone}_x"
                 lo, hi = input_data.bounds[key]
@@ -1178,7 +1185,9 @@ class TestMainWindowRuns:
             assert saved.model_key == "lateral_three_layer"
             assert saved.param_values == win._param_panel.param_values()
             assert saved.param_bounds == win._param_panel.current_bounds()
-            assert saved.selection == gui_data.default_plot_selection()
+            assert saved.selection == gui_data.default_plot_selection(
+                input_data.spec, window=input_data.window
+            )
             # The window was shown and restored to the default origin
             # and size, so it saves exactly that client geometry; the
             # splitter saves its laid-out sizes, i.e. the initial
@@ -1384,7 +1393,9 @@ class TestMainWindowRuns:
             assert panel._groups["initial"].isHidden()
             # The hidden checkboxes keep their state, so the plot
             # selection is unchanged.
-            assert panel.selection() == gui_data.default_plot_selection()
+            assert panel.selection() == gui_data.default_plot_selection(
+                input_data.spec, window=input_data.window
+            )
             assert win._figure_panel.page_count() == 3
             assert win._figure_panel._titles == [
                 "Hydrology",
@@ -2290,7 +2301,12 @@ class TestParamPanel:
             assert values == []
             assert bounds == []
             assert selections == []
-            assert panel.selection() == gui_data.default_plot_selection()
+            # The default's window end is clamped by the editors to the
+            # record's last day, so the panel holds the record-derived
+            # default.
+            assert panel.selection() == gui_data.default_plot_selection(
+                input_data.spec, window=input_data.window
+            )
         finally:
             panel.deleteLater()
             _pump()
@@ -2948,6 +2964,33 @@ class TestParamPanel:
             panel.reload(data, gui_data.default_plot_selection(data.spec))
             assert not panel._groups["reactive"].isVisible()
             assert not panel._groups["initial"].isVisible()
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_panel_editor_bounds(
+        self, qapp: QApplication, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The date editors span the loaded record's window, so a
+        date outside the record cannot be selected."""
+        window: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp("2019-01-01"),
+            pd.Timestamp("2020-12-31"),
+        )
+        data = dataclasses.replace(input_data, window=window)
+        selection = gui_data.default_plot_selection(data.spec, window=window)
+        panel = gui_param_panel.ParamPanel(data, selection)
+        try:
+            lo: QDate = QDate.fromString("2019-01-01", Qt.DateFormat.ISODate)
+            hi: QDate = QDate.fromString("2020-12-31", Qt.DateFormat.ISODate)
+            assert panel._window_from_edit.minimumDate() == lo
+            assert panel._window_from_edit.maximumDate() == hi
+            assert panel._window_to_edit.minimumDate() == lo
+            assert panel._window_to_edit.maximumDate() == hi
+            # The window-derived selection round-trips through the
+            # editors unchanged.
+            assert panel.selection().window_start == "2019-01-01"
+            assert panel.selection().window_end == "2020-12-31"
         finally:
             panel.deleteLater()
             _pump()

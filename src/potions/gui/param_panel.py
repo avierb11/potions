@@ -416,6 +416,8 @@ class _BoldHeader(QLabel):
 def _labeled_date_edit(
     label: str,
     value: str,
+    minimum: str,
+    maximum: str,
 ) -> tuple[QWidget, QDateEdit]:
     """
     A row widget of a label and a date picker showing `value`.
@@ -423,12 +425,14 @@ def _labeled_date_edit(
     The *Plots* group's plotting-period pickers are built this way,
     so a picker's label and date edit share one cell of the group's
     two-column grid instead of taking a cell each.  The picker spans
-    the site record's water years, so a date outside the record
-    cannot be selected.
+    the loaded record's window (from `minimum` to `maximum`), so a
+    date outside the record cannot be selected.
 
     Args:
         label: The label text, left of the date edit.
         value: The initial date, as an ISO date.
+        minimum: The earliest selectable date, as an ISO date.
+        maximum: The latest selectable date, as an ISO date.
 
     Returns:
         The row widget and the date edit it holds.
@@ -441,8 +445,8 @@ def _labeled_date_edit(
     edit.setCalendarPopup(True)
     edit.setDisplayFormat("yyyy-MM-dd")
     edit.setDateRange(
-        QDate.fromString(DEFAULT_WINDOW_START, Qt.DateFormat.ISODate),
-        QDate.fromString(DEFAULT_WINDOW_END, Qt.DateFormat.ISODate),
+        QDate.fromString(minimum, Qt.DateFormat.ISODate),
+        QDate.fromString(maximum, Qt.DateFormat.ISODate),
     )
     edit.setDate(QDate.fromString(value, Qt.DateFormat.ISODate))
     layout.addWidget(edit)
@@ -1525,10 +1529,17 @@ class ParamPanel(QScrollArea):
             "Plotting period (all figures, dates)"
         )
         group.add_header(self._window_header)
+        # The pickers span the loaded record's window, so a date
+        # outside the record cannot be selected.
+        window_start: str = self._input_data.window[0].strftime("%Y-%m-%d")
+        window_end: str = self._input_data.window[1].strftime("%Y-%m-%d")
         self._window_from_row: QWidget
         self._window_from_edit: QDateEdit
         self._window_from_row, self._window_from_edit = _labeled_date_edit(
-            "From", DEFAULT_WINDOW_START
+            "From",
+            DEFAULT_WINDOW_START,
+            window_start,
+            window_end,
         )
         self._window_from_edit.dateChanged.connect(
             self._on_window_from_changed
@@ -1537,7 +1548,10 @@ class ParamPanel(QScrollArea):
         self._window_to_row: QWidget
         self._window_to_edit: QDateEdit
         self._window_to_row, self._window_to_edit = _labeled_date_edit(
-            "To", DEFAULT_WINDOW_END
+            "To",
+            DEFAULT_WINDOW_END,
+            window_start,
+            window_end,
         )
         self._window_to_edit.dateChanged.connect(
             self._on_window_to_changed

@@ -204,12 +204,20 @@ class GuiState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> GuiState:
+    def from_dict(
+        cls,
+        data: dict[str, object],
+        years: list[int] = WATER_YEARS,
+    ) -> GuiState:
         """
         Build the state from a parsed ``gui_state.json`` mapping.
 
         Args:
             data: The parsed JSON mapping.
+            years: The calendar years of the record the state is
+                restored against; a version-5 state's water years
+                are validated against it (the site record's water
+                years, when no record is known).
 
         Returns:
             The restored `GuiState`.
@@ -238,7 +246,7 @@ class GuiState:
             csv_path=csv_path,
             param_values=_require_values(data),
             param_bounds=_require_bounds(data),
-            selection=_require_selection(data),
+            selection=_require_selection(data, years),
             window_geometry=_optional_geometry(data),
             splitter_sizes=_optional_splitter_sizes(data),
             save_history=_optional_save_history(data),
@@ -377,7 +385,10 @@ def _require_bounds(data: dict[str, object]) -> dict[str, tuple[float, float]]:
     return bounds
 
 
-def _require_selection(data: dict[str, object]) -> PlotSelection:
+def _require_selection(
+    data: dict[str, object],
+    years: list[int] = WATER_YEARS,
+) -> PlotSelection:
     """
     The ``selection`` field of a gui_state.json mapping.
 
@@ -400,6 +411,10 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
 
     Args:
         data: The parsed JSON mapping.
+        years: The calendar years of the record the state is
+            restored against; a version-5 state's water years must
+            be members of it (the site record's water years, when
+            no record is known).
 
     Returns:
         The restored `PlotSelection`.
@@ -446,7 +461,7 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
         entry: object = raw.get(key)
         if entry is None:
             return default
-        if not _is_int(entry) or entry not in WATER_YEARS:
+        if not _is_int(entry) or entry not in years:
             raise ValueError(
                 f"gui_state.json selection field {key!r} is not a "
                 f"water year."
@@ -482,8 +497,8 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
             end: str = _date("window_end", DEFAULT_WINDOW_END)
         elif "water_years_from" in raw or "water_years_to" in raw:
             legacy_start, legacy_end = water_year_window(
-                _year("water_years_from", WATER_YEARS[0]),
-                _year("water_years_to", WATER_YEARS[-1]),
+                _year("water_years_from", years[0]),
+                _year("water_years_to", years[-1]),
             )
             start = legacy_start.strftime("%Y-%m-%d")
             end = legacy_end.strftime("%Y-%m-%d")
@@ -772,12 +787,19 @@ def write_gui_state(run_dir: Path, state: GuiState) -> Path:
     return path
 
 
-def read_gui_state(run_dir: Path) -> GuiState | None:
+def read_gui_state(
+    run_dir: Path,
+    years: list[int] = WATER_YEARS,
+) -> GuiState | None:
     """
     Read the GUI state from a saved run directory.
 
     Args:
         run_dir: The run directory to read the state file from.
+        years: The calendar years of the record the state is
+            restored against; a version-5 state's water years are
+            validated against it (the site record's water years,
+            when no record is known).
 
     Returns:
         The restored state, or None when the file is absent (a run
@@ -793,7 +815,7 @@ def read_gui_state(run_dir: Path) -> GuiState | None:
         data: object = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise ValueError("the top-level JSON value is not an object")
-        return GuiState.from_dict(data)
+        return GuiState.from_dict(data, years)
     except (ValueError, TypeError, OSError) as error:
         print(
             f"Could not restore the GUI state from {path}: {error}",
@@ -1088,7 +1110,9 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
     Args:
         run_dir: The run directory to restore from.
         input_data: The assembled GUI inputs (the parameter bounds and
-            the reaction network, which the parameter mapping needs).
+            the reaction network, which the parameter mapping needs);
+            its record's calendar years, which a version-5 state's
+            water years are validated against.
 
     Returns:
         The restored results and GUI state.
@@ -1098,7 +1122,13 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             missing simulation CSV or parameters CSV) or carries a
             parameter value it cannot parse.
     """
-    state: GuiState | None = read_gui_state(run_dir)
+    # A record's calendar years, from its forcing span (a daily
+    # record spans every calendar year between its first and last
+    # day).
+    years: list[int] = list(
+        range(input_data.window[0].year, input_data.window[1].year + 1)
+    )
+    state: GuiState | None = read_gui_state(run_dir, years)
     results: GuiRunResults = _reconstruct_results(run_dir, input_data)
 
     if state is not None:

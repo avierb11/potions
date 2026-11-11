@@ -1293,6 +1293,32 @@ class TestFromDictErrors:
         assert restored.selection.window_start == start.strftime("%Y-%m-%d")
         assert restored.selection.window_end == end.strftime("%Y-%m-%d")
 
+    def test_state_year_validation_general(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Year membership is checked against the record's calendar
+        years, not the site record's water years: the record's span
+        restores, and a year the site carries but the record does
+        not is rejected (the old site-only check accepted it)."""
+        raw: dict[str, object] = self._base(input_data)
+        raw["version"] = 5
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        selection.pop("window_start")
+        selection.pop("window_end")
+        selection["water_years_from"] = 2019
+        selection["water_years_to"] = 2020
+        raw["selection"] = selection
+        # The record spans 2019 to 2020: the span restores.
+        restored = GuiState.from_dict(raw, years=[2019, 2020])
+        start, end = water_year_window(2019, 2020)
+        assert restored.selection.window_start == start.strftime("%Y-%m-%d")
+        assert restored.selection.window_end == end.strftime("%Y-%m-%d")
+        # A year in the site's water years but outside the record's
+        # span is rejected.
+        selection["water_years_from"] = 2018
+        with pytest.raises(ValueError, match="is not a water year"):
+            GuiState.from_dict(raw, years=[2019, 2020])
+
     def test_legacy_selection_migrates(
         self, input_data: gui_data.GuiInputData
     ) -> None:

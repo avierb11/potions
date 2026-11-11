@@ -1444,6 +1444,7 @@ def default_plot_mineral(network: pt.ReactionNetwork | None = None) -> str:
 def default_plot_selection(
     spec: ModelSpec = DEFAULT_MODEL_SPEC,
     network: pt.ReactionNetwork | None = None,
+    window: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> PlotSelection:
     """
     The default figure selections for a model spec and network.
@@ -1451,14 +1452,18 @@ def default_plot_selection(
     Every measured species of the network (streamflow on) in the
     river-concentration figure, every non-snow zone of the spec in
     the storage and zone-concentration figures, the network's
-    dominant mineral in the reaction-rate figure, and the whole
-    water-year record as the plotting window.
+    dominant mineral in the reaction-rate figure, and the plotting
+    window: the record's span when `window` is given, the default
+    window otherwise.
 
     Args:
         spec: The selected model's spec; defaults to the lateral
             three-layer model.
         network: The run's reaction network; the default network
             when None.
+        window: The record's forcing span (its first and last day);
+            when given, the selection's window is that span's ISO
+            dates, otherwise the default window.
 
     Returns:
         The default `PlotSelection`.
@@ -1466,9 +1471,21 @@ def default_plot_selection(
     net: pt.ReactionNetwork = (
         network if network is not None else default_network()
     )
+    window_start: str = (
+        window[0].strftime("%Y-%m-%d")
+        if window is not None
+        else DEFAULT_WINDOW_START
+    )
+    window_end: str = (
+        window[1].strftime("%Y-%m-%d")
+        if window is not None
+        else DEFAULT_WINDOW_END
+    )
     return PlotSelection(
         species=network_measured_species(net),
         zones=[zone for zone in spec.zones if zone not in spec.snow_zones],
         mineral=default_plot_mineral(net),
+        window_start=window_start,
+        window_end=window_end,
     )
 # =================== #

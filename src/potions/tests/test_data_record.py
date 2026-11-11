@@ -668,3 +668,35 @@ class TestNoneSafeRunBuilders:
         assert len(seen) == 1
         assert seen[0]["meas_streamflow"] is input_data.q_meas
         assert seen[0]["meas_river_conc"] is input_data.conc_df
+
+
+# ------------------------------------------------------------------ #
+# Record-derived plot windows
+# ------------------------------------------------------------------ #
+
+
+class TestDefaultPlotSelectionWindow:
+    """The default selection's plotting window follows a given record
+    span; without one, the default window is kept."""
+
+    def test_default_selection_with_window(self) -> None:
+        """A record span becomes the selection's ISO-date window, and
+        only the window changes."""
+        window: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp("2019-01-01"),
+            pd.Timestamp("2020-12-31"),
+        )
+        selection = gui_data.default_plot_selection(window=window)
+        assert selection.window_start == "2019-01-01"
+        assert selection.window_end == "2020-12-31"
+        default = gui_data.default_plot_selection()
+        assert selection.species == default.species
+        assert selection.zones == default.zones
+        assert selection.mineral == default.mineral
+        assert selection.streamflow == default.streamflow
+
+    def test_default_selection_default_unchanged(self) -> None:
+        """Without a span, the selection keeps the default window."""
+        selection = gui_data.default_plot_selection()
+        assert selection.window_start == gui_data.DEFAULT_WINDOW_START
+        assert selection.window_end == gui_data.DEFAULT_WINDOW_END
