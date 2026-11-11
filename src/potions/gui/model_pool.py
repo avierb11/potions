@@ -32,6 +32,8 @@ from typing import Callable, Sequence
 import numpy as np
 from multiprocessing import Pool
 
+import potions as pt
+
 from potions.gui import data as gui_data
 from potions.gui.model_specs import DEFAULT_MODEL_KEY
 from potions.gui.state import MODE_HYDRO
@@ -43,7 +45,11 @@ _INPUT_DATA: gui_data.GuiInputData | None = None
 _INIT_ERROR: str | None = None
 
 
-def init_worker(csv_path: str, model_key: str) -> None:
+def init_worker(
+    csv_path: str,
+    model_key: str,
+    network: pt.ReactionNetwork | None = None,
+) -> None:
     """
     Pool initializer: load the input data once per worker process.
 
@@ -64,12 +70,15 @@ def init_worker(csv_path: str, model_key: str) -> None:
         model_key:
             The key of the selected model's spec; the worker builds
             the inputs, bounds, and zone configurations of that model.
+        network:
+            The run's reaction network; the worker's input data is
+            bound to it (the default network when None).
     """
     global _INPUT_DATA, _INIT_ERROR
     try:
         sys.stdout = os.fdopen(1, "w", closefd=False)
         _INPUT_DATA = gui_data.load_input_data(
-            Path(csv_path), model_key=model_key
+            Path(csv_path), model_key=model_key, network=network
         )
         _INIT_ERROR = None
     except Exception as err:
@@ -122,6 +131,7 @@ def map_model_runs(
         Callable[[int, gui_data.GuiRunResults | str], None] | None
     ) = None,
     model_key: str = DEFAULT_MODEL_KEY,
+    network: pt.ReactionNetwork | None = None,
 ) -> list[gui_data.GuiRunResults | str]:
     """
     Run a batch of parameter points in a worker pool.
@@ -156,6 +166,9 @@ def map_model_runs(
             The key of the selected model's spec; every worker loads
             that model's inputs, bounds, and zone configurations.
             Defaults to the lateral three-layer model.
+        network:
+            The run's reaction network; every worker's input data is
+            bound to it (the default network when None).
 
     Returns:
         One entry per input point, in input order: the point's
@@ -182,7 +195,7 @@ def map_model_runs(
     pool = Pool(
         processes=workers if workers is not None else (os.cpu_count() or 1),
         initializer=init_worker,
-        initargs=(csv_path, model_key),
+        initargs=(csv_path, model_key, network),
     )
     try:
         for index, payload in pool.imap_unordered(_run_one_task, tasks):

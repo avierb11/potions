@@ -4301,6 +4301,7 @@ class TestModelPool:
         def fake_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4342,6 +4343,7 @@ class TestModelPool:
         def fake_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4382,6 +4384,7 @@ class TestModelPool:
         def failing_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             raise RuntimeError("missing csv")
 
@@ -4409,6 +4412,7 @@ class TestModelPool:
         def logging_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(f"{csv_path}\n")
@@ -4445,6 +4449,7 @@ class TestModelPool:
         def fake_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4483,6 +4488,7 @@ class TestModelPool:
         def fake_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             seen.append(model_key)
             return input_data
@@ -4506,6 +4512,44 @@ class TestModelPool:
 
         assert seen == ["hbv"]
 
+    def test_map_model_runs_forwards_network(
+        self,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen: list[pt.ReactionNetwork | None] = []
+
+        def fake_load(
+            csv_path: Path,
+            model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
+        ) -> gui_data.GuiInputData:
+            seen.append(network)
+            return input_data
+
+        def fake_run(
+            point: np.ndarray, data: gui_data.GuiInputData
+        ) -> gui_data.GuiRunResults:
+            return _marker_results(data, point, hydro_only=True)
+
+        monkeypatch.setattr(gui_data, "load_input_data", fake_load)
+        monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
+        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+
+        network = network_specs.get_network_spec("carbon").builder()
+        model_pool.map_model_runs(
+            [np.array([1.0])],
+            MODE_HYDRO,
+            "unused.csv",
+            workers=1,
+            network=network,
+        )
+
+        # `ReactionNetwork` defines no `__eq__`, so list equality is
+        # identity: the exact object the caller passed arrived at the
+        # worker's initializer.
+        assert seen == [network]
+
     def test_map_model_runs_defaults_to_lateral_model(
         self,
         input_data: gui_data.GuiInputData,
@@ -4516,6 +4560,7 @@ class TestModelPool:
         def fake_load(
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
+            network: pt.ReactionNetwork | None = None,
         ) -> gui_data.GuiInputData:
             seen.append(model_key)
             return input_data

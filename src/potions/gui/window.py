@@ -51,6 +51,14 @@ the panel, and the value profile is written to a
 ``line_search_YYYYMMDD_HHMMSS.csv`` file in the results directory
 and drawn as an extra page of the figure panel.
 
+The header's *Calibrate* button (available only in hydrology-only
+mode) optimizes the free hydrology parameters with differential
+evolution against the checked objective terms: a small dialog asks
+for the generation count, population size, and whether to polish,
+and the best run's parameters are adopted into the panel, its
+figures refreshed, and the run saved.  A pinned parameter (a cell
+whose range has no width) keeps its current value.
+
 The parameter panel's *History* group lists the previous runs —
 the saved run directories and this session's runs, newest first —
 with an *Overlay previous results* checkbox (the selected run's
@@ -132,11 +140,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from potions.gui.calibration import (
+    CalibrationSettings,
+    _CalibrationOutcome,
+    _CalibrationWorker,
+    ask_calibration_settings,
+)
 from potions.gui.common import (
     HYDRO_THEME,
     METRIC_NOTES,
     RT_MODE_TINT,
-    water_year_window,
 )
 from potions.gui.data import (
     DEFAULT_CSV_PATH,
@@ -678,6 +691,7 @@ class _GradientWorker(QThread):
         csv_path: str,
         base_results: GuiRunResults | None,
         model_key: str = DEFAULT_MODEL_KEY,
+        network: pt.ReactionNetwork | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -687,6 +701,7 @@ class _GradientWorker(QThread):
         self._csv_path: str = csv_path
         self._base_results: GuiRunResults | None = base_results
         self._model_key: str = model_key
+        self._network: pt.ReactionNetwork | None = network
 
     @staticmethod
     def _key(point: np.ndarray) -> tuple[float, ...]:
@@ -783,6 +798,7 @@ class _GradientWorker(QThread):
             self._csv_path,
             on_result=on_result,
             model_key=self._model_key,
+            network=self._network,
         )
         failed_points: int = 0
         results: dict[tuple[float, ...], GuiRunResults | str] = {}
@@ -985,6 +1001,7 @@ class _LineSearchWorker(QThread):
         bounds: dict[str, tuple[float, float]],
         base_results: GuiRunResults | None,
         model_key: str = DEFAULT_MODEL_KEY,
+        network: pt.ReactionNetwork | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -997,6 +1014,7 @@ class _LineSearchWorker(QThread):
         self._bounds: dict[str, tuple[float, float]] = bounds
         self._base_results: GuiRunResults | None = base_results
         self._model_key: str = model_key
+        self._network: pt.ReactionNetwork | None = network
 
     def _key(self, x: np.ndarray) -> tuple[float, ...]:
         """The deduplication key of a parameter vector (its values)."""
@@ -1194,6 +1212,7 @@ class _LineSearchWorker(QThread):
                 self._csv_path,
                 on_result=on_phase1_result,
                 model_key=self._model_key,
+                network=self._network,
             )
         results: dict[tuple[float, ...], GuiRunResults] = {}
         if self._base_results is not None:
@@ -1262,6 +1281,7 @@ class _LineSearchWorker(QThread):
                 self._csv_path,
                 on_result=on_pool_result,
                 model_key=self._model_key,
+                network=self._network,
             )
             if pool_points
             else []
@@ -1919,7 +1939,11 @@ class MainWindow(QMainWindow):
         # flight; the reference is dropped when the worker ends,
         # before the deferred deletion removes the object).
         self._worker: (
-            _RunWorker | _GradientWorker | _LineSearchWorker | None
+            _RunWorker
+            | _GradientWorker
+            | _LineSearchWorker
+            | _CalibrationWorker
+            | None
         ) = None
         # The generation of the latest started run; an outcome with
         # an older generation is stale and discarded.
@@ -2159,6 +2183,18 @@ class MainWindow(QMainWindow):
             "page of the figure panel."
         )
 
+        self._calibrate_button: QPushButton = QPushButton("Calibrate")
+        self._calibrate_button.clicked.connect(self._on_calibrate_clicked)
+        self._calibrate_button.setEnabled(False)
+        self._calibrate_button.setToolTip(
+            "Optimize the free hydrology parameters with differential "
+            "evolution against the checked objective terms (or every "
+            "selectable term when none is checked).  A parameter "
+            "whose range has no width is pinned at its current value.  "
+            "The best run is adopted into the panel and saved.  "
+            "Available in hydrology-only mode."
+        )
+
         self._reset_button: QPushButton = QPushButton("Reset bounds")
         self._reset_button.clicked.connect(self._on_reset_bounds)
 
@@ -2184,6 +2220,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._run_button)
         layout.addWidget(self._gradients_button)
         layout.addWidget(self._line_search_button)
+        layout.addWidget(self._calibrate_button)
         layout.addWidget(self._reset_button)
         layout.addWidget(self._save_button)
         header: QWidget = QWidget(self)
@@ -2556,6 +2593,19 @@ class MainWindow(QMainWindow):
             self._worker is None and not self._results_are_up_to_date()
         )
 
+    def _update_calibrate_button(self) -> None:
+        """
+        Sync the calibrate button with the run mode and the job state.
+
+        Calibration optimizes only the hydrology model, so the button
+        is available only in hydrology-only mode and only when no job
+        is in flight.
+        """
+        busy: bool = self._worker is not None and self._worker.isRunning()
+        self._calibrate_button.setEnabled(
+            not busy and self._current_mode() == MODE_HYDRO
+        )
+
     def _maybe_start_run(self) -> None:
         """
         Start a run with the current parameters, unless there is
@@ -2609,6 +2659,7 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
         self._line_search_button.setEnabled(False)
+        self._calibrate_button.setEnabled(False)
         self._status("Running the model…")
 
         worker: _RunWorker = _RunWorker(
@@ -2660,6 +2711,7 @@ class MainWindow(QMainWindow):
             self._run_button.setEnabled(True)
             self._gradients_button.setEnabled(True)
             self._line_search_button.setEnabled(True)
+            self._update_calibrate_button()
 
     def _on_finished_run(self, payload: object) -> None:
         """
@@ -2735,9 +2787,11 @@ class MainWindow(QMainWindow):
         self._run_button.setEnabled(not up_to_date)
         # No run is in flight any more, so the gradient and the
         # line search jobs can start again (a stale restart below
-        # re-disables both via `_start_run`).
+        # re-disables them via `_start_run`); the calibrate button
+        # follows the run mode.
         self._gradients_button.setEnabled(True)
         self._line_search_button.setEnabled(True)
+        self._update_calibrate_button()
         # The parameters or the mode changed while this run was in
         # flight: the results are stale, so start the next one with
         # the latest values (this is what the generation counter is
@@ -2801,6 +2855,7 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
         self._line_search_button.setEnabled(False)
+        self._calibrate_button.setEnabled(False)
         self._status("Computing gradients…")
 
         worker: _GradientWorker = _GradientWorker(
@@ -2810,6 +2865,7 @@ class MainWindow(QMainWindow):
             self._csv_path or str(DEFAULT_CSV_PATH),
             base_results,
             self._input_data.spec.key,
+            self._input_data.network,
             self,
         )
         worker.progress_line.connect(self._on_gradient_progress_line)
@@ -2856,6 +2912,7 @@ class MainWindow(QMainWindow):
             # the job buttons the switch left disabled.
             self._gradients_button.setEnabled(True)
             self._line_search_button.setEnabled(True)
+            self._update_calibrate_button()
             self._update_run_button()
             return
         if outcome.error is not None:
@@ -2903,6 +2960,7 @@ class MainWindow(QMainWindow):
         self._run_button.setEnabled(not up_to_date)
         self._gradients_button.setEnabled(True)
         self._line_search_button.setEnabled(True)
+        self._update_calibrate_button()
 
     # ==== Line search ==== #
     def _on_line_search_clicked(self) -> None:
@@ -3104,6 +3162,7 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
         self._gradients_button.setEnabled(False)
         self._line_search_button.setEnabled(False)
+        self._calibrate_button.setEnabled(False)
         if len(terms_list) == 1:
             self._status(f"Line search in progress: {terms_list[0]} …")
         else:
@@ -3121,6 +3180,7 @@ class MainWindow(QMainWindow):
             bounds,
             base_results,
             self._input_data.spec.key,
+            self._input_data.network,
             self,
         )
         worker: _LineSearchWorker = self._worker
@@ -3178,6 +3238,7 @@ class MainWindow(QMainWindow):
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it (the job
             # buttons were already restored above).
+            self._update_calibrate_button()
             self._update_run_button()
             return
         if (
@@ -3195,6 +3256,7 @@ class MainWindow(QMainWindow):
             up_to_date: bool = self._results_are_up_to_date()
             self._save_button.setEnabled(up_to_date)
             self._run_button.setEnabled(not up_to_date)
+            self._update_calibrate_button()
             return
 
         # The best point is the profile's largest finite value.
@@ -3258,6 +3320,7 @@ class MainWindow(QMainWindow):
             up_to_date = self._results_are_up_to_date()
             self._save_button.setEnabled(up_to_date)
             self._run_button.setEnabled(not up_to_date)
+            self._update_calibrate_button()
             return
 
         bounds: dict[str, tuple[float, float]] = (
@@ -3301,6 +3364,208 @@ class MainWindow(QMainWindow):
         up_to_date = self._results_are_up_to_date()
         self._save_button.setEnabled(up_to_date)
         self._run_button.setEnabled(not up_to_date)
+        self._update_calibrate_button()
+
+    # ==== Calibration ==== #
+    def _on_calibrate_clicked(self) -> None:
+        """
+        Ask for the calibration's options and start the job.
+
+        The job optimizes the free hydrology parameters against the
+        checked objective terms (every selectable term when none is
+        checked).  It refuses, with a message, when a job is already
+        in flight, when the window is not in hydrology-only mode,
+        when the table has no values yet, when no term is
+        selectable, or when no hydrology parameter is free.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            self._status(
+                "A job is already in flight: it cannot be interrupted, "
+                "so the calibration was not started."
+            )
+            return
+        if self._current_mode() != MODE_HYDRO:
+            self._status(
+                "Calibration optimizes the hydrology model only; "
+                "switch the header's *Hydrology only* checkbox on."
+            )
+            return
+        table: pd.DataFrame = self._objective_model._table
+        if table.empty:
+            self._status(
+                "No objective values to calibrate against yet: run the "
+                "model first."
+            )
+            return
+        effective: frozenset[str] = (
+            self._objective_terms
+            if self._objective_terms is not None
+            else self._selectable_objective_terms()
+        )
+        terms: list[str] = [
+            f"{target}: {metric}"
+            for metric in table.index
+            for target in table.columns
+            if f"{target}: {metric}" in effective
+        ]
+        if not terms:
+            self._status(
+                "No objectives are selected: check at least one cell of "
+                "the objective table."
+            )
+            return
+        bounds: dict[str, tuple[float, float]] = (
+            self._param_panel.current_bounds()
+        )
+        num_hydro: int = (
+            self._input_data.spec.model_class.get_num_hydro_parameters()
+        )
+        hydro_names: tuple[str, ...] = tuple(self._input_data.bounds)[
+            :num_hydro
+        ]
+        if not any(
+            bounds[name][1] > bounds[name][0] for name in hydro_names
+        ):
+            self._status(
+                "No free hydrology parameters to calibrate: give at least "
+                "one hydrology cell a range."
+            )
+            return
+        settings: CalibrationSettings | None = ask_calibration_settings(self)
+        if settings is None:
+            return
+        self._start_calibration(settings, terms)
+
+    def _start_calibration(
+        self,
+        settings: CalibrationSettings,
+        terms: list[str],
+    ) -> None:
+        """
+        Start the calibration worker and show its progress.
+
+        Args:
+            settings: The optimizer options the user entered.
+            terms: The objective terms to optimize, as
+                ``"target: metric"`` labels.
+        """
+        x: np.ndarray = self._current_x()
+        bounds: dict[str, tuple[float, float]] = (
+            self._param_panel.current_bounds()
+        )
+        self._run_started_at = time.perf_counter()
+        self._progress_strip.show()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
+        self._job_spinner.set_spinning(True)
+        self._run_button.setEnabled(False)
+        self._save_button.setEnabled(False)
+        self._gradients_button.setEnabled(False)
+        self._line_search_button.setEnabled(False)
+        self._calibrate_button.setEnabled(False)
+        self._status("Calibrating the hydrology model…")
+
+        worker: _CalibrationWorker = _CalibrationWorker(
+            x,
+            self._input_data,
+            bounds,
+            terms,
+            settings,
+            self._input_data.spec.key,
+            self,
+        )
+        worker.progress_line.connect(self._on_calibration_progress_line)
+        worker.progress_step.connect(self._on_progress_step)
+        worker.finished_calibration.connect(self._on_finished_calibration)
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        self._elapsed_timer.start()
+        worker.start()
+
+    def _on_calibration_progress_line(self, line: str) -> None:
+        """Show the calibration's latest progress line in the status bar."""
+        if line:
+            self._status(f"Calibration in progress — {line}")
+
+    def _on_finished_calibration(self, payload: object) -> None:
+        """
+        Apply a finished calibration job's outcome to the window.
+
+        A failed job is reported in the status bar and leaves the
+        figures on screen unchanged.  A successful job adopts the
+        best full parameter vector into the panel, shows the best
+        run's results, refreshes the figures and the table, and saves
+        the run.
+        """
+        self._elapsed_timer.stop()
+        self._progress_strip.hide()
+        self._run_started_at = None
+        self._job_spinner.set_spinning(False)
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setValue(0)
+        self._gradients_button.setEnabled(True)
+        self._line_search_button.setEnabled(True)
+
+        if not isinstance(payload, _CalibrationOutcome):
+            return
+        outcome: _CalibrationOutcome = payload
+        if outcome.model_key != self._input_data.spec.key:
+            # The model changed mid-job: the outcome belongs to the
+            # model the window no longer shows.  Drop it.
+            self._update_calibrate_button()
+            self._update_run_button()
+            return
+        if (
+            outcome.error is not None
+            or outcome.x_best is None
+            or outcome.results is None
+        ):
+            self._status(f"Calibration failed: {outcome.error}")
+            up_to_date: bool = self._results_are_up_to_date()
+            self._save_button.setEnabled(up_to_date)
+            self._run_button.setEnabled(not up_to_date)
+            self._update_calibrate_button()
+            return
+
+        bounds: dict[str, tuple[float, float]] = (
+            self._param_panel.current_bounds()
+        )
+        best_values: dict[str, float] = {
+            key: float(value)
+            for key, value in zip(bounds, outcome.x_best, strict=True)
+        }
+        self._param_panel.restore_state(best_values, bounds)
+        self._results = outcome.results
+        self._last_run_x = outcome.x_best
+        self._last_run_mode = MODE_HYDRO
+        self._refresh_from_results()
+        saved: Path | None = self._on_save_run()
+        saved_text: str = (
+            f"the best run was saved to {saved}."
+            if saved is not None
+            else "the best run could not be saved."
+        )
+        if len(outcome.terms) == 1:
+            best_text: str = (
+                f"({outcome.terms[0]} = {outcome.best_value:.3g})"
+            )
+        else:
+            best_text = (
+                f"(sum of {len(outcome.terms)} objectives = "
+                f"{outcome.best_value:.3g})"
+            )
+        self._status(
+            f"Calibration finished in {outcome.elapsed_seconds:.1f} s "
+            f"after {outcome.evaluations} evaluations: best {best_text}; "
+            f"the best parameters are in the panel and {saved_text}"
+        )
+        up_to_date = self._results_are_up_to_date()
+        self._save_button.setEnabled(up_to_date)
+        self._run_button.setEnabled(not up_to_date)
+        self._update_calibrate_button()
 
     def _record_run_history(self) -> None:
         """
@@ -3661,6 +3926,7 @@ class MainWindow(QMainWindow):
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
         self._set_mode_tint(mode)
         self._update_run_button()
+        self._update_calibrate_button()
         self._sync_objective_selection(self._selectable_objective_terms())
         if self._auto_run_checkbox.isChecked():
             self._debounce_timer.start()
@@ -3682,10 +3948,10 @@ class MainWindow(QMainWindow):
         """
         The plot selection after a model switch.
 
-        The species, mineral, streamflow toggle, and water-year
-        window are network- or record-level and survive the switch;
-        the zones are the new model's defaults, since the old
-        model's zone names may not exist in the new one.
+        The species, mineral, streamflow toggle, and date window are
+        network- or record-level and survive the switch; the zones
+        are the new model's defaults, since the old model's zone
+        names may not exist in the new one.
 
         Args:
             spec: The model spec being switched to.
@@ -3699,8 +3965,8 @@ class MainWindow(QMainWindow):
             zones=default_plot_selection(spec).zones,
             mineral=old.mineral,
             streamflow=old.streamflow,
-            water_years_from=old.water_years_from,
-            water_years_to=old.water_years_to,
+            window_start=old.window_start,
+            window_end=old.window_end,
         )
 
     def _switch_model(self, key: str, *, start_run: bool = True) -> None:
@@ -3822,7 +4088,7 @@ class MainWindow(QMainWindow):
             self._debounce_timer.start()
 
     # ==== Save ==== #
-    def _on_save_run(self) -> None:
+    def _on_save_run(self) -> Path | None:
         """
         Save the current run: the existing per-run model output,
         the figures as plotted, and a ``gui_state.json`` capturing
@@ -3843,16 +4109,20 @@ class MainWindow(QMainWindow):
         first entry in the panel's *History* group (the newest
         save), so it can be restored from the dropdown without a
         re-run.
+
+        Returns:
+            The new run directory, or None when there was nothing
+            current to save.
         """
         if self._results is None:
             self._status("Nothing to save yet: the model has not run.")
-            return
+            return None
         if not self._results_are_up_to_date():
             self._status(
                 "The model is still catching up; let the current run "
                 "finish before saving."
             )
-            return
+            return None
 
         # The run saver needs the model that produced the results
         # (for the saved parameter table and the run metadata); it
@@ -3922,6 +4192,7 @@ class MainWindow(QMainWindow):
             f"Saved run to {run_dir}; {len(figure_paths)} figure "
             f"page(s) saved to {run_dir / 'figures'}."
         )
+        return run_dir
 
     # ==== Refresh ==== #
     def _refresh_from_results(self) -> None:
@@ -3931,7 +4202,7 @@ class MainWindow(QMainWindow):
 
         Every figure honors the current plot selection — the river
         species, the zones, the mineral, the streamflow toggle, and
-        the water-year window — so a selection change refreshes
+        the date window — so a selection change refreshes
         them without a re-run.  A hydrology-only run's results
         carry no reactive-transport simulation, so the three
         hydrology figures (hydrology, storage, partitioning) are
@@ -3953,12 +4224,10 @@ class MainWindow(QMainWindow):
         rt: pt.RtModelResults | None = self._results.rt
         selection: PlotSelection = self._param_panel.selection()
 
-        # Every figure is clipped to the panel's water-year window,
-        # so a range past the record's last day (the partial 2025
-        # water year) still plots only the days the record carries.
-        window: tuple[pd.Timestamp, pd.Timestamp] = water_year_window(
-            selection.water_years_from, selection.water_years_to
-        )
+        # Every figure is clipped to the panel's date window, so a
+        # range past the record's last day (the partial 2025 water
+        # year) still plots only the days the record carries.
+        window: tuple[pd.Timestamp, pd.Timestamp] = selection.plot_window()
 
         # The previous run selected in the *History* group (or None
         # when the overlay is off or no run is selected), drawn
