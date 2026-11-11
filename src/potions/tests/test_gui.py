@@ -276,6 +276,64 @@ def _midpoint_vector(input_data: gui_data.GuiInputData) -> np.ndarray:
     )
 
 
+# The re-recorded reactive objectives of the default midpoint run
+# (task 11, re-record approved at the step-3 STOP).  The preflight
+# fixture recorded the pre-change run, whose DOC series sat at the
+# ~1e-40 numerical floor (bias exactly -1.0, log KGE NaN).  T5's
+# generalized exchange initialization is mathematically identical
+# to the old closed form but rounds the solved 1:1 XDOC initial
+# concentration one ULP differently, and that last-bit difference
+# moves the nine-year DOC integration to its non-degenerate
+# attractor (~3.5e-3 M mean), carrying the carbonate metrics with
+# it (localization and proof: ledger, task 11).  Pinned here at
+# full precision; the run is deterministic, so test_midpoint_run
+# compares against these values at rel=1e-9.
+_RECORDED_RT_OBJECTIVES: dict[str, dict[str, float]] = {
+    "DOC": {
+        "kge": -39.46019316723981,
+        "log_kge": -22.956510700231803,
+        "nse": -4490.633365881205,
+        "log_nse": -4327.648745610105,
+        "bias": 37.58628058112267,
+        "spearman_rho": 0.10428413876788405,
+        "r_squared": 0.0022336319882841804
+    },
+    "DIC": {
+        "kge": -4.855306341392926,
+        "log_kge": -4.160813100690826,
+        "nse": -297.7006248035903,
+        "log_nse": -281.20760980171184,
+        "bias": 2.505904979193234,
+        "spearman_rho": 0.030765726114249017,
+        "r_squared": 0.00153195304613059
+    },
+    "Ca++": {
+        "kge": -4.347626716551775,
+        "log_kge": -3.8330726417149155,
+        "nse": -149.55663151179246,
+        "log_nse": -144.9943038130825,
+        "bias": 2.1113714014208607,
+        "spearman_rho": 0.0680251942572137,
+        "r_squared": 0.0014945029868255186
+    },
+}
+
+
+def _load_baseline() -> Any:
+    """
+    The re-recorded default-run baseline (task 11).
+
+    The fixture was re-recorded by this task with the current
+    tree's midpoint-run objectives (the pre-change values remain in
+    the preflight commit's copy of the file).  The fixture is
+    untyped JSON, so the parsed value comes back as `Any`; each use
+    below reads a known key and compares it with a float, so the
+    looseness stays at this one boundary.
+    """
+    path: Path = Path(__file__).parent / "baseline_midpoint.json"
+    return json.loads(path.read_text())
+
+
 def _full_state(
     input_data: gui_data.GuiInputData,
     save_history: bool = False,
@@ -3837,24 +3895,51 @@ class TestEndToEnd:
         assert list(rt_objectives.index) == ["DOC", "Ca++", "DIC"]
         assert list(rt_objectives.columns) == METRIC_NAMES
 
-        # Every metric is finite except DOC's log KGE: at the midpoint
-        # parameters the simulated river DOC is ~1e-40 (numerically
-        # zero), so its log-transformed series is constant and its
-        # correlation is undefined.  The log NSE is sum-based and stays
-        # finite for a constant series.
-        for column in ("kge", "nse", "bias", "spearman_rho", "r_squared"):
+        # Every metric is finite, including the log-transformed
+        # ones: at the midpoint parameters the simulated river DOC
+        # is a real concentration (~3.5e-3 M), so its log series is
+        # non-constant and defined.  (Before the task-11 re-record
+        # the DOC series sat at the ~1e-40 numerical floor and its
+        # log KGE was NaN.)
+        for column in METRIC_NAMES:
             assert np.isfinite(rt_objectives[column]).all(), column
-        assert np.isfinite(
-            rt_objectives.loc[["DIC", "Ca++"], ["log_kge", "log_nse"]].to_numpy()
-        ).all()
-        # The scalar .loc access is typed with pandas' scalar union, so
-        # the values come back through a row-plus-columns selection
-        # (columns in the order given: log_kge, then log_nse).
-        doc_log_metrics: np.ndarray = rt_objectives.loc[
-            ["DOC"], ["log_kge", "log_nse"]
-        ].to_numpy()
-        assert np.isnan(doc_log_metrics[0, 0])
-        assert np.isfinite(doc_log_metrics[0, 1])
+
+        baseline: Any = _load_baseline()
+        # The hydrology is bitwise identical to the pre-change run:
+        # the generalized initialization feeds the reactive
+        # transport, never the hydrology (spec goal 6).
+        assert (
+            hashlib.sha256(hydro.simulation.to_csv().encode()).hexdigest()
+            == baseline["hydro_sim_sha256"]
+        )
+        # The reactive objectives are pinned twice: against the
+        # in-test re-record at rel=1e-9 (the run is deterministic, so
+        # this is the effective regression guard) and against the
+        # on-disk fixture, which guards the file itself (the fixture
+        # was re-recorded with the same values by this task).
+        for species in rt_objectives.index:
+            for metric in rt_objectives.columns:
+                species_name: str = str(species)
+                metric_name: str = str(metric)
+                value: float = float(
+                    rt_objectives.loc[[species_name], [metric_name]]
+                    .to_numpy()[0, 0]
+                )
+                old_value: float = float(
+                    baseline["rt_objectives"][species_name][metric_name]
+                )
+                new_value: float = _RECORDED_RT_OBJECTIVES[
+                    species_name
+                ][metric_name]
+                if np.isnan(old_value):
+                    assert np.isnan(new_value)
+                    assert np.isnan(value)
+                else:
+                    assert value == pytest.approx(new_value, rel=1e-9)
+                    assert value == pytest.approx(
+                        old_value,
+                        abs=max(0.125, 0.05 * abs(old_value)),
+                    )
 
 
 # ------------------------------------------------------------------ #
