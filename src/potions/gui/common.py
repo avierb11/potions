@@ -393,10 +393,13 @@ def set_species_colors(measured: Sequence[str]) -> None:
 
     The maps are the ``RIVER_SPECIES_SIM_COLORS`` and
     ``RIVER_SPECIES_MEAS_COLORS`` dicts the figures read; they are
-    cleared and refilled from `build_species_colors`.
+    cleared and refilled from `build_species_colors`.  An empty
+    sequence clears them, and a caller that plots species must pass
+    the species the figures plot (the run's network's measured
+    species), not a subset a record happens to carry.
 
     Args:
-        measured: The measured species of the run, in plot order.
+        measured: The species the figures plot, in plot order.
     """
     sim, meas = build_species_colors(measured)
     RIVER_SPECIES_SIM_COLORS.clear()

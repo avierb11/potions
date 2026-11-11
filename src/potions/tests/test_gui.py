@@ -4060,6 +4060,184 @@ class TestObjectiveVector:
         assert np.isfinite(values[:last_metric]).all()
 
 
+def _forcing_only_input_data(tmp_path: Path) -> gui_data.GuiInputData:
+    """
+    A forcing-only record, loaded through the public API.
+
+    The record carries the three forcing columns (precipitation,
+    temperature, potential evapotranspiration) and a daily index, and
+    nothing else: no streamflow column and no concentration columns.
+    `load_input_data` therefore yields ``q_meas=None`` and an empty
+    ``conc_df``, and every figure the panel builds from it must
+    degrade gracefully.
+    """
+    index: pd.DatetimeIndex = pd.date_range("2019-01-01", periods=10)
+    frame: pd.DataFrame = pd.DataFrame(
+        {
+            "date": index.strftime("%Y-%m-%d"),
+            "precip": np.ones(len(index)),
+            "temp": np.full(len(index), 5.0),
+            "pet": np.full(len(index), 2.0),
+        }
+    )
+    path: Path = tmp_path / "forcing_only.csv"
+    frame.to_csv(path, index=False)
+    return gui_data.load_input_data(path)
+
+
+class TestNoneSafeFigures:
+    """The figure builders degrade gracefully when the record
+    carries no measured series: the measured artists and legend
+    entries are omitted, and the remaining panels, axes, series, and
+    rows are complete.
+
+    A record without a streamflow or concentration column loads with
+    ``q_meas=None`` and an empty ``conc_df`` (Task 4), and every
+    figure the panel builds from it must render.
+    """
+
+    SPECIES: tuple[str, ...] = ("DOC", "DIC", "Ca++")
+
+    def test_hydrology_forcing_only(self, tmp_path: Path) -> None:
+        """A forcing-only run's hydrology figure keeps its axis, the
+        simulated line, and the (sim) legend entry, and omits the
+        measured scatter and its legend entry."""
+        input_data: gui_data.GuiInputData = _forcing_only_input_data(tmp_path)
+        assert input_data.q_meas is None
+        fig: Figure = gui_plots.make_hydrology_figure(
+            _synthetic_hydro_sim(input_data.forc.precip.index),
+            None,
+            input_data.window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Streamflow"
+        assert ax.get_ylabel() == "Discharge (mm/d)"
+        assert len(_scatters(ax)) == 0
+        assert len(fig.legends) == 1
+        legend: Legend = fig.legends[0]
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Streamflow (sim)"
+        ]
+
+    def test_partitioning_forcing_only(self, tmp_path: Path) -> None:
+        """A forcing-only run's partitioning figure keeps the zone
+        stack and its legend row, and omits the measured-discharge
+        scatter and its legend row."""
+        input_data: gui_data.GuiInputData = _forcing_only_input_data(tmp_path)
+        assert input_data.q_meas is None
+        fig: Figure = gui_plots.make_partitioning_figure(
+            _synthetic_hydro_sim(input_data.forc.precip.index),
+            None,
+            input_data.window,
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert ax.get_title() == "Partitioning"
+        assert len(_fills(ax)) > 0
+        assert len(_scatters(ax)) == 0
+        assert len(fig.legends) == 1
+        zone_row: Legend = fig.legends[0]
+        assert zone_row.get_title().get_text() == "Zone"
+
+    def test_conc_discharge_forcing_only(self, tmp_path: Path) -> None:
+        """A forcing-only run's concentration-discharge figure keeps
+        every panel with its simulated cloud only, and the measured
+        legend row is gone."""
+        input_data: gui_data.GuiInputData = _forcing_only_input_data(tmp_path)
+        assert input_data.q_meas is None
+        assert input_data.conc_df.empty
+        index: pd.Index = input_data.forc.precip.index
+        fig: Figure = gui_plots.make_conc_discharge_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            None,
+            input_data.conc_df,
+            list(self.SPECIES),
+            input_data.window,
+        )
+        assert len(fig.axes) == 3
+        for ax, species in zip(fig.axes, self.SPECIES):
+            assert isinstance(ax, Axes)
+            assert ax.get_title() == species
+            # One cloud only: the simulated points.
+            assert len(_scatters(ax)) == 1
+        assert len(fig.legends) == 1
+        sim_row: Legend = fig.legends[0]
+        assert sim_row.get_title().get_text() == "Simulated"
+        assert [text.get_text() for text in sim_row.get_texts()] == list(
+            self.SPECIES
+        )
+
+    def test_river_concentrations_forcing_only(self, tmp_path: Path) -> None:
+        """A forcing-only run's twin-axis figure, with the streamflow
+        axis on, keeps both axes and every simulated series, and
+        omits every measured scatter and its legend entry."""
+        input_data: gui_data.GuiInputData = _forcing_only_input_data(tmp_path)
+        assert input_data.q_meas is None
+        index: pd.Index = input_data.forc.precip.index
+        fig: Figure = gui_plots.make_river_concentrations_figure(
+            _synthetic_rt_sim(index, list(input_data.network.mineral_names)),
+            _synthetic_hydro_sim(index),
+            None,
+            input_data.conc_df,
+            list(self.SPECIES),
+            True,
+            input_data.window,
+        )
+        assert len(fig.axes) == 2
+        left_ax: Axes = fig.axes[0]
+        right_ax: Axes = fig.axes[1]
+        assert left_ax.get_title() == "Streamflow"
+        # The species title sits on the right so it does not overlap
+        # the streamflow title on the left.
+        assert right_ax.get_title("right") == "River concentrations"
+        assert len(_scatters(left_ax)) == 0
+        assert len(_scatters(right_ax)) == 0
+        assert len(fig.legends) == 1
+        legend: Legend = fig.legends[0]
+        texts: list[str] = [text.get_text() for text in legend.get_texts()]
+        assert "Streamflow (sim)" in texts
+        assert "Streamflow (meas)" not in texts
+        assert texts.count("DOC (sim)") == 1
+        assert "DOC (meas)" not in texts
+
+    def test_conc_discharge_partial_measurement(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A record that measures only some of the selected species
+        plots the measured cloud for the species it measures, and
+        names exactly those in the measured row."""
+        index: pd.Index = input_data.forc.precip.index
+        window = water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+        conc: pd.DataFrame = input_data.conc_df.drop(columns=["Ca++"])
+        fig: Figure = gui_plots.make_conc_discharge_figure(
+            _synthetic_rt_sim(
+                index, list(input_data.network.mineral_names)
+            ),
+            _synthetic_hydro_sim(index),
+            input_data.q_meas,
+            conc,
+            list(self.SPECIES),
+            window,
+        )
+        assert len(fig.axes) == 3
+        doc_ax, dic_ax, ca_ax = fig.axes
+        # The measured species carry both clouds; the unmeasured
+        # species keeps its simulated cloud only.
+        assert len(_scatters(doc_ax)) == 2
+        assert len(_scatters(dic_ax)) == 2
+        assert len(_scatters(ca_ax)) == 1
+        sim_row, meas_row = fig.legends
+        assert [text.get_text() for text in sim_row.get_texts()] == list(
+            self.SPECIES
+        )
+        assert [text.get_text() for text in meas_row.get_texts()] == [
+            "DOC",
+            "DIC",
+        ]
+
+
 class TestGradientMatrix:
     """``gradient_matrix``: the central-difference entries."""
 

@@ -401,7 +401,7 @@ def relayout_below_axes_legends(fig: Figure) -> None:
 
 def make_hydrology_figure(
     hydro_sim: pd.DataFrame,
-    q_meas: pd.Series,
+    q_meas: pd.Series | None,
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_hydro_sim: pd.DataFrame | None = None,
 ) -> Figure:
@@ -417,6 +417,10 @@ def make_hydrology_figure(
     day (the partial 2025 water year) still plots only the days the
     record carries.
 
+    When the record carries no measured streamflow, the scatter and
+    its legend entry are omitted: the figure keeps its axis, the
+    simulated line, and the (sim) entry only.
+
     A previous run's results, when the overlay frame is given, are
     drawn first and faintly (half transparent, unlabeled), so the
     current run's streamflow stays on top.
@@ -430,7 +434,8 @@ def make_hydrology_figure(
             simulated river discharge (``streamflow_sim``).
         q_meas: The measured river discharge over the full record, in
             millimeters per day (catchment-mean depth); NaN values
-            do not plot.
+            do not plot; None when the record carries no streamflow
+            column.
         window: The plotting window, as
             `potions.gui.common.water_year_window` returns it.
         overlay_hydro_sim: The previous run's hydrology simulation,
@@ -440,7 +445,9 @@ def make_hydrology_figure(
         The completed figure.
     """
     hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
-    q_meas_plot: pd.Series = _clip_series(q_meas, window).dropna()
+    q_meas_plot: pd.Series | None = (
+        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+    )
     overlay_hydro_plot: pd.DataFrame | None = (
         _clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
@@ -467,12 +474,15 @@ def make_hydrology_figure(
         color=SIM_Q_COLOR,
         linewidth=1,
     )
-    ax.scatter(
-        q_meas_plot.index,
-        q_meas_plot,
-        s=5,
-        color=MEAS_Q_COLOR,
-    )
+    # The measured streamflow: scatter points, never a line — and
+    # absent entirely when the record carries none.
+    if q_meas_plot is not None:
+        ax.scatter(
+            q_meas_plot.index,
+            q_meas_plot,
+            s=5,
+            color=MEAS_Q_COLOR,
+        )
 
     ax.set_title("Streamflow")
     ax.set_ylabel("Discharge (mm/d)")
@@ -483,10 +493,14 @@ def make_hydrology_figure(
     ax.set_ylim(0, 2 * ax.get_ylim()[1])
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
-    legend: Legend = _attach_legend(
-        fig,
-        [
-            Line2D([], [], color=SIM_Q_COLOR, linewidth=2),
+    # The legend entries follow the drawn series: the measured
+    # entry exists only when the record measures streamflow.
+    legend_handles: list[Line2D] = [
+        Line2D([], [], color=SIM_Q_COLOR, linewidth=2)
+    ]
+    legend_labels: list[str] = ["Streamflow (sim)"]
+    if q_meas_plot is not None:
+        legend_handles.append(
             Line2D(
                 [],
                 [],
@@ -494,10 +508,11 @@ def make_hydrology_figure(
                 color=MEAS_Q_COLOR,
                 linestyle="none",
                 markersize=3,
-            ),
-        ],
-        ["Streamflow (sim)", "Streamflow (meas)"],
-    )
+            )
+        )
+        legend_labels.append("Streamflow (meas)")
+
+    legend: Legend = _attach_legend(fig, legend_handles, legend_labels)
     fig.subplots_adjust(bottom=_legend_top_edge(fig, legend) + _axes_gap(fig))
 
     return fig
@@ -683,7 +698,7 @@ def _draw_river_stack(
 
 def make_partitioning_figure(
     hydro_sim: pd.DataFrame,
-    q_meas: pd.Series,
+    q_meas: pd.Series | None,
     window: tuple[pd.Timestamp, pd.Timestamp],
     overlay_hydro_sim: pd.DataFrame | None = None,
     zone_labels: dict[str, str] = ZONE_LABELS,
@@ -703,6 +718,10 @@ def make_partitioning_figure(
     day (the partial 2025 water year) still plots only the days the
     record carries.
 
+    When the record carries no measured streamflow, the scatter and
+    the measured-discharge legend row are omitted: the figure keeps
+    the zone stack and its row.
+
     The river zones are discovered from the ``prop_q_`` columns the
     hydrology simulation carries (the same scan the model's
     `river_zone_fractions` accessor uses), so the figure tracks
@@ -721,7 +740,8 @@ def make_partitioning_figure(
         hydro_sim: The hydrology simulation DataFrame.
         q_meas: The measured streamflow over the full record, in
             millimeters per day; missing (NaN) rows are dropped
-            before the scatter is drawn.
+            before the scatter is drawn; None when the record
+            carries no streamflow column.
         window: The plotting window, as
             `potions.gui.common.water_year_window` returns it.
         overlay_hydro_sim: The previous run's hydrology simulation,
@@ -738,7 +758,9 @@ def make_partitioning_figure(
         The completed figure.
     """
     hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
-    q_meas_plot: pd.Series = _clip_series(q_meas, window).dropna()
+    q_meas_plot: pd.Series | None = (
+        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+    )
     overlay_hydro_plot: pd.DataFrame | None = (
         _clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
@@ -763,13 +785,15 @@ def make_partitioning_figure(
 
     _draw_river_stack(ax, hydro_plot, zones, alpha=None, zone_colors=zone_colors)
 
-    # The measured streamflow: scatter points, never a line.
-    ax.scatter(
-        q_meas_plot.index,
-        q_meas_plot,
-        s=5,
-        color=MEAS_Q_COLOR,
-    )
+    # The measured streamflow: scatter points, never a line — and
+    # absent entirely when the record carries none.
+    if q_meas_plot is not None:
+        ax.scatter(
+            q_meas_plot.index,
+            q_meas_plot,
+            s=5,
+            color=MEAS_Q_COLOR,
+        )
 
     ax.set_title("Partitioning")
     ax.set_ylabel("Discharge (mm/d)")
@@ -792,25 +816,34 @@ def make_partitioning_figure(
             title="Zone",
             ncol=max(len(zones), 1),
         )
-    discharge_row: Legend = _attach_legend(
-        fig,
-        [
-            Line2D(
-                [],
-                [],
-                marker="o",
-                color=MEAS_Q_COLOR,
-                linestyle="none",
-                markersize=3,
-            )
-        ],
-        ["Discharge (meas)"],
-        title="Discharge",
-        above=zone_row,
+    # The measured-discharge row exists only when the record
+    # measures streamflow, stacked above the zone row when both
+    # are present.
+    discharge_row: Legend | None = None
+    if q_meas_plot is not None:
+        discharge_row = _attach_legend(
+            fig,
+            [
+                Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    color=MEAS_Q_COLOR,
+                    linestyle="none",
+                    markersize=3,
+                )
+            ],
+            ["Discharge (meas)"],
+            title="Discharge",
+            above=zone_row,
+        )
+    bottom_row: Legend | None = (
+        discharge_row if discharge_row is not None else zone_row
     )
-    fig.subplots_adjust(
-        bottom=_legend_top_edge(fig, discharge_row) + _axes_gap(fig)
-    )
+    if bottom_row is not None:
+        fig.subplots_adjust(
+            bottom=_legend_top_edge(fig, bottom_row) + _axes_gap(fig)
+        )
 
     return fig
 
@@ -936,7 +969,7 @@ def make_river_loads_figure(
 def make_conc_discharge_figure(
     rt_sim: pd.DataFrame,
     hydro_sim: pd.DataFrame,
-    q_meas: pd.Series,
+    q_meas: pd.Series | None,
     conc_df: pd.DataFrame,
     species: list[str],
     window: tuple[pd.Timestamp, pd.Timestamp],
@@ -955,6 +988,11 @@ def make_conc_discharge_figure(
     model produces next to the one the record shows.  The simulated
     points carry the lighter species shade and the observed points
     the darker one, as all other figures do.
+
+    A species the record does not measure keeps its panel and its
+    simulated cloud only, and a record that measures no streamflow
+    drops every observed cloud and the measured legend row: the
+    panels and the simulated row stay.
 
     Both axes are log-scaled, so only strictly positive pairs plot:
     a pair with a zero or negative discharge or concentration is
@@ -976,9 +1014,11 @@ def make_conc_discharge_figure(
         hydro_sim: The hydrology simulation DataFrame, for the
             simulated river discharge (``streamflow_sim``).
         q_meas: The measured river discharge over the full record, in
-            millimeters per day.
+            millimeters per day; None when the record carries no
+            streamflow column.
         conc_df: The measured river concentrations over the full
-            record, one column per species.
+            record, one column per species; zero columns when the
+            record carries no concentrations.
         species: The river species to plot, one panel each.
         window: The plotting window, as
             `potions.gui.common.water_year_window` returns it.
@@ -988,7 +1028,9 @@ def make_conc_discharge_figure(
     """
     rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
     hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
-    q_meas_plot: pd.Series = _clip_series(q_meas, window)
+    q_meas_plot: pd.Series | None = (
+        _clip_series(q_meas, window) if q_meas is not None else None
+    )
     conc_plot: pd.DataFrame = _clip_frame(conc_df, window)
 
     fig: Figure = Figure(figsize=(15, 5))
@@ -1018,16 +1060,19 @@ def make_conc_discharge_figure(
         )
 
         # The observed cloud: the record's discharge and
-        # concentrations, the observations' scatter as always.
-        meas_x: pd.Series = q_meas_plot
-        meas_y: pd.Series = conc_plot[species_name]
-        meas_mask: pd.Series = (meas_x > 0) & (meas_y > 0)
-        ax.scatter(
-            meas_x[meas_mask],
-            meas_y[meas_mask],
-            s=5,
-            color=RIVER_SPECIES_MEAS_COLORS[species_name],
-        )
+        # concentrations, the observations' scatter as always.  A
+        # species the record does not measure keeps its simulated
+        # cloud only.
+        if q_meas_plot is not None and species_name in conc_plot.columns:
+            meas_x: pd.Series = q_meas_plot
+            meas_y: pd.Series = conc_plot[species_name]
+            meas_mask: pd.Series = (meas_x > 0) & (meas_y > 0)
+            ax.scatter(
+                meas_x[meas_mask],
+                meas_y[meas_mask],
+                s=5,
+                color=RIVER_SPECIES_MEAS_COLORS[species_name],
+            )
 
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
@@ -1048,24 +1093,37 @@ def make_conc_discharge_figure(
         title="Simulated",
         ncol=max(len(species), 1),
     )
-    meas_row: Legend = _attach_legend(
-        fig,
-        [
-            Line2D(
-                [],
-                [],
-                marker="o",
-                color=RIVER_SPECIES_MEAS_COLORS[name],
-                linestyle="none",
-                markersize=3,
-            )
-            for name in species
-        ],
-        list(species),
-        title="Measured",
-        above=sim_row,
+    # The measured row names the species the record actually
+    # measures — the observed cloud exists only for those — and is
+    # dropped entirely when the record measures none.
+    measured_names: list[str] = (
+        [name for name in species if name in conc_plot.columns]
+        if q_meas is not None
+        else []
     )
-    fig.subplots_adjust(bottom=_legend_top_edge(fig, meas_row) + _axes_gap(fig))
+    meas_row: Legend | None = None
+    if measured_names:
+        meas_row = _attach_legend(
+            fig,
+            [
+                Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    color=RIVER_SPECIES_MEAS_COLORS[name],
+                    linestyle="none",
+                    markersize=3,
+                )
+                for name in measured_names
+            ],
+            measured_names,
+            title="Measured",
+            above=sim_row,
+        )
+    bottom_row: Legend = meas_row if meas_row is not None else sim_row
+    fig.subplots_adjust(
+        bottom=_legend_top_edge(fig, bottom_row) + _axes_gap(fig)
+    )
 
     return fig
 
@@ -1230,7 +1288,7 @@ def make_zone_concentrations_figure(
 def make_river_concentrations_figure(
     rt_sim: pd.DataFrame,
     hydro_sim: pd.DataFrame,
-    q_meas: pd.Series,
+    q_meas: pd.Series | None,
     conc_df: pd.DataFrame,
     species: list[str],
     streamflow: bool,
@@ -1253,6 +1311,10 @@ def make_river_concentrations_figure(
     species family, with the simulated lines in the lighter shade
     and the measured points in the darker one
     (`potions.gui.common`).
+
+    A measured series the record does not carry — the streamflow
+    scatter, a species' measured scatter, their legend entries — is
+    omitted: the axes and the simulated series stay.
 
     With the streamflow off, the species axis owns the panel alone
     (centered title), and a selection that carries neither family
@@ -1277,10 +1339,12 @@ def make_river_concentrations_figure(
             simulated river discharge (``streamflow_sim``); used
             only when `streamflow` is on.
         q_meas: The measured river discharge over the full record, in
-            millimeters per day; NaN values do not plot; used only
+            millimeters per day; NaN values do not plot; None when
+            the record carries no streamflow column; used only
             when `streamflow` is on.
         conc_df: The measured river concentrations (DOC, DIC, and
-            calcium) over the full record, in moles per liter.
+            calcium) over the full record, in moles per liter;
+            empty when the record carries no concentrations.
         species: The river species to plot; a species whose
             ``{species}_riv`` column the simulation does not carry
             is skipped.
@@ -1301,7 +1365,9 @@ def make_river_concentrations_figure(
 
     rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
     hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
-    q_meas_plot: pd.Series = _clip_series(q_meas, window).dropna()
+    q_meas_plot: pd.Series | None = (
+        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+    )
     conc_plot: pd.DataFrame = _clip_frame(conc_df, window)
     overlay_rt_plot: pd.DataFrame | None = (
         _clip_frame(overlay_rt_sim, window)
@@ -1344,13 +1410,16 @@ def make_river_concentrations_figure(
             label="Streamflow (sim)",
             linewidth=1,
         )
-        left_ax.scatter(
-            q_meas_plot.index,
-            q_meas_plot,
-            s=5,
-            color=MEAS_Q_COLOR,
-            label="Streamflow (meas)",
-        )
+        # The measured streamflow: scatter points, never a line —
+        # and absent entirely when the record carries none.
+        if q_meas_plot is not None:
+            left_ax.scatter(
+                q_meas_plot.index,
+                q_meas_plot,
+                s=5,
+                color=MEAS_Q_COLOR,
+                label="Streamflow (meas)",
+            )
         left_ax.set_ylim(0, 2 * float(left_ax.get_ylim()[1]))
         left_ax.invert_yaxis()
         left_ax.set_title("Streamflow")
@@ -1359,9 +1428,10 @@ def make_river_concentrations_figure(
             _day_number(window[0]), _day_number(hydro_plot.index.max())
         )
 
-        handles.extend(
-            [
-                Line2D([], [], color=SIM_Q_COLOR, linewidth=2),
+        handles.append(Line2D([], [], color=SIM_Q_COLOR, linewidth=2))
+        labels.append("Streamflow (sim)")
+        if q_meas_plot is not None:
+            handles.append(
                 Line2D(
                     [],
                     [],
@@ -1369,10 +1439,9 @@ def make_river_concentrations_figure(
                     color=MEAS_Q_COLOR,
                     linestyle="none",
                     markersize=3,
-                ),
-            ]
-        )
-        labels.extend(["Streamflow (sim)", "Streamflow (meas)"])
+                )
+            )
+            labels.append("Streamflow (meas)")
 
     species_ax: Axes = left_ax.twinx() if left_ax is not None else fig.gca()
 
@@ -1404,7 +1473,8 @@ def make_river_concentrations_figure(
             label=f"{name} (sim)",
             linewidth=1,
         )
-        if name in conc_plot.columns:
+        has_measured: bool = name in conc_plot.columns
+        if has_measured:
             measured: pd.Series = conc_plot[name].dropna()
             species_ax.scatter(
                 measured.index,
@@ -1413,14 +1483,19 @@ def make_river_concentrations_figure(
                 color=RIVER_SPECIES_MEAS_COLORS[name],
                 label=f"{name} (meas)",
             )
-        handles.extend(
-            [
-                Line2D(
-                    [],
-                    [],
-                    color=RIVER_SPECIES_SIM_COLORS[name],
-                    linewidth=2,
-                ),
+        # The legend entries follow the drawn series: the measured
+        # entry exists only when the record measures the species.
+        species_handles: list[Line2D] = [
+            Line2D(
+                [],
+                [],
+                color=RIVER_SPECIES_SIM_COLORS[name],
+                linewidth=2,
+            )
+        ]
+        species_labels: list[str] = [f"{name} (sim)"]
+        if has_measured:
+            species_handles.append(
                 Line2D(
                     [],
                     [],
@@ -1428,10 +1503,11 @@ def make_river_concentrations_figure(
                     color=RIVER_SPECIES_MEAS_COLORS[name],
                     linestyle="none",
                     markersize=3,
-                ),
-            ]
-        )
-        labels.extend([f"{name} (sim)", f"{name} (meas)"])
+                )
+            )
+            species_labels.append(f"{name} (meas)")
+        handles.extend(species_handles)
+        labels.extend(species_labels)
 
     species_ax.set_ylim(0, 1.5 * float(species_ax.get_ylim()[1]))
     if left_ax is not None:

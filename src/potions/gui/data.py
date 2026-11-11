@@ -929,7 +929,11 @@ def load_input_data(
         df["q_meas"] if "q_meas" in df.columns else None
     )
     conc_df: pd.DataFrame = df[measured]
-    set_species_colors(measured)
+    # The palette is keyed by the species the figures plot — the
+    # network's measured species, a superset of the record's columns —
+    # so a record that measures fewer species (or none) still colors
+    # every series a figure can draw.
+    set_species_colors(network_measured_species(network))
 
     return GuiInputData(
         spec=spec,
@@ -1392,10 +1396,12 @@ def network_measured_species(network: pt.ReactionNetwork) -> list[str]:
     """
     The measured species the figures can show for a network.
 
-    The network's primary and secondary species that have a measured
-    column in the East River record, in the network's species order,
-    followed by ``"DIC"`` when the record's DIC column is a derived
-    species of the network (its carbonate trio is carried).
+    The network's primary and secondary species that are in
+    ``RIVER_SPECIES``, in the network's species order, followed by
+    ``"DIC"`` when the network carries its carbonate trio (DIC is a
+    derived species of the network, not an independent one).  This is
+    the figures' species set, and the palette's: the session color
+    maps are refilled from these on every load.
 
     Args:
         network: The run's reaction network.
