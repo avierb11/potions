@@ -318,7 +318,7 @@ class TestLoadInputData:
         assert q.index[q.notna()][0] == pd.Timestamp(2014, 10, 1)
 
         conc: pd.DataFrame = input_data.conc_df
-        assert list(conc.columns) == ["DOC", "DIC", "Ca++"]
+        assert list(conc.columns) == ["DOC", "Ca++", "DIC"]
         assert conc.shape == (3287, 3)
         assert conc.isna().sum().sum() == 6342
 
@@ -3703,7 +3703,7 @@ class TestEndToEnd:
         rt_objectives: pd.DataFrame | None = rt.objective_functions
         assert rt_objectives is not None
         assert rt_objectives.shape == (3, 7)
-        assert list(rt_objectives.index) == ["DOC", "DIC", "Ca++"]
+        assert list(rt_objectives.index) == ["DOC", "Ca++", "DIC"]
         assert list(rt_objectives.columns) == METRIC_NAMES
 
         # Every metric is finite except DOC's log KGE: at the midpoint
@@ -4780,3 +4780,80 @@ class TestNetworkFile:
         assert isinstance(issue.message, str)
         assert "W1" in repr(issue)
         assert issue.message in repr(issue)
+
+
+# ------------------------------------------------------------------ #
+# Network-driven data binding (measured columns, spin-up, primary
+# initialization)
+# ------------------------------------------------------------------ #
+
+
+class TestNetworkDataBinding:
+    """The GUI data binding derives the measured series and the
+    primary-species initialization from the run's network."""
+
+    def test_measured_columns_default(self) -> None:
+        """The default network's measured columns: its aqueous species
+        present in the frame, in species order, then DIC."""
+        df: pd.DataFrame = pd.DataFrame(
+            {"DOC": [1.0], "Ca++": [2.0], "DIC": [3.0]}
+        )
+        assert (
+            gui_data._measured_columns(get_soc_calcite_network(), df)
+            == ["DOC", "Ca++", "DIC"]
+        )
+
+    def test_measured_columns_dic_requires_trio(self) -> None:
+        """DIC is appended only when the network carries the whole
+        carbonate trio: the chloride network leaves it out."""
+        df: pd.DataFrame = pd.DataFrame({"Cl-": [1.0], "DIC": [2.0]})
+        assert gui_data._measured_columns(get_chloride_network(), df) == ["Cl-"]
+
+    def test_spinup_nans_only_measured(self) -> None:
+        """The spin-up NaNs ``q_meas`` and the measured columns only;
+        other columns keep their copied values."""
+        n_days: int = gui_data.NUM_SPINUP_DAYS + 1
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "q_meas": np.arange(n_days, dtype=float),
+                "DOC": np.full(n_days, 2.0),
+                "X": np.full(n_days, 3.0),
+            },
+            index=pd.date_range("2016-10-01", periods=n_days, freq="D"),
+        )
+        result: pd.DataFrame = gui_data._with_spinup(df, ["DOC"])
+        spinup_rows: pd.DataFrame = result.iloc[: gui_data.NUM_SPINUP_DAYS]
+        assert spinup_rows["q_meas"].isna().all()
+        assert spinup_rows["DOC"].isna().all()
+        assert spinup_rows["X"].notna().all()
+        assert result.iloc[gui_data.NUM_SPINUP_DAYS :].equals(df)
+
+    def test_primary_initial_concentrations(self) -> None:
+        """A primary species with a measured column starts at that
+        column's mean; the others take the scalar fallback."""
+        conc_df: pd.DataFrame = pd.DataFrame(
+            {"DOC": [1.0, 3.0], "Ca++": [0.5, 1.5]}
+        )
+        inits: dict[str, float] = gui_data._primary_initial_concentrations(
+            get_soc_calcite_network(), conc_df, 1e-3
+        )
+        assert inits["DOC"] == 2.0
+        assert inits["Ca++"] == 1.0
+        assert inits["HCO3-"] == 1e-3
+        assert inits["H+"] == 1e-3
+        assert set(inits) == set(get_soc_calcite_network().primary_names)
+
+    def test_load_input_data_network_param(self) -> None:
+        """`load_input_data` binds the given network's measured
+        columns; the default call keeps the default network."""
+        carbon: pt.ReactionNetwork = get_carbon_network()
+        result: gui_data.GuiInputData = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH, network=carbon
+        )
+        assert list(result.network.species_names) == list(carbon.species_names)
+        assert list(result.conc_df.columns) == ["DOC", "DIC"]
+
+        default: gui_data.GuiInputData = gui_data.load_input_data(
+            gui_data.DEFAULT_CSV_PATH
+        )
+        assert list(default.conc_df.columns) == ["DOC", "Ca++", "DIC"]

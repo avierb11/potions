@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 import potions as pt
 from potions.calibration import build_rt_bounds
-from potions.gui.common import RIVER_SPECIES, WATER_YEARS
+from potions.gui.common import RIVER_SPECIES, WATER_YEARS, water_year_window
 from potions.gui.model_specs import (
     DEFAULT_MODEL_KEY,
     DEFAULT_MODEL_SPEC,
@@ -75,6 +75,19 @@ NUM_SPINUP_DAYS: Final[int] = 2 * 365
 # so a single reference value is enough; it is absorbed into the
 # per-zone k_a parameter.
 MINERAL_CONCENTRATION: Final[float] = 1.0
+
+# The aqueous carbonate species that sum to DIC: the measured DIC
+# column is derived from them, so it is appended to a network's
+# measured columns only when the network carries all three.
+CARBONATE_TRIO: Final[tuple[str, ...]] = ("CO2(aq)", "CO3--", "HCO3-")
+
+# The default plotting window: the first and last day of the site
+# record's water years, as ISO dates.
+_DEFAULT_WINDOW: Final[tuple[pd.Timestamp, pd.Timestamp]] = (
+    water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
+)
+DEFAULT_WINDOW_START: Final[str] = _DEFAULT_WINDOW[0].strftime("%Y-%m-%d")
+DEFAULT_WINDOW_END: Final[str] = _DEFAULT_WINDOW[1].strftime("%Y-%m-%d")
 # =================== #
 
 
@@ -88,8 +101,8 @@ class PlotSelection:
     zone-concentration figures, and the zone set by the storage and
     zone-concentration figures; the remaining fields select the
     river-concentration figure's streamflow axis, the
-    reaction-rate figure's mineral, and the water-year window every
-    figure is clipped to.
+    reaction-rate figure's mineral, and the date window every figure
+    is clipped to.
 
     Attributes:
         species: The river species to plot in the river- and
@@ -99,17 +112,37 @@ class PlotSelection:
         mineral: The mineral to plot in the reaction-rate figure.
         streamflow: Whether the river-concentration figure's inverted
             streamflow axis is on.
-        water_years_from: The first water year of the plotting window,
-            in `potions.gui.common.WATER_YEARS`.
-        water_years_to: The last water year of the plotting window.
+        window_start: The plotting window's first day, as an ISO
+            date (``YYYY-MM-DD``).
+        window_end: The plotting window's last day, as an ISO date.
     """
 
     species: list[str]
     zones: list[str]
     mineral: str
     streamflow: bool = True
-    water_years_from: int = WATER_YEARS[0]
-    water_years_to: int = WATER_YEARS[-1]
+    window_start: str = DEFAULT_WINDOW_START
+    window_end: str = DEFAULT_WINDOW_END
+
+    def plot_window(self) -> tuple[pd.Timestamp, pd.Timestamp]:
+        """
+        The plotting window as timestamps.
+
+        Returns:
+            The window's start and end timestamps.
+
+        Raises:
+            ValueError: Raised when the dates are malformed or the
+                window starts after it ends.
+        """
+        start: pd.Timestamp = pd.Timestamp(self.window_start)
+        end: pd.Timestamp = pd.Timestamp(self.window_end)
+        if start > end:
+            raise ValueError(
+                f"Plot window start {self.window_start!r} is after its "
+                f"end {self.window_end!r}."
+            )
+        return (start, end)
 
 
 @dataclass(frozen=True)
@@ -121,7 +154,7 @@ class GuiInputData:
 
     Attributes:
         spec: The selected model's spec.
-        network: The SOC / DOC / calcite reaction network of the run.
+        network: The run's reaction network.
         bounds: The flat parameter bounds, in the order of the run's
             parameter array: the hydro parameters, the per-zone
             reactive-transport parameters, and the trailing
@@ -135,9 +168,10 @@ class GuiInputData:
         q_meas: The measured streamflow over the full record, in
             millimeters per day (catchment-mean depth); NaN during
             the spin-up.
-        conc_df: The measured river concentrations (DOC, DIC, Ca++)
-            over the full record, in moles per liter; NaN during the
-            spin-up and on days without a sample.
+        conc_df: The measured river concentrations — the network's
+            measured columns, in species order with the derived DIC
+            last — over the full record, in moles per liter; NaN
+            during the spin-up and on days without a sample.
     """
 
     spec: ModelSpec
@@ -311,18 +345,54 @@ def _load_csv(csv_path: Path) -> pd.DataFrame:
     return df.loc[df[forc_cols].notna().all(axis=1)].sort_index()
 
 
-def _with_spinup(df: pd.DataFrame) -> pd.DataFrame:
+def _measured_columns(
+    network: pt.ReactionNetwork, df: pd.DataFrame
+) -> list[str]:
+    """
+    The measured columns a network reads from the East River CSV.
+
+    The network's primary and secondary species that have a column in
+    the frame, in the network's species order, followed by ``"DIC"``
+    when the network carries the whole carbonate trio and the frame
+    has the column (DIC is derived, as today, from the trio).
+
+    Args:
+        network: The run's reaction network.
+        df: The CSV frame as loaded (before the spin-up NaN-ing).
+
+    Returns:
+        The column names, e.g. ``["DOC", "Ca++", "DIC"]`` for the
+        default network.
+    """
+    carried: set[str] = set(network.species_names)
+    aqueous: set[str] = set(network.primary_names) | set(network.secondary_names)
+    columns: list[str] = [
+        name
+        for name in network.species_order
+        if name in aqueous and name in df.columns
+    ]
+    if set(CARBONATE_TRIO) <= carried and "DIC" in df.columns:
+        columns.append("DIC")
+    return columns
+
+
+def _with_spinup(
+    df: pd.DataFrame, measured_columns: list[str]
+) -> pd.DataFrame:
     """
     Prepend the two-year spin-up to the record.
 
     The first `NUM_SPINUP_DAYS` rows of the record are copied, their
     index shifted back by the same number of days, and their measured
-    values (streamflow and river concentrations) set to NaN, so the
-    model integrates a spin-up period before the first day of the
-    record and the measured series are sparse over it.
+    values (``q_meas`` and the run's measured concentration columns)
+    set to NaN, so the model integrates a spin-up period before the
+    first day of the record and the measured series are sparse over
+    it.
 
     Args:
         df: The record indexed by daily dates, sorted ascending.
+        measured_columns: The run's measured concentration columns
+            (from `_measured_columns`).
 
     Returns:
         The spin-up-inclusive record (the shifted copy of the first
@@ -332,27 +402,36 @@ def _with_spinup(df: pd.DataFrame) -> pd.DataFrame:
     spinup.index = pd.DatetimeIndex(spinup.index) - pd.Timedelta(
         days=NUM_SPINUP_DAYS
     )
-    for species in ("q_meas", "DOC", "DIC", "Ca++"):
-        spinup[species] = np.nan
+    for column in ("q_meas",) + tuple(measured_columns):
+        if column in spinup.columns:
+            spinup[column] = np.nan
     return pd.concat([spinup, df])
 
 
 def load_input_data(
     csv_path: Path = DEFAULT_CSV_PATH,
     model_key: str = DEFAULT_MODEL_KEY,
+    network: pt.ReactionNetwork | None = None,
 ) -> GuiInputData:
     """
     Load and assemble the GUI inputs from the East River series CSV.
 
-    Builds the reaction network and the selected model's bounds, reads
-    the CSV, prepends the two-year spin-up, and creates the forcing,
-    the precipitation concentrations, and the measured series.
+    Builds the selected model's bounds, reads the CSV, prepends the
+    two-year spin-up, and creates the forcing, the precipitation
+    concentrations, and the measured series.  The measured series
+    follows the run's network: its primary and secondary species with
+    a column in the record, in species order, followed by the derived
+    DIC column when the network carries the whole carbonate trio (the
+    default network yields ["DOC", "Ca++", "DIC"] — species order,
+    DIC last).
 
     Args:
         csv_path: Path to the East River series CSV; defaults to the
             record shipped with the package.
         model_key: The key of the selected model's spec; defaults to
             the lateral three-layer model.
+        network: The run's reaction network; defaults to the SOC / DOC
+            / calcite network.
 
     Returns:
         The assembled `GuiInputData`.
@@ -361,10 +440,12 @@ def load_input_data(
         ValueError: Raised for an unknown model key.
     """
     spec: ModelSpec = get_model_spec(model_key)
-    network: pt.ReactionNetwork = get_soc_calcite_network()
+    network = network if network is not None else get_soc_calcite_network()
     bounds: dict[str, tuple[float, float]] = _bounds(spec, network)
 
-    df: pd.DataFrame = _with_spinup(_load_csv(csv_path))
+    df: pd.DataFrame = _load_csv(csv_path)
+    measured: list[str] = _measured_columns(network, df)
+    df = _with_spinup(df, measured)
 
     precip_conc: np.ndarray = np.full(
         (
@@ -381,7 +462,7 @@ def load_input_data(
         pet=df["pet"],
     )
     q_meas: pd.Series = df["q_meas"]
-    conc_df: pd.DataFrame = df[["DOC", "DIC", "Ca++"]]
+    conc_df: pd.DataFrame = df[measured]
 
     return GuiInputData(
         spec=spec,
@@ -493,6 +574,41 @@ def _exchange_residual(
     return k_eq * (tot_exchange_sites - x_conc) - x_conc * mean_doc
 
 
+def _primary_initial_concentrations(
+    network: pt.ReactionNetwork,
+    conc_df: pd.DataFrame,
+    init_aq_conc: float,
+) -> dict[str, float]:
+    """
+    The initial aqueous concentration of each primary species.
+
+    A primary species with a measured concentration column starts at
+    that column's mean; every other primary species starts at the
+    scalar fallback ``init_aq_conc``.  This generalizes the previous
+    behavior, where only DOC started at its column's mean and every
+    other primary species started at the scalar.
+
+    Args:
+        network: The run's reaction network.
+        conc_df: The measured-concentration frame (columns are the
+            network's measured columns).
+        init_aq_conc: Fallback initial concentration for a primary
+            species with no measured column.
+
+    Returns:
+        A mapping from each primary species name to its initial
+        aqueous concentration (mol/L).
+    """
+    return {
+        name: (
+            float(conc_df[name].mean())
+            if name in conc_df.columns
+            else init_aq_conc
+        )
+        for name in network.primary_names
+    }
+
+
 def arr_to_results(
     arr: np.ndarray,
     input_data: GuiInputData,
@@ -513,8 +629,9 @@ def arr_to_results(
         arr: The flat parameter array of model parameters followed by
             initial-state parameters.
         input_data: The assembled GUI inputs.
-        init_aq_conc: The initial aqueous concentration of all primary
-            and secondary species other than DOC in each zone.
+        init_aq_conc: The initial aqueous concentration of each zone's
+            primary species without a measured column, and of all
+            secondary species.
         verbose: Whether to print verbose output while running the
             models.
 
@@ -527,7 +644,14 @@ def arr_to_results(
     model, init_state_params = arr_to_model(arr, input_data)
 
     network: pt.ReactionNetwork = input_data.network
-    mean_doc: float = float(input_data.conc_df["DOC"].mean())
+    mean_doc: float = (
+        float(input_data.conc_df["DOC"].mean())
+        if "DOC" in input_data.conc_df.columns
+        else 0.0
+    )
+    primary_init: dict[str, float] = _primary_initial_concentrations(
+        network, input_data.conc_df, init_aq_conc
+    )
 
     # Construct the initial state
     init_state: dict[str, pt.ChemicalState] = {}
@@ -536,10 +660,7 @@ def arr_to_results(
         init_i: pt.ChemicalState = pt.ChemicalState()
 
         for prim_name in network.primary_names:
-            if prim_name == "DOC":
-                init_i.primary[prim_name] = mean_doc
-            else:
-                init_i.primary[prim_name] = init_aq_conc
+            init_i.primary[prim_name] = primary_init[prim_name]
 
         for sec_name in network.secondary_names:
             init_i.secondary[sec_name] = init_aq_conc
