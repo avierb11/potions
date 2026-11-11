@@ -27,6 +27,7 @@ Covers the pure-Python layer of the GUI:
 The Qt-layer tests live in `test_gui_qt.py`.
 """
 
+import hashlib
 import json
 import multiprocessing
 import os
@@ -95,6 +96,11 @@ from ..gui.state import (
     read_gui_state,
     saved_run_model_key,
     write_gui_state,
+)
+from ..reactive_transport.common_networks import (
+    get_carbon_network,
+    get_chloride_network,
+    get_soc_calcite_network,
 )
 
 # ------------------------------------------------------------------ #
@@ -705,8 +711,8 @@ class TestDefaultPlotSelection:
         ]
         assert selection.mineral == "SOC(s)"
         assert selection.streamflow is True
-        assert selection.water_years_from == WATER_YEARS[0]
-        assert selection.water_years_to == WATER_YEARS[-1]
+        assert selection.window_start == gui_data.DEFAULT_WINDOW_START
+        assert selection.window_end == gui_data.DEFAULT_WINDOW_END
 
     def test_excludes_snow_zones_for_every_spec(
         self, model_inputs: dict[str, gui_data.GuiInputData]
@@ -745,12 +751,12 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 5
-        assert state.to_dict()["version"] == 5
+        assert GUI_STATE_VERSION == 6
+        assert state.to_dict()["version"] == 6
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 5
+        assert raw["version"] == 6
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         assert raw["model_key"] == "lateral_three_layer"
         param_values = _as_dict(raw, "param_values")
@@ -761,8 +767,8 @@ class TestGuiStateRoundTrip:
         assert selection["species"] == list(RIVER_SPECIES)
         assert selection["mineral"] == "SOC(s)"
         assert selection["streamflow"] is True
-        assert selection["water_years_from"] == WATER_YEARS[0]
-        assert selection["water_years_to"] == WATER_YEARS[-1]
+        assert selection["window_start"] == gui_data.DEFAULT_WINDOW_START
+        assert selection["window_end"] == gui_data.DEFAULT_WINDOW_END
         # The main vertical splitter's two sections: the figure and
         # the lower (table-and-parameters) row.
         assert raw["splitter_sizes"] == [300, 600]
@@ -966,7 +972,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6]).",
             ),
             (
                 {"csv_path": 12},
@@ -1079,22 +1085,68 @@ class TestFromDictErrors:
             == "gui_state.json selection field 'streamflow' is not a boolean."
         )
 
-    def test_water_year_field_not_a_year(
+    def test_window_date_field_not_a_date(
         self, input_data: gui_data.GuiInputData
     ) -> None:
         raw: dict[str, object] = self._base(input_data)
         selection: dict[object, object] = _as_dict(raw, "selection")
-        selection["water_years_from"] = 1999
+        selection["window_start"] = 2019
+        raw["selection"] = selection
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json selection field 'window_start' is not a date."
+        )
+
+    def test_window_date_field_malformed(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = self._base(input_data)
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        selection["window_end"] = "not-a-date"
+        raw["selection"] = selection
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json selection field 'window_end' is not a date."
+        )
+
+    def test_window_start_after_end(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = self._base(input_data)
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        selection["window_start"] = "2020-01-01"
+        selection["window_end"] = "2019-01-01"
         raw["selection"] = selection
         with pytest.raises(ValueError) as excinfo:
             GuiState.from_dict(raw)
         assert (
             str(excinfo.value)
             == (
-                "gui_state.json selection field 'water_years_from' "
-                "is not a water year."
+                "gui_state.json selection window starts on "
+                "'2020-01-01', after its end '2019-01-01'."
             )
         )
+
+    def test_version_five_water_years_migrate(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A version-5 state's water years become a date window."""
+        raw: dict[str, object] = self._base(input_data)
+        raw["version"] = 5
+        selection: dict[object, object] = _as_dict(raw, "selection")
+        selection.pop("window_start")
+        selection.pop("window_end")
+        selection["water_years_from"] = 2017
+        selection["water_years_to"] = 2020
+        raw["selection"] = selection
+        restored = GuiState.from_dict(raw)
+        start, end = water_year_window(2017, 2020)
+        assert restored.selection.window_start == start.strftime("%Y-%m-%d")
+        assert restored.selection.window_end == end.strftime("%Y-%m-%d")
 
     def test_legacy_selection_migrates(
         self, input_data: gui_data.GuiInputData
@@ -1108,8 +1160,8 @@ class TestFromDictErrors:
         # water years).
         selection.pop("mineral")
         selection.pop("streamflow")
-        selection.pop("water_years_from")
-        selection.pop("water_years_to")
+        selection.pop("window_start")
+        selection.pop("window_end")
         selection["minerals"] = ["SOC(s)", "Calcite(s)"]
         selection["species"] = ["DIC"]
         selection["time_series"] = ["DIC", "DOC"]
@@ -1125,8 +1177,8 @@ class TestFromDictErrors:
         # carried no Streamflow entry.
         assert restored.selection.streamflow is False
         # The plotting window is the whole record.
-        assert restored.selection.water_years_from == WATER_YEARS[0]
-        assert restored.selection.water_years_to == WATER_YEARS[-1]
+        assert restored.selection.window_start == gui_data.DEFAULT_WINDOW_START
+        assert restored.selection.window_end == gui_data.DEFAULT_WINDOW_END
 
     def test_legacy_selection_time_series_absent(
         self, input_data: gui_data.GuiInputData
@@ -1139,16 +1191,16 @@ class TestFromDictErrors:
         # water years, and no time-series list.
         selection.pop("mineral")
         selection.pop("streamflow")
-        selection.pop("water_years_from")
-        selection.pop("water_years_to")
+        selection.pop("window_start")
+        selection.pop("window_end")
         selection["minerals"] = ["SOC(s)"]
         raw["selection"] = selection
         restored = GuiState.from_dict(raw)
         assert restored.selection.species == list(RIVER_SPECIES)
         assert restored.selection.mineral == "SOC(s)"
         assert restored.selection.streamflow is True
-        assert restored.selection.water_years_from == WATER_YEARS[0]
-        assert restored.selection.water_years_to == WATER_YEARS[-1]
+        assert restored.selection.window_start == gui_data.DEFAULT_WINDOW_START
+        assert restored.selection.window_end == gui_data.DEFAULT_WINDOW_END
 
     def test_legacy_minerals_not_strings(
         self, input_data: gui_data.GuiInputData
@@ -1157,8 +1209,8 @@ class TestFromDictErrors:
         selection: dict[object, object] = _as_dict(raw, "selection")
         selection.pop("mineral")
         selection.pop("streamflow")
-        selection.pop("water_years_from")
-        selection.pop("water_years_to")
+        selection.pop("window_start")
+        selection.pop("window_end")
         selection["minerals"] = "SOC(s)"
         raw["selection"] = selection
         with pytest.raises(ValueError) as excinfo:
@@ -1220,7 +1272,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6]).\n"
         )
 
     def test_top_level_not_object(
@@ -1241,7 +1293,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 5,")
+        assert text.startswith("{\n  \"version\": 6,")
         assert text.endswith("\n")
 
 
@@ -4605,3 +4657,126 @@ def test_partitioning_figure_accepts_stack_order() -> None:
         "Beta",
         "Alpha",
     ]
+
+
+# ------------------------------------------------------------------ #
+# The YAML network file (potions.core NetworkFile)
+# ------------------------------------------------------------------ #
+
+
+class TestNetworkFile:
+    """The network file format: fingerprints, round-trip, section
+    order, and the file path's error and validation contract."""
+
+    def test_fingerprint_stable(self) -> None:
+        """The same network always serializes to the same bytes; a
+        different network to different bytes."""
+
+        def fingerprint(network: pt.ReactionNetwork) -> str:
+            return hashlib.sha256(
+                pt.NetworkFile.from_network(network).to_bytes()
+            ).hexdigest()
+
+        soc_first: str = fingerprint(get_soc_calcite_network())
+        soc_second: str = fingerprint(get_soc_calcite_network())
+        carbon: str = fingerprint(get_carbon_network())
+        assert soc_first == soc_second
+        assert carbon != soc_first
+
+    def test_to_file_from_file_round_trip(
+        self,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+    ) -> None:
+        """The file view of the default network written to disk and
+        read back yields the same species and identical bytes."""
+        network: pt.ReactionNetwork = input_data.network
+        path: Path = tmp_path / "network.yaml"
+        pt.NetworkFile.from_network(network).to_file(str(path))
+
+        rebuilt: pt.ReactionNetwork = pt.ReactionNetwork.from_file(str(path))
+        # The file's BTreeMap sections rebuild the species in key
+        # order, not the constructor's, so compare the set, not the
+        # order (order is canonicalized by the file format).
+        assert set(rebuilt.species_names) == set(network.species_names)
+        assert (
+            pt.NetworkFile.from_network(rebuilt).to_bytes()
+            == pt.NetworkFile.from_network(network).to_bytes()
+        )
+
+    def test_section_order_in_bytes(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The six section headers appear in canonical order."""
+        text: str = (
+            pt.NetworkFile.from_network(input_data.network).to_bytes()
+        ).decode("utf-8")
+        sections: tuple[str, ...] = (
+            "primary_species:",
+            "secondary_species:",
+            "mineral_species:",
+            "exchange_reactions:",
+            "tst_reactions:",
+            "monod_reactions:",
+        )
+        positions: list[int] = [text.find(section) for section in sections]
+        for section, position in zip(sections, positions):
+            assert position >= 0, f"section header {section!r} missing"
+        assert positions == sorted(positions)
+
+    def test_from_file_error_paths(self, tmp_path: Path) -> None:
+        """The file path's error contract: a missing file, invalid
+        YAML, and a V-gate violation."""
+        missing: Path = tmp_path / "missing.yaml"
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            pt.NetworkFile.from_file(str(missing))
+
+        garbage: Path = tmp_path / "garbage.yaml"
+        garbage.write_text("a: [1, 2\n")
+        with pytest.raises(ValueError, match="Invalid network YAML"):
+            pt.NetworkFile.from_file(str(garbage))
+
+        bad: Path = tmp_path / "bad.yaml"
+        bad.write_text(
+            "primary_species:\n"
+            "  DOC:\n"
+            "    name: DOC\n"
+            "    molar_mass: 300.0\n"
+            "    charge: 0.0\n"
+            "    dh_size_param: 4.0\n"
+            "secondary_species:\n"
+            "  S:\n"
+            "    name: S\n"
+            "    stoichiometry:\n"
+            "      S: -1.0\n"
+            "      Unknown: 0.5\n"
+            "    eq_consts:\n"
+            "    - 1.0\n"
+            "    - 2.0\n"
+            "    dh_size_param: 3.0\n"
+            "    charge: 0.0\n"
+            "    molar_mass: 100.0\n"
+            "mineral_species: {}\n"
+            "exchange_reactions: {}\n"
+            "tst_reactions: {}\n"
+            "monod_reactions: {}\n"
+        )
+        with pytest.raises(ValueError, match="V3:"):
+            pt.NetworkFile.from_file(str(bad))
+
+    def test_validate_issue_repr(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The default network validates clean; a finding is a
+        ``NetworkValidationIssue`` whose repr carries both fields."""
+        assert input_data.network.validate() == []
+
+        issues: list[pt.NetworkValidationIssue] = pt.NetworkFile.from_network(
+            get_chloride_network()
+        ).validate()
+        assert [issue.code for issue in issues] == ["W1"]
+        issue: pt.NetworkValidationIssue = issues[0]
+        assert isinstance(issue.code, str)
+        assert isinstance(issue.message, str)
+        assert "W1" in repr(issue)
+        assert issue.message in repr(issue)
