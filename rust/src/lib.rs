@@ -32,6 +32,7 @@ use crate::{
             EquilibriumParameters, MineralAuxParams, MineralParameters, MonodParameters,
             RiverDimensions, RiverParameters, RtParameters, TstParameters, ZoneDimensions,
         },
+        network_file::{NetworkFile, NetworkValidationIssue},
         reaction_network::ReactionNetwork,
         river_zone::RiverZone,
         rt_zone::{run_zone_steps, RtZone},
@@ -85,6 +86,8 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Reaction network
     m.add_class::<ReactionNetwork>()?;
+    m.add_class::<NetworkFile>()?;
+    m.add_class::<NetworkValidationIssue>()?;
 
     // Database things
     m.add_class::<PrimaryAqueousSpecies>()?;

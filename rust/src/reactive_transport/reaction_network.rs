@@ -12,6 +12,7 @@ use crate::reactive_transport::database::ExchangeReaction;
 use crate::reactive_transport::{
     database::{MineralKineticData, MineralSpecies, PrimaryAqueousSpecies, SecondarySpecies},
     kinetic_structures::{EquilibriumParameters, MonodParameters, TstParameters},
+    network_file::{load_network_file, validate_file, NetworkFile, NetworkValidationIssue},
 };
 
 #[pyclass(from_py_object, module = "potions.core")]
@@ -859,5 +860,20 @@ impl ReactionNetwork {
     #[getter]
     pub fn mobile_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
         self.mobile_mask_rust().to_pyarray(py)
+    }
+
+    #[staticmethod]
+    pub fn from_file(path: &str) -> PyResult<ReactionNetwork> {
+        load_network_file(path)?.build_to_network()
+    }
+
+    pub fn to_file(&self, path: &str) -> PyResult<()> {
+        NetworkFile::build_from_network(self).to_file(path)
+    }
+
+    /// The network's validation findings (V1–V9 block, W1/W2 warn),
+    /// computed over the N1-normalized file view.  Empty means valid.
+    pub fn validate(&self) -> Vec<NetworkValidationIssue> {
+        validate_file(&NetworkFile::build_from_network(self))
     }
 }
