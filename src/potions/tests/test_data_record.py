@@ -21,6 +21,8 @@ The Qt-layer tests (the column-mapping dialog, the Load Data action,
 the state round trip, the CLI) live in `test_gui_qt.py`.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -180,3 +182,122 @@ class TestColumnRoles:
         ]
         assert gui_data.measured_roles(get_chloride_network()) == []
         assert "DIC" in gui_data.measured_roles(get_soc_calcite_network())
+
+
+# ------------------------------------------------------------------ #
+# Spreadsheet reading
+# ------------------------------------------------------------------ #
+
+
+class TestReadSpreadsheet:
+    """`read_spreadsheet` parses a CSV or XLSX record into an indexed
+    frame: a sorted daily `DatetimeIndex` (detected or mapped),
+    float64 data columns, and precise errors for a bad extension, a
+    missing or duplicated date column, and non-numeric data."""
+
+    def test_read_csv_sorted(self, tmp_path: Path) -> None:
+        """Rows out of order in the file come back in date order."""
+        path: Path = tmp_path / "record.csv"
+        pd.DataFrame(
+            {
+                "date": ["2019-03-01", "2019-01-01", "2019-02-01"],
+                "precip": [1.0, 2.0, 3.0],
+            }
+        ).to_csv(path, index=False)
+        df: pd.DataFrame = gui_data.read_spreadsheet(path)
+        assert list(df.index) == [
+            pd.Timestamp("2019-01-01"),
+            pd.Timestamp("2019-02-01"),
+            pd.Timestamp("2019-03-01"),
+        ]
+        assert list(df["precip"]) == [2.0, 3.0, 1.0]
+
+    def test_read_xlsx(self, tmp_path: Path) -> None:
+        """An XLSX spreadsheet reads back with a datetime index and
+        float columns."""
+        path: Path = tmp_path / "record.xlsx"
+        pd.DataFrame(
+            {
+                "date": ["2019-01-01", "2019-01-02"],
+                "temp": [5.5, 6.5],
+            }
+        ).to_excel(path, index=False)
+        df: pd.DataFrame = gui_data.read_spreadsheet(path)
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert list(df.index) == [
+            pd.Timestamp("2019-01-01"),
+            pd.Timestamp("2019-01-02"),
+        ]
+        assert list(df["temp"]) == [5.5, 6.5]
+
+    def test_xlsx_text_dates(self, tmp_path: Path) -> None:
+        """Date cells stored as text (Review Focus 3) parse to the
+        right timestamps instead of failing or misparsing."""
+        path: Path = tmp_path / "record.xlsx"
+        pd.DataFrame(
+            {"date": ["1/15/2019", "1/16/2019"], "ppt": [1.0, 2.0]}
+        ).to_excel(path, index=False)
+        df: pd.DataFrame = gui_data.read_spreadsheet(path)
+        assert df.index[0] == pd.Timestamp("2019-01-15")
+        assert df.index[1] == pd.Timestamp("2019-01-16")
+
+    def test_unsupported_extension(self, tmp_path: Path) -> None:
+        """A non-spreadsheet file is rejected with the accepted
+        extensions named."""
+        path: Path = tmp_path / "record.txt"
+        path.write_text("date,ppt\n2019-01-01,1\n")
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        message: str = str(excinfo.value)
+        assert "csv" in message
+        assert "xlsx" in message
+
+    def test_duplicate_dates_rejected(self, tmp_path: Path) -> None:
+        """Two rows on the same date are a ValueError that names the
+        duplicated date."""
+        path: Path = tmp_path / "record.csv"
+        pd.DataFrame(
+            {"date": ["2019-01-01", "2019-01-01"], "ppt": [1.0, 2.0]}
+        ).to_csv(path, index=False)
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        assert "2019-01-01" in str(excinfo.value)
+
+    def test_non_numeric_column_rejected(self, tmp_path: Path) -> None:
+        """A data column holding a non-numeric value is a ValueError
+        that names the column and the offending value."""
+        path: Path = tmp_path / "record.csv"
+        pd.DataFrame(
+            {"date": ["2019-01-01", "2019-01-02"], "temp": ["x", "5.0"]}
+        ).to_csv(path, index=False)
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        message: str = str(excinfo.value)
+        assert "temp" in message
+        assert "x" in message
+
+    def test_datetime_from_map(self, tmp_path: Path) -> None:
+        """An explicit map value owns the index, even when the column
+        name is not a date-role name."""
+        path: Path = tmp_path / "record.csv"
+        pd.DataFrame(
+            {"day": ["2019-01-02", "2019-01-01"], "ppt": [2.0, 1.0]}
+        ).to_csv(path, index=False)
+        df: pd.DataFrame = gui_data.read_spreadsheet(
+            path, column_map={"date": "day"}
+        )
+        assert list(df.index) == [
+            pd.Timestamp("2019-01-01"),
+            pd.Timestamp("2019-01-02"),
+        ]
+
+    def test_missing_datetime_rejected(self, tmp_path: Path) -> None:
+        """No date-role column is a ValueError that lists the
+        columns that do exist."""
+        path: Path = tmp_path / "record.csv"
+        pd.DataFrame({"a": [1.0], "b": [2.0]}).to_csv(path, index=False)
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        message: str = str(excinfo.value)
+        assert "a" in message
+        assert "b" in message

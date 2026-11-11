@@ -570,6 +570,149 @@ def _roles_by_column(
     return by_column
 
 
+def _datetime_column(
+    df: pd.DataFrame,
+    column_map: dict[str, str | None] | None = None,
+) -> str:
+    """
+    The name of the record's datetime column.
+
+    An explicit map value for the ``date`` role wins (it must name
+    an existing column); otherwise the column is auto-detected from
+    the date role's names — the canonical name, then the aliases —
+    matched case-insensitively with surrounding whitespace trimmed.
+
+    Args:
+        df: The loaded record frame.
+        column_map: The explicit role → column override, or None for
+            pure auto-detection.
+
+    Returns:
+        The actual column name of the record's dates.
+
+    Raises:
+        ValueError:
+            Raised when the map points the date role at a column the
+            record does not have (the message lists the columns that
+            do) or when no date-like column exists (the message lists
+            the columns that do).
+    """
+    if column_map is not None and "date" in column_map:
+        name: str | None = column_map["date"]
+        if name is None:
+            raise ValueError(
+                "The column map marks the date role absent, but a "
+                "record needs a date column."
+            )
+        if name not in df.columns:
+            raise ValueError(
+                f"The column map points the date role at the column "
+                f"{name!r}, which the record does not have. "
+                f"Available columns: "
+                f"{', '.join(str(column) for column in df.columns)}."
+            )
+        return str(name)
+    lowered: dict[str, str] = {
+        str(name).strip().lower(): str(name) for name in df.columns
+    }
+    for candidate in _role_names("date"):
+        match: str | None = lowered.get(candidate.strip().lower())
+        if match is not None:
+            return match
+    raise ValueError(
+        "No date column found in the record. Available columns: "
+        f"{', '.join(str(column) for column in df.columns)}."
+    )
+
+
+def _float_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert every column of a record frame to float64.
+
+    Args:
+        df: The record frame whose data columns should be numeric.
+
+    Returns:
+        A new frame, same index, every column float64.
+
+    Raises:
+        ValueError:
+            Raised when a column holds a non-numeric value; the
+            message names the column and the offending value.
+    """
+    converted: dict[str, pd.Series] = {}
+    for column in df.columns:
+        series: pd.Series = df[column]
+        numeric: pd.Series = pd.to_numeric(series, errors="coerce")
+        bad_mask: pd.Series = numeric.isna() & series.notna()
+        if bad_mask.any():
+            bad_value: object = series[bad_mask].iloc[0]
+            raise ValueError(
+                f"The column {str(column)!r} is not numeric: the "
+                f"value {bad_value!r} is not a number."
+            )
+        converted[str(column)] = numeric.astype("float64")
+    return pd.DataFrame(converted, index=df.index)
+
+
+def read_spreadsheet(
+    path: Path,
+    column_map: dict[str, str | None] | None = None,
+) -> pd.DataFrame:
+    """
+    Read a CSV or XLSX record into an indexed frame.
+
+    The file is read by its suffix (``.csv`` → `pandas.read_csv`,
+    ``.xlsx`` → `pandas.read_excel` with the openpyxl engine).  The
+    record's date column — the map's ``date`` value when present,
+    otherwise auto-detected by `_datetime_column` — is parsed with
+    `pandas.to_datetime` (real date cells and text dates alike
+    become timestamps) and set as the index; the rows come back in
+    date order and the remaining columns as float64.
+
+    Args:
+        path: The record file: a ``.csv`` or ``.xlsx`` spreadsheet.
+        column_map: The explicit role → column override; only its
+            ``date`` value is consulted here (the data roles are
+            resolved later by `resolve_columns`).
+
+    Returns:
+        The record indexed by a sorted `pandas.DatetimeIndex`
+        (named ``"date"``), all data columns float64.
+
+    Raises:
+        ValueError:
+            Raised when the file has no supported extension, the
+            date column is missing (the message lists the available
+            columns), two rows share a date (the message names the
+            duplicated date), or a data column is not numeric (the
+            message names the column and the offending value).
+    """
+    suffix: str = path.suffix.lower()
+    if suffix == ".csv":
+        raw: pd.DataFrame = pd.read_csv(path)
+    elif suffix == ".xlsx":
+        raw = pd.read_excel(path, engine="openpyxl")
+    else:
+        raise ValueError(
+            f"Unsupported record file {path.name!r}: the record must "
+            "be a CSV (.csv) or XLSX (.xlsx) spreadsheet."
+        )
+    date_column: str = _datetime_column(raw, column_map)
+    dates: pd.Series = pd.to_datetime(raw[date_column])
+    if dates.duplicated().any():
+        first_duplicate: pd.Timestamp = dates[
+            dates.duplicated(keep="first")
+        ].iloc[0]
+        raise ValueError(
+            f"Duplicate dates in the record: {first_duplicate.date()}. "
+            "The record must have at most one row per date."
+        )
+    out: pd.DataFrame = raw.drop(columns=[date_column]).set_index(dates)
+    out.index.name = "date"
+    return _float_frame(out.sort_index())
+
+
 def _with_spinup(
     df: pd.DataFrame, measured_columns: list[str]
 ) -> pd.DataFrame:
