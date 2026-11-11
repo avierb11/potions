@@ -34,8 +34,8 @@ hydrology-only mode).
 """
 
 import gc
+import math
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -551,27 +551,151 @@ def arr_to_model(arr: np.ndarray, input_data: GuiInputData) -> tuple[pt.Model, n
     return model, init_state_params
 
 
-def _exchange_residual(
-    x_conc: float, tot_exchange_sites: float, mean_doc: float, k_eq: float
-) -> float:
+@dataclass(frozen=True)
+class _ExchangeProduct:
     """
-    Return the ion-exchange equilibrium residual for a candidate X-
-    concentration.
+    One adsorbed exchange product and its equilibrium terms.
 
-    The residual of the XDOC exchange equilibrium, zero at the
-    partition of the total exchange-site concentration into the
-    aqueous cation (X-) and the adsorbed (XDOC) fractions.
+    The parsed form of one exchange reaction's product side, used by
+    the exchange-site initialization solver: the product species, the
+    ``X-`` coefficient, the other reactants with their coefficients,
+    the product's (positive) stoichiometric magnitude, and the stored
+    ``log10_k_eq`` (the log10 of the inverse thermodynamic K).
+
+    Attributes:
+        name: The product species' name.
+        x_coeff: The ``X-`` stoichiometric coefficient.
+        reactants: The remaining reactant species and their
+            (positive) stoichiometric coefficients.
+        product_coeff: The product's stoichiometric magnitude.
+        log10_k_eq: The reaction's stored ``log10_k_eq``.
+    """
+
+    name: str
+    x_coeff: float
+    reactants: tuple[tuple[str, float], ...]
+    product_coeff: float
+    log10_k_eq: float
+
+
+def _exchange_product_terms(reaction: pt.core.ExchangeReaction) -> _ExchangeProduct:
+    """
+    Parse an exchange reaction into its equilibrium-product terms.
+
+    The product is the single non-``X-`` species with a negative
+    stoichiometric coefficient (its positive magnitude is
+    ``product_coeff``); ``x_coeff`` is the ``X-`` coefficient and
+    ``reactants`` the remaining positive-coefficient species.
 
     Args:
-        x_conc: The candidate concentration of the cation X-.
-        tot_exchange_sites: The total exchange-site concentration.
-        mean_doc: The mean measured DOC concentration.
-        k_eq: The exchange equilibrium constant.
+        reaction: The network's exchange reaction to parse.
 
     Returns:
-        The residual, zero at the solution.
+        The parsed product terms.
     """
-    return k_eq * (tot_exchange_sites - x_conc) - x_conc * mean_doc
+    stoich: dict[str, float] = dict(reaction.stoichiometry)
+    product_name: str = ""
+    product_coeff: float = 0.0
+    for name, coeff in stoich.items():
+        if name != "X-" and coeff < 0.0:
+            product_name, product_coeff = name, -coeff
+    reactants: tuple[tuple[str, float], ...] = tuple(
+        (name, coeff)
+        for name, coeff in stoich.items()
+        if name != "X-" and name != product_name and coeff > 0.0
+    )
+    return _ExchangeProduct(
+        name=product_name,
+        x_coeff=stoich.get("X-", 0.0),
+        reactants=reactants,
+        product_coeff=product_coeff,
+        log10_k_eq=reaction.log10_k_eq,
+    )
+
+
+def _exchange_product_concentration(
+    x: float, product: _ExchangeProduct, species_init: dict[str, float]
+) -> float:
+    """
+    The equilibrium concentration of one exchange product.
+
+    ``[E](x) = 10**(( -log10_k_eq + a·log10(x) + Σ b·log10([S]_0) ) / c)``
+    where ``a`` is the ``X-`` coefficient, ``b`` the other reactants'
+    coefficients, ``c`` the product's (positive) coefficient, and
+    ``[S]_0`` the reactants' initial concentrations.  An absent
+    reactant (``x <= 0`` with ``a > 0``, or ``[S]_0 <= 0`` with
+    ``b > 0``) makes the product concentration exactly zero.
+
+    Args:
+        x: The candidate ``X-`` concentration.
+        product: The parsed product terms.
+        species_init: The initial concentration of every aqueous
+            species (the fixed reactant concentrations).
+
+    Returns:
+        The product's equilibrium concentration at ``x`` (mol/L).
+    """
+    if product.x_coeff > 0.0 and x <= 0.0:
+        return 0.0
+    exponent: float = -product.log10_k_eq
+    if product.x_coeff > 0.0:
+        exponent += product.x_coeff * math.log10(x)
+    for name, coeff in product.reactants:
+        value: float = species_init.get(name, 0.0)
+        if coeff > 0.0 and value <= 0.0:
+            return 0.0
+        if coeff != 0.0:
+            exponent += coeff * math.log10(value)
+    concentration: float = 10.0 ** (exponent / product.product_coeff)
+    return concentration
+
+
+def _solve_exchange_initial_state(
+    tot: float,
+    exchange_species: list[pt.core.ExchangeReaction],
+    species_init: dict[str, float],
+) -> dict[str, float]:
+    """
+    Solve the exchange-site mass balance for the initial state.
+
+    Finds ``x = [X-]`` such that the free cation plus every adsorbed
+    product occupy exactly ``tot`` exchange sites, then returns the
+    initial ``"X-"`` and per-product concentrations.  For the 1:1 XDOC
+    network this root equals the old closed form ``k·tot/(k+doc)``.
+
+    Args:
+        tot: The total exchange-site concentration.
+        exchange_species: The network's exchange reactions.
+        species_init: The initial concentration of every aqueous
+            species (the fixed reactant concentrations).
+
+    Returns:
+        A mapping ``{"X-": x, <product>: [product], ...}``.
+    """
+    products: list[_ExchangeProduct] = [
+        _exchange_product_terms(r) for r in exchange_species
+    ]
+
+    def residual(x: float) -> float:
+        return x + sum(
+            _exchange_product_concentration(x, p, species_init) for p in products
+        ) - tot
+
+    if tot <= 0.0 or residual(0.0) >= 0.0:
+        # Degenerate: no root in (0, tot) — the adsorbed products
+        # alone reach the capacity — so keep every site free.
+        x: float = tot
+    else:
+        # residual(tot) = sum [E_i](tot) >= 0, so [0, tot] brackets.
+        x = float(root_scalar(residual, bracket=[0.0, tot], xtol=1e-14).root)
+
+    return {
+        "X-": x,
+        **{
+            p.name: _exchange_product_concentration(x, p, species_init)
+            for p in products
+        },
+    }
 
 
 def _primary_initial_concentrations(
@@ -620,7 +744,7 @@ def arr_to_results(
     array.
 
     Builds the model and the reactive zone initial states (fixed
-    mineral concentrations and the calibrated DOC exchange-site
+    mineral concentrations and the calibrated exchange-site
     concentrations) from the parameters and runs the hydrology and
     reactive transport models over the full (spin-up-inclusive)
     record.
@@ -644,14 +768,13 @@ def arr_to_results(
     model, init_state_params = arr_to_model(arr, input_data)
 
     network: pt.ReactionNetwork = input_data.network
-    mean_doc: float = (
-        float(input_data.conc_df["DOC"].mean())
-        if "DOC" in input_data.conc_df.columns
-        else 0.0
-    )
     primary_init: dict[str, float] = _primary_initial_concentrations(
         network, input_data.conc_df, init_aq_conc
     )
+    species_init: dict[str, float] = {
+        **primary_init,
+        **{name: init_aq_conc for name in network.secondary_names},
+    }
 
     # Construct the initial state
     init_state: dict[str, pt.ChemicalState] = {}
@@ -672,21 +795,15 @@ def arr_to_results(
         if zone_config.do_speciation and network.has_exchange:
             tot_exchange_sites: float = 10.0 ** float(init_state_params[init_idx])
             init_idx += 1
-            k_eq: float = 10.0 ** network.exchange_species[0].log10_k_eq
-
             # A small rootfinding step finds the exchange-site
-            # partition of DOC at initialization.
-            residual = partial(
-                _exchange_residual,
-                tot_exchange_sites,
-                mean_doc,
-                k_eq,
+            # partition of the aqueous species at initialization.
+            init_i.exchange.update(
+                _solve_exchange_initial_state(
+                    tot_exchange_sites,
+                    network.exchange_species,
+                    species_init,
+                )
             )
-            x_init: float = float(root_scalar(residual, x0=1e-5).root)
-            xdoc_init: float = tot_exchange_sites - x_init
-
-            init_i.exchange["X-"] = x_init
-            init_i.exchange["XDOC"] = xdoc_init
 
         init_state[zone_name] = init_i
 

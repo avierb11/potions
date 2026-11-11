@@ -29,6 +29,7 @@ The Qt-layer tests live in `test_gui_qt.py`.
 
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -4857,3 +4858,126 @@ class TestNetworkDataBinding:
             gui_data.DEFAULT_CSV_PATH
         )
         assert list(default.conc_df.columns) == ["DOC", "Ca++", "DIC"]
+
+
+# ------------------------------------------------------------------ #
+# Generalized exchange initialization
+# ------------------------------------------------------------------ #
+
+
+class TestExchangeInit:
+    """The exchange-site initialization solves any set of exchange
+    reactions against the fixed aqueous initial concentrations,
+    staying identity-preserving for the 1:1 XDOC network."""
+
+    def test_identity_one_to_one(self) -> None:
+        """One X- + DOC <-> XDOC reaction: the solved root equals the
+        old closed form k * tot / (k + doc)."""
+        reaction: pt.core.ExchangeReaction = pt.core.ExchangeReaction(
+            name="XDOC",
+            stoichiometry={"X-": 1.0, "DOC": 1.0, "XDOC": -1.0},
+            log10_k_eq=-2.75,
+            charge=0.0,
+        )
+        k: float = 10.0 ** -2.75
+        tot: float = 1.0
+        result: dict[str, float] = gui_data._solve_exchange_initial_state(
+            tot, [reaction], {"DOC": 1.12e-3}
+        )
+        assert result["X-"] == pytest.approx(k * tot / (k + 1.12e-3), rel=1e-9)
+
+    def test_fallback_all_free(self) -> None:
+        """A product that does not consume X- and whose constant
+        adsorption already reaches tot leaves every site free."""
+        reaction: pt.core.ExchangeReaction = pt.core.ExchangeReaction(
+            name="P",
+            stoichiometry={"DOC": 1.0, "P": -1.0},
+            log10_k_eq=0.0,
+            charge=0.0,
+        )
+        tot: float = 1.0
+        result: dict[str, float] = gui_data._solve_exchange_initial_state(
+            tot, [reaction], {"DOC": 1.0}
+        )
+        assert result["X-"] == tot
+
+    def test_divalent_x(self) -> None:
+        """A 2 X- + S <-> P reaction: the solved state satisfies the
+        mass balance, and the product matches the direct formula."""
+        reaction: pt.core.ExchangeReaction = pt.core.ExchangeReaction(
+            name="P",
+            stoichiometry={"X-": 2.0, "S": 1.0, "P": -1.0},
+            log10_k_eq=0.0,
+            charge=0.0,
+        )
+        s: float = 1e-3
+        tot: float = 0.1
+        result: dict[str, float] = gui_data._solve_exchange_initial_state(
+            tot, [reaction], {"S": s}
+        )
+        x: float = result["X-"]
+        expected: float = 10.0 ** (
+            -0.0 + 2.0 * math.log10(x) + math.log10(s)
+        )
+        assert x + result["P"] == pytest.approx(tot, rel=1e-9)
+        assert result["P"] == pytest.approx(expected, rel=1e-9)
+
+    def test_missing_reactant_zero(self) -> None:
+        """A product with a reactant at zero initial concentration has
+        exactly zero concentration (no log-of-zero)."""
+        reaction: pt.core.ExchangeReaction = pt.core.ExchangeReaction(
+            name="XDOC",
+            stoichiometry={"X-": 1.0, "DOC": 1.0, "XDOC": -1.0},
+            log10_k_eq=-2.75,
+            charge=0.0,
+        )
+        product: gui_data._ExchangeProduct = gui_data._exchange_product_terms(
+            reaction
+        )
+        assert (
+            gui_data._exchange_product_concentration(0.5, product, {"DOC": 0.0})
+            == 0.0
+        )
+
+    def test_multi_product(self) -> None:
+        """Two products sharing the X- pool: the solved state satisfies
+        the full mass balance and both direct formulas."""
+        reactions: list[pt.core.ExchangeReaction] = [
+            pt.core.ExchangeReaction(
+                name="E1",
+                stoichiometry={"X-": 1.0, "A": 1.0, "E1": -1.0},
+                log10_k_eq=-2.0,
+                charge=0.0,
+            ),
+            pt.core.ExchangeReaction(
+                name="E2",
+                stoichiometry={"X-": 1.0, "B": 1.0, "E2": -1.0},
+                log10_k_eq=-1.0,
+                charge=0.0,
+            ),
+        ]
+        species_init: dict[str, float] = {"A": 1e-3, "B": 2e-3}
+        tot: float = 1.0
+        result: dict[str, float] = gui_data._solve_exchange_initial_state(
+            tot, reactions, species_init
+        )
+        x: float = result["X-"]
+        e1: float = x * 1e-3 / 10.0 ** -2.0
+        e2: float = x * 2e-3 / 10.0 ** -1.0
+        assert x + result["E1"] + result["E2"] == pytest.approx(tot, rel=1e-9)
+        assert result["E1"] == pytest.approx(e1, rel=1e-9)
+        assert result["E2"] == pytest.approx(e2, rel=1e-9)
+
+    def test_zero_total(self) -> None:
+        """No exchange sites: the cation and every product are exactly
+        zero."""
+        reaction: pt.core.ExchangeReaction = pt.core.ExchangeReaction(
+            name="XDOC",
+            stoichiometry={"X-": 1.0, "DOC": 1.0, "XDOC": -1.0},
+            log10_k_eq=-2.75,
+            charge=0.0,
+        )
+        result: dict[str, float] = gui_data._solve_exchange_initial_state(
+            0.0, [reaction], {"DOC": 1.12e-3}
+        )
+        assert result == {"X-": 0.0, "XDOC": 0.0}
