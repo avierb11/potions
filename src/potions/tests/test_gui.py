@@ -2966,6 +2966,9 @@ class TestConcDischargeFigure:
             inner,
         )
         expected: int = int(((index >= inner[0]) & (index <= inner[1])).sum())
+        # The bundled record carries a streamflow column, so the
+        # measured overlay is present on every panel.
+        assert input_data.q_meas is not None
         # The synthetic frames are strictly positive: every day in the
         # window plots, the record outside it does not.
         for ax, species in zip(fig.axes, self.SPECIES):

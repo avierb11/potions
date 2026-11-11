@@ -1,25 +1,34 @@
 """
 The data loader and run machinery of the East River calibration GUI.
 
-Reads the East River series CSV that ships with the package
-(``potions/gui/data/east_river_series.csv``, the sole data source of
-the GUI; a different record can be supplied by passing a path to
-`load_input_data`) and assembles everything a run needs: the SOC /
-DOC / calcite reaction network, the model's parameter bounds, the
-reactive-transport zone configurations, the forcing, the
-precipitation concentrations, and the measured series.  The model
-structure itself is selected by a `potions.gui.model_specs.ModelSpec`
-key; every spec runs over the same East River record.
+Loads a record spreadsheet — a ``.csv`` or ``.xlsx`` file; the
+record shipped with the package is the East River series
+(``potions/gui/data/east_river_series.csv``) — and assembles
+everything a run needs: the run's reaction network, the model's
+parameter bounds, the reactive-transport zone configurations, the
+forcing, the precipitation concentrations, and the measured series.
+The model structure itself is selected by a
+`potions.gui.model_specs.ModelSpec` key; every spec runs over the
+loaded record.
 
-The CSV carries the site's daily record from 2014-05-02 to
-2025-09-18: the meteorological forcing (``ppt``, ``temp``, ``pet``),
-the measured streamflow (``q_meas``, in millimeters per day), and the
-measured river concentrations (``doc_molL``, ``dic_molL``,
-``ca_molL``, in moles per liter).  The meteorological forcing is
-daily only over 2014-10-01 to 2021-09-30, so the loader restricts the
-record to that window.  The record is a single continuous run: the
-loader prepends a two-year spin-up (the first two years of the
-record, shifted back in time with their measurements set to NaN).
+The record is a daily table of the site's measurements.  The
+bundled record is the East River series over its forcing span
+(2014-10-01 to 2021-09-30): the meteorological forcing (``ppt``,
+``temp``, ``pet``, in mm/day and degrees Celsius), the measured
+streamflow (``q_meas``, in millimeters per day), and the measured
+river concentrations (``doc_molL``, ``dic_molL``, ``ca_molL``, in
+moles per liter).  A different record is accepted in the same shape:
+its columns must resolve to the record roles — automatically, by
+the canonical names or the East River aliases (case-insensitive), or
+through an explicit role → column map — and its units are taken as
+the model's, with no conversion.  The loader trims the record to its
+forcing span (the meteorological forcing is daily only over that
+span), rejecting interior forcing NaNs, missing dates, and
+non-daily cadence; rows outside the span are the only rows ever
+dropped.  The record is a single continuous run: the loader
+prepends a spin-up (a copy of the record's leading days — the
+requested length, capped at half the record — shifted back in time
+with its measurements set to NaN).
 
 The run functions (`arr_to_model`, `arr_to_results`, and
 `arr_to_hydro_results`) interpret a flat parameter array in the
@@ -187,11 +196,15 @@ class GuiInputData:
             per surface zone, day, and species.
         q_meas: The measured streamflow over the full record, in
             millimeters per day (catchment-mean depth); NaN during
-            the spin-up.
+            the spin-up; None when the record carries no streamflow
+            column.
         conc_df: The measured river concentrations — the network's
             measured columns, in species order with the derived DIC
             last — over the full record, in moles per liter; NaN
-            during the spin-up and on days without a sample.
+            during the spin-up and on days without a sample; zero
+            columns when the record carries no concentrations.
+        window: The record's forcing span: the first and last date
+            of the trimmed record (before the spin-up is prepended).
     """
 
     spec: ModelSpec
@@ -200,8 +213,9 @@ class GuiInputData:
     zone_configs: dict[str, pt.RtZoneConfiguration]
     forc: pt.ForcingData
     precip_conc: np.ndarray
-    q_meas: pd.Series
+    q_meas: pd.Series | None
     conc_df: pd.DataFrame
+    window: tuple[pd.Timestamp, pd.Timestamp]
 
 
 @dataclass(frozen=True)
@@ -331,38 +345,6 @@ def _bounds(
             )
 
     return bounds
-
-
-def _load_csv(csv_path: Path) -> pd.DataFrame:
-    """
-    Read the East River series CSV and prepare it for a run.
-
-    Renames the raw columns to the names the rest of the GUI and the
-    model use (``ppt`` to ``precip``, ``doc_molL`` to ``DOC``,
-    ``dic_molL`` to ``DIC``, ``ca_molL`` to ``Ca++``) and keeps only
-    the rows with complete forcing: the meteorological forcing is
-    daily only over 2014-10-01 to 2021-09-30, and the rows outside
-    that window carry no forcing to simulate with.
-
-    Args:
-        csv_path: Path to the CSV with the daily ``date,ppt,temp,
-            pet,q_meas,doc_molL,dic_molL,ca_molL`` record.
-
-    Returns:
-        The record indexed by date, sorted ascending, with the
-        renamed columns and the forcing window only.
-    """
-    df: pd.DataFrame = pd.read_csv(csv_path, parse_dates=["date"], index_col="date")
-    df = df.rename(
-        columns={
-            "ppt": "precip",
-            "doc_molL": "DOC",
-            "dic_molL": "DIC",
-            "ca_molL": "Ca++",
-        }
-    )
-    forc_cols: list[str] = ["precip", "temp", "pet", "q_meas"]
-    return df.loc[df[forc_cols].notna().all(axis=1)].sort_index()
 
 
 def _measured_columns(
@@ -783,31 +765,87 @@ def trim_record(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _with_spinup(
-    df: pd.DataFrame, measured_columns: list[str]
+def read_record(
+    path: Path,
+    network: pt.ReactionNetwork,
+    column_map: dict[str, str | None] | None = None,
 ) -> pd.DataFrame:
     """
-    Prepend the two-year spin-up to the record.
+    Load a record file into a runnable record frame.
 
-    The first `NUM_SPINUP_DAYS` rows of the record are copied, their
+    The file is read by `read_spreadsheet` (CSV / XLSX, sorted
+    datetime index, float64 columns), its columns resolved to the
+    record roles by `resolve_columns`, renamed to the internal names
+    (``precip``, ``temp``, ``pet``, ``q_meas``, species names), and
+    trimmed to the forcing span by `trim_record`.  Spreadsheet
+    columns that resolve to no role are ignored.
+
+    Args:
+        path: The record file (a ``.csv`` or ``.xlsx`` spreadsheet).
+        network: The run's reaction network: it selects the
+            measured-species roles to resolve.
+        column_map: The explicit role → column override; None lets
+            `resolve_columns` auto-detect the roles from the column
+            names.
+
+    Returns:
+        The record indexed by a sorted `pandas.DatetimeIndex` and
+        restricted to the forcing span: ``precip``, ``temp``,
+        ``pet``, then ``q_meas`` and the resolved measured species
+        (in plot order) when present — the forcing complete and
+        exactly daily, the measured columns allowed to be NaN.
+
+    Raises:
+        ValueError:
+            Raised by the underlying reader, role resolver, or span
+            trim: an unsupported file extension, a missing or
+            duplicated date column, a non-numeric data column, an
+            unresolved required role, a role collision, a map value
+            pointing at a missing column, an interior forcing NaN, a
+            missing date, or a non-daily cadence.
+    """
+    raw: pd.DataFrame = read_spreadsheet(path, column_map)
+    resolved: dict[str, str] = resolve_columns(raw, network, column_map)
+    rename: dict[str, str] = {
+        column: role for role, column in resolved.items()
+    }
+    out: pd.DataFrame = raw.rename(columns=rename)[list(resolved.keys())]
+    return trim_record(out)
+
+
+def _with_spinup(
+    df: pd.DataFrame,
+    measured_columns: list[str],
+    spinup_days: int = NUM_SPINUP_DAYS,
+) -> pd.DataFrame:
+    """
+    Prepend the spin-up to the record.
+
+    The first ``spinup_days`` rows of the record are copied, their
     index shifted back by the same number of days, and their measured
-    values (``q_meas`` and the run's measured concentration columns)
-    set to NaN, so the model integrates a spin-up period before the
-    first day of the record and the measured series are sparse over
-    it.
+    values (``q_meas`` and the run's measured concentration columns,
+    whichever exist) set to NaN, so the model integrates a spin-up
+    period before the first day of the record and the measured
+    series are sparse over it.
 
     Args:
         df: The record indexed by daily dates, sorted ascending.
         measured_columns: The run's measured concentration columns
-            (from `_measured_columns`).
+            (from `_measured_columns` or the resolved species
+            roles).
+        spinup_days: The spin-up length in days; the caller caps it
+            to at most half the record (`load_input_data`).
 
     Returns:
-        The spin-up-inclusive record (the shifted copy of the first
-        two years, then the record itself).
+        The spin-up-inclusive record (the shifted copy, then the
+        record itself); a copy of the record itself when
+        ``spinup_days`` is zero.
     """
-    spinup: pd.DataFrame = df.iloc[:NUM_SPINUP_DAYS].copy()
+    if spinup_days <= 0:
+        return df.copy()
+    spinup: pd.DataFrame = df.iloc[:spinup_days].copy()
     spinup.index = pd.DatetimeIndex(spinup.index) - pd.Timedelta(
-        days=NUM_SPINUP_DAYS
+        days=spinup_days
     )
     for column in ("q_meas",) + tuple(measured_columns):
         if column in spinup.columns:
@@ -816,43 +854,62 @@ def _with_spinup(
 
 
 def load_input_data(
-    csv_path: Path = DEFAULT_CSV_PATH,
+    path: Path = DEFAULT_CSV_PATH,
     model_key: str = DEFAULT_MODEL_KEY,
     network: pt.ReactionNetwork | None = None,
+    column_map: dict[str, str | None] | None = None,
+    spinup_days: int = NUM_SPINUP_DAYS,
 ) -> GuiInputData:
     """
-    Load and assemble the GUI inputs from the East River series CSV.
+    Load and assemble the GUI inputs from a record spreadsheet.
 
-    Builds the selected model's bounds, reads the CSV, prepends the
-    two-year spin-up, and creates the forcing, the precipitation
-    concentrations, and the measured series.  The measured series
-    follows the run's network: its primary and secondary species with
-    a column in the record, in species order, followed by the derived
-    DIC column when the network carries the whole carbonate trio (the
-    default network yields ["DOC", "Ca++", "DIC"] — species order,
-    DIC last).
+    Builds the selected model's bounds, loads the record through
+    `read_record` (CSV or XLSX; the roles auto-detected from the
+    column names or overridden by `column_map`; trimmed to the
+    forcing span), prepends the spin-up, and creates the forcing,
+    the precipitation concentrations, and the measured series.  The
+    measured series are the record's resolved species columns in
+    plot order (the default network's record yields "DOC", "Ca++",
+    "DIC" — species order, DIC last); a record without a streamflow
+    column loads with ``q_meas = None`` and one without
+    concentrations with an empty ``conc_df``.
 
     Args:
-        csv_path: Path to the East River series CSV; defaults to the
-            record shipped with the package.
+        path: The record file (a ``.csv`` or ``.xlsx`` spreadsheet);
+            defaults to the record shipped with the package.
         model_key: The key of the selected model's spec; defaults to
             the lateral three-layer model.
-        network: The run's reaction network; defaults to the SOC / DOC
-            / calcite network.
+        network: The run's reaction network; defaults to the SOC /
+            DOC / calcite network.
+        column_map: The explicit role → column override; None lets
+            the loader auto-detect the roles from the column names.
+        spinup_days: The spin-up length in days, capped at half the
+            record; defaults to `NUM_SPINUP_DAYS`.
 
     Returns:
-        The assembled `GuiInputData`.
+        The assembled `GuiInputData`; its ``window`` is the
+        record's forcing span.
 
     Raises:
-        ValueError: Raised for an unknown model key.
+        ValueError: Raised for an unknown model key or by the
+            record loader: an unsupported file extension, a missing
+            or duplicated date column, a non-numeric data column, an
+            unresolved required role, a role collision, a map value
+            pointing at a missing column, an interior forcing NaN,
+            a missing date, or a non-daily cadence.
     """
     spec: ModelSpec = get_model_spec(model_key)
     network = network if network is not None else default_network()
     bounds: dict[str, tuple[float, float]] = _bounds(spec, network)
 
-    df: pd.DataFrame = _load_csv(csv_path)
-    measured: list[str] = _measured_columns(network, df)
-    df = _with_spinup(df, measured)
+    df: pd.DataFrame = read_record(path, network, column_map)
+    window: tuple[pd.Timestamp, pd.Timestamp] = (df.index[0], df.index[-1])
+    measured: list[str] = [
+        column
+        for column in df.columns
+        if column not in ("precip", "temp", "pet", "q_meas")
+    ]
+    df = _with_spinup(df, measured, max(0, min(spinup_days, len(df) // 2)))
 
     precip_conc: np.ndarray = np.full(
         (
@@ -868,7 +925,9 @@ def load_input_data(
         temp=df["temp"],
         pet=df["pet"],
     )
-    q_meas: pd.Series = df["q_meas"]
+    q_meas: pd.Series | None = (
+        df["q_meas"] if "q_meas" in df.columns else None
+    )
     conc_df: pd.DataFrame = df[measured]
     set_species_colors(measured)
 
@@ -881,6 +940,7 @@ def load_input_data(
         precip_conc=precip_conc,
         q_meas=q_meas,
         conc_df=conc_df,
+        window=window,
     )
 
 

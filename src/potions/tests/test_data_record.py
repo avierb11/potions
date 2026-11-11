@@ -423,3 +423,157 @@ class TestTrimRecord:
         assert out.index[0] == pd.Timestamp("2014-10-01")
         assert out.index[-1] == pd.Timestamp("2021-09-30")
         assert not out[["precip", "temp", "pet"]].isna().any().any()
+
+
+# ------------------------------------------------------------------ #
+# read_record and the generalized load_input_data
+# ------------------------------------------------------------------ #
+
+
+def _forcing_frame(
+    index: pd.DatetimeIndex, with_streamflow: bool = True
+) -> pd.DataFrame:
+    """A complete daily forcing frame for the record tests (ISO date
+    column, constant forcing, optional integer streamflow)."""
+    n: int = len(index)
+    df: pd.DataFrame = pd.DataFrame(
+        {
+            "date": index.strftime("%Y-%m-%d"),
+            "precip": np.ones(n),
+            "temp": np.full(n, 5.0),
+            "pet": np.full(n, 2.0),
+        }
+    )
+    if with_streamflow:
+        df["q_meas"] = np.arange(n, dtype=float)
+    return df
+
+
+class TestReadRecord:
+    """`read_record` composes the reader, the role resolver, and the
+    span trim into a runnable record frame; the generalized
+    `load_input_data` assembles `GuiInputData` from any record, with
+    the spin-up capped to half the record."""
+
+    def test_bundled_invariants(self) -> None:
+        """The bundled record loads as 2,557 rows over
+        2014-10-01 → 2021-09-30 with zero forcing or streamflow NaN
+        (the standing invariant the CSV trim relies on)."""
+        df: pd.DataFrame = gui_data.read_record(
+            gui_data.DEFAULT_CSV_PATH, gui_data.default_network()
+        )
+        assert len(df) == 2557
+        assert df.index[0] == pd.Timestamp("2014-10-01")
+        assert df.index[-1] == pd.Timestamp("2021-09-30")
+        assert not df[["precip", "temp", "pet", "q_meas"]].isna().any().any()
+
+    def test_spinup_cap_short_record(self, tmp_path: Path) -> None:
+        """A 300-day record gets a 150-day spin-up (half the record),
+        so 450 total rows: the measured values are NaN over the
+        spin-up and actual over the record."""
+        path: Path = tmp_path / "short.csv"
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=300, freq="D"
+        )
+        _forcing_frame(index).to_csv(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(path)
+        assert len(data.forc.precip) == 450
+        assert data.q_meas is not None
+        assert data.q_meas.iloc[:150].isna().all()
+        assert data.q_meas.iloc[150:].notna().all()
+        assert list(data.q_meas.iloc[150:]) == list(range(300))
+
+    def test_spinup_default_east_river(self) -> None:
+        """The bundled record (longer than 2×730) keeps the full
+        default two-year spin-up."""
+        data: gui_data.GuiInputData = gui_data.load_input_data()
+        assert len(data.forc.precip) == 2557 + gui_data.NUM_SPINUP_DAYS
+
+    def test_spinup_param(self, tmp_path: Path) -> None:
+        """An explicit spin-up length is honored when it fits under
+        the half-record cap (100-day record, 10-day spin-up)."""
+        path: Path = tmp_path / "hundred.csv"
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=100, freq="D"
+        )
+        _forcing_frame(index).to_csv(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(
+            path, spinup_days=10
+        )
+        assert len(data.forc.precip) == 110
+
+    def test_no_streamflow_column(self, tmp_path: Path) -> None:
+        """A forcing-only record loads with ``q_meas = None`` and
+        complete forcing."""
+        path: Path = tmp_path / "forcing_only.csv"
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=30, freq="D"
+        )
+        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(path)
+        assert data.q_meas is None
+        assert not data.forc.precip.isna().any()
+        assert not data.forc.temp.isna().any()
+        assert not data.forc.pet.isna().any()
+
+    def test_no_concentrations(self, tmp_path: Path) -> None:
+        """A forcing-only record yields a concentration frame with no
+        columns, indexed like the rest of the record."""
+        path: Path = tmp_path / "forcing_only.csv"
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=30, freq="D"
+        )
+        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(path)
+        assert list(data.conc_df.columns) == []
+        assert data.conc_df.index.equals(data.forc.precip.index)
+
+    def test_window_field(self) -> None:
+        """The window is the record's forcing span, not the East
+        River default."""
+        data: gui_data.GuiInputData = gui_data.load_input_data()
+        assert data.window == (
+            pd.Timestamp("2014-10-01"),
+            pd.Timestamp("2021-09-30"),
+        )
+
+    def test_one_day_record(self, tmp_path: Path) -> None:
+        """A one-day record (Review Focus 4) loads: the window is
+        that day, the spin-up cap yields zero spin-up rows, and no
+        index errors occur."""
+        path: Path = tmp_path / "one_day.csv"
+        index: pd.DatetimeIndex = pd.date_range("2019-06-15", periods=1)
+        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(path)
+        assert len(data.forc.precip) == 1
+        assert data.window == (
+            pd.Timestamp("2019-06-15"),
+            pd.Timestamp("2019-06-15"),
+        )
+        assert data.q_meas is None
+
+    def test_xlsx_with_map(self, tmp_path: Path) -> None:
+        """An XLSX whose columns only resolve through an explicit map
+        loads (and its short span caps the spin-up to half)."""
+        path: Path = tmp_path / "mapped.xlsx"
+        index: pd.DatetimeIndex = pd.date_range("2019-01-01", periods=10)
+        frame: pd.DataFrame = _forcing_frame(index, with_streamflow=False)
+        frame.rename(
+            columns={
+                "date": "day",
+                "precip": "wet",
+                "temp": "degC",
+                "pet": "evap",
+            }
+        ).to_excel(path, index=False)
+        data: gui_data.GuiInputData = gui_data.load_input_data(
+            path,
+            column_map={
+                "date": "day",
+                "precip": "wet",
+                "temp": "degC",
+                "pet": "evap",
+            },
+        )
+        assert len(data.forc.precip) == 15
+        assert data.q_meas is None
