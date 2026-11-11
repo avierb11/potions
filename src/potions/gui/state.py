@@ -45,11 +45,14 @@ from typing import Final
 import pandas as pd
 import potions as pt
 
-from potions.gui.common import RIVER_SPECIES, WATER_YEARS
+from potions.gui.common import RIVER_SPECIES, WATER_YEARS, water_year_window
 from potions.gui.data import (
+    DEFAULT_WINDOW_END,
+    DEFAULT_WINDOW_START,
     GuiInputData,
     GuiRunResults,
     PlotSelection,
+    default_plot_mineral,
     default_plot_selection,
 )
 from potions.gui.model_specs import (
@@ -61,8 +64,12 @@ from potions.gui.model_specs import (
 # ==== Constants ==== #
 # The name of the GUI state file in a saved run directory.
 GUI_STATE_FILENAME: Final[str] = "gui_state.json"
+# The name of the run's network file in a saved run directory: a
+# human-editable YAML copy of the reaction network the run used (see
+# `potions.reactive_transport.network_file`).
+NETWORK_FILENAME: Final[str] = "network.yaml"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 5
+GUI_STATE_VERSION: Final[int] = 7
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -75,13 +82,14 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one (5, the selected model's key), version 4 (the
-# objective-table selection), version 3 (the time-series figure's
-# selection list), version 2 (the last version this GUI has written),
-# and version 1 (the two-splitter layout, whose splitter sizes are
-# mapped onto the current one).
+# the current one (7, the run's network fingerprint), version 6 (the
+# date-based plotting window), version 5 (the selected model's key),
+# version 4 (the objective-table selection), version 3 (the
+# time-series figure's selection list), version 2 (the last version
+# this GUI has written), and version 1 (the two-splitter layout,
+# whose splitter sizes are mapped onto the current one).
 _ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
-    {1, 2, 3, 4, GUI_STATE_VERSION}
+    {1, 2, 3, 4, 5, 6, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
@@ -130,6 +138,10 @@ class GuiState:
             absent field in a state file means a state saved before
             the model selector existed, which restores the lateral
             three-layer model.
+        network_fingerprint: The fingerprint of the reaction network
+            the session ran; an absent field in a state file means a
+            state saved before network persistence existed, which
+            restores the default network.
     """
 
     csv_path: str | None
@@ -142,6 +154,7 @@ class GuiState:
     mode: str = MODE_FULL
     objective_terms: list[str] | None = None
     model_key: str = DEFAULT_MODEL_KEY
+    network_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -166,8 +179,8 @@ class GuiState:
                 "zones": list(self.selection.zones),
                 "mineral": self.selection.mineral,
                 "streamflow": self.selection.streamflow,
-                "water_years_from": self.selection.water_years_from,
-                "water_years_to": self.selection.water_years_to,
+                "window_start": self.selection.window_start,
+                "window_end": self.selection.window_end,
             },
             "window_geometry": (
                 dict(self.window_geometry)
@@ -187,6 +200,7 @@ class GuiState:
                 else None
             ),
             "model_key": self.model_key,
+            "network_fingerprint": self.network_fingerprint,
         }
 
     @classmethod
@@ -231,6 +245,7 @@ class GuiState:
             mode=_optional_mode(data),
             objective_terms=_optional_objective_terms(data),
             model_key=_optional_model_key(data),
+            network_fingerprint=_optional_network_fingerprint(data),
         )
 
 
@@ -260,6 +275,10 @@ class RunHistoryEntry:
             field in a history line means a run recorded before the
             model selector existed, which belongs to the lateral
             three-layer model.
+        network_fingerprint: The fingerprint of the run's reaction
+            network; an absent field in a history line means a run
+            recorded before network persistence existed, which
+            belongs to the default network.
     """
 
     timestamp: str
@@ -267,6 +286,7 @@ class RunHistoryEntry:
     param_values: dict[str, float]
     objectives: dict[str, dict[str, float]]
     model_key: str = DEFAULT_MODEL_KEY
+    network_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -290,6 +310,7 @@ class RunHistoryEntry:
                 for target, metrics in self.objectives.items()
             },
             "model_key": self.model_key,
+            "network_fingerprint": self.network_fingerprint,
         }
 # =============== #
 
@@ -362,17 +383,20 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
 
     A mapping saved by the current version carries the current
     shape: the shared river species, the zones, the single
-    rate-figure mineral, the streamflow toggle, and the water-year
-    window.  A mapping saved by an older version (version 3 or
-    earlier) carries the previous shape — the zone figure's species,
-    the time-series figure's streamflow and river-species list, and
-    a list of minerals — and is migrated onto the current shape: the
-    species are the river species that either of the old figures had
-    on (in the panel's order), the mineral is the first of the old
-    list (the dominant SOC mineral when the list is absent), the
-    streamflow axis is on when the old time-series list carried it
-    (every series stays on when the list is absent, as before), and
-    the plotting window is the whole record.
+    rate-figure mineral, the streamflow toggle, and the date-based
+    plotting window.  A version-5 mapping carries the old water-year
+    window instead and is migrated by converting the two years to
+    the water-year span's first and last days.  A mapping saved by
+    version 3 or earlier carries the previous shape — the zone
+    figure's species, the time-series figure's streamflow and
+    river-species list, and a list of minerals — and is migrated onto
+    the current shape: the species are the river species that either
+    of the old figures had on (in the panel's order), the mineral is
+    the first of the old list (the dominant SOC mineral when the
+    list is absent), the streamflow axis is on when the old
+    time-series list carried it (every series stays on when the list
+    is absent, as before), and the plotting window is the whole
+    record.
 
     Args:
         data: The parsed JSON mapping.
@@ -383,7 +407,7 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
     Raises:
         ValueError: Raised when the field is missing or a selection
             entry is not of its expected type (a string list, a
-            string, a boolean, or a water year).
+            string, a boolean, a date, or a water year).
     """
     raw: object = data.get("selection")
     if not isinstance(raw, dict):
@@ -429,17 +453,55 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
             )
         return int(entry)
 
+    def _date(key: str, default: str) -> str:
+        entry: object = raw.get(key)
+        if entry is None:
+            return default
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"gui_state.json selection field {key!r} is not a "
+                f"date."
+            )
+        try:
+            pd.Timestamp(entry)
+        except ValueError as err:
+            raise ValueError(
+                f"gui_state.json selection field {key!r} is not a "
+                f"date."
+            ) from err
+        return entry
+
     # The current shape carries a single `mineral` string; version 3
     # and earlier carry a `minerals` list and no `streamflow` or
-    # water-year fields.
+    # plotting-window fields.
     if isinstance(raw.get("mineral"), str):
+        # Version 5 stores the window as water years; the current
+        # shape stores its first and last days.
+        if "window_start" in raw or "window_end" in raw:
+            start: str = _date("window_start", DEFAULT_WINDOW_START)
+            end: str = _date("window_end", DEFAULT_WINDOW_END)
+        elif "water_years_from" in raw or "water_years_to" in raw:
+            legacy_start, legacy_end = water_year_window(
+                _year("water_years_from", WATER_YEARS[0]),
+                _year("water_years_to", WATER_YEARS[-1]),
+            )
+            start = legacy_start.strftime("%Y-%m-%d")
+            end = legacy_end.strftime("%Y-%m-%d")
+        else:
+            start = DEFAULT_WINDOW_START
+            end = DEFAULT_WINDOW_END
+        if pd.Timestamp(start) > pd.Timestamp(end):
+            raise ValueError(
+                f"gui_state.json selection window starts on {start!r}, "
+                f"after its end {end!r}."
+            )
         return PlotSelection(
             species=_strings("species"),
             zones=_strings("zones"),
             mineral=str(raw["mineral"]),
             streamflow=_bool("streamflow", True),
-            water_years_from=_year("water_years_from", WATER_YEARS[0]),
-            water_years_to=_year("water_years_to", WATER_YEARS[-1]),
+            window_start=start,
+            window_end=end,
         )
 
     # The version 3 or earlier shape: migrate it onto the current
@@ -458,10 +520,10 @@ def _require_selection(data: dict[str, object]) -> PlotSelection:
         zones=_strings("zones"),
         mineral=legacy_minerals[0]
         if legacy_minerals
-        else "SOC(s)",
+        else default_plot_mineral(),
         streamflow="Streamflow" in legacy_time_series,
-        water_years_from=WATER_YEARS[0],
-        water_years_to=WATER_YEARS[-1],
+        window_start=DEFAULT_WINDOW_START,
+        window_end=DEFAULT_WINDOW_END,
     )
 
 
@@ -649,6 +711,37 @@ def _optional_model_key(data: dict[str, object]) -> str:
         raise ValueError(f"gui_state.json {error}") from error
 
 
+def _optional_network_fingerprint(data: dict[str, object]) -> str | None:
+    """
+    The optional ``network_fingerprint`` field of a gui_state.json
+    mapping.
+
+    The value is the fingerprint of the run's network file, a
+    content hash, so unlike ``model_key`` no registry validation
+    applies here.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's fingerprint, or None when it is absent (a state
+        saved before network persistence existed).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            string.
+    """
+    raw: object = data.get("network_fingerprint")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(
+            "gui_state.json 'network_fingerprint' must be a string or "
+            f"null, got {type(raw).__name__}."
+        )
+    return raw
+
+
 def _not_number(value: object) -> bool:
     """Whether a JSON value is not a (non-boolean) number."""
     return not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -751,6 +844,26 @@ def saved_run_model_key(run_dir: Path) -> str:
             if key is not None:
                 return key
     return DEFAULT_MODEL_KEY
+
+
+def saved_run_network_fingerprint(run_dir: Path) -> str | None:
+    """
+    The network fingerprint a saved run was produced with.
+
+    The run's ``gui_state.json`` is the only source: a run without
+    one (a run saved by an older version of the GUI or by the
+    command-line tools), or a state that predates the field, has no
+    fingerprint.
+
+    Args:
+        run_dir: The saved run directory to inspect.
+
+    Returns:
+        The fingerprint recorded in the run's state, or None when the
+        run predates network persistence.
+    """
+    state: GuiState | None = read_gui_state(run_dir)
+    return state.network_fingerprint if state is not None else None
 
 
 def list_run_dirs(results_dir: str | Path = "results") -> list[Path]:
@@ -933,6 +1046,9 @@ class SavedRun:
             selectable term).
         model_key: The key of the model spec the run was produced
             with, resolved by `saved_run_model_key`.
+        network_fingerprint: The fingerprint of the run's reaction
+            network; None for a run that predates network
+            persistence (no state file, or a pre-v7 state).
     """
 
     results: GuiRunResults
@@ -946,6 +1062,7 @@ class SavedRun:
     restore_note: str | None
     objective_terms: list[str] | None
     model_key: str
+    network_fingerprint: str | None
 # =============== #
 
 
@@ -1001,6 +1118,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             restore_note=None,
             objective_terms=state.objective_terms,
             model_key=state.model_key,
+            network_fingerprint=state.network_fingerprint,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -1024,6 +1142,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         # A stateless run never recorded an objective selection.
         objective_terms=None,
         model_key=saved_run_model_key(run_dir),
+        network_fingerprint=saved_run_network_fingerprint(run_dir),
     )
 
 

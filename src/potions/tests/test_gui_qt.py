@@ -34,6 +34,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ from matplotlib import rcParams
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.text import Text
-from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+from PySide6.QtCore import QDate, QEvent, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QFont, QImage, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -66,6 +67,7 @@ from potions.hydro_model import HydrologicalModel
 from potions.reactive_transport.rt_zone import WaterVolumeError
 
 from ..gui import data as gui_data
+from ..gui import calibration as gui_calibration
 from ..gui import figure_panel as gui_figure_panel
 from ..gui import model_specs
 from ..gui import param_panel as gui_param_panel
@@ -77,7 +79,6 @@ from ..gui.common import (
     RIVER_SPECIES,
     RT_THEME,
     SPECIATION_ZONES,
-    WATER_YEARS,
     param_label,
 )
 from ..gui.data import PlotSelection
@@ -1117,9 +1118,18 @@ class TestMainWindowRuns:
             _pump()
             # Showing an offscreen window moves it off the origin;
             # restore the intended client geometry so the saved state
-            # is exactly the default the constructor set.
+            # is exactly the geometry the constructor asked for.  The
+            # header's minimum width can exceed the initial width, so
+            # record the geometry Qt actually applied.
             win.setGeometry(0, 0, *gui_window._INITIAL_SIZE)
             _pump()
+            applied: QRect = win.geometry()
+            expected_geometry: dict[str, int] = {
+                "x": applied.x(),
+                "y": applied.y(),
+                "width": applied.width(),
+                "height": applied.height(),
+            }
             monkeypatch.setattr(gui_window, "save_model_run", fake_save)
             win._on_save_run()
             assert len(saves) == 1
@@ -1157,12 +1167,7 @@ class TestMainWindowRuns:
             # splitter saves its laid-out sizes, i.e. the initial
             # distribution scaled to the window's height.  Compare
             # proportions rather than raw pixels.
-            assert saved.window_geometry == {
-                "x": 0,
-                "y": 0,
-                "width": gui_window._INITIAL_SIZE[0],
-                "height": gui_window._INITIAL_SIZE[1],
-            }
+            assert saved.window_geometry == expected_geometry
             # The saved list holds the main vertical splitter's
             # laid-out sizes: scaled to the splitter's actual size,
             # with each section clamped to its child's minimum size
@@ -2698,24 +2703,36 @@ class TestParamPanel:
                     zones=SPECIATION_ZONES,
                     mineral="Calcite(s)",
                     streamflow=False,
-                    water_years_from=2016,
-                    water_years_to=2020,
+                    window_start="2016-01-01",
+                    window_end="2020-12-31",
                 )
             )
             assert len(selections) == 1
             assert panel.selection().species == ["DOC"]
             assert panel.selection().mineral == "Calcite(s)"
             assert panel.selection().streamflow is False
-            assert panel.selection().water_years_from == 2016
-            assert panel.selection().water_years_to == 2020
+            assert panel.selection().window_start == "2016-01-01"
+            assert panel.selection().window_end == "2020-12-31"
         finally:
             panel.deleteLater()
             _pump()
 
-    def test_water_year_window(
+    def test_species_boxes_follow_measured_columns(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
     ) -> None:
-        """Moving the water-year pickers keeps from below to and re-emits."""
+        """The species checkboxes follow the run's measured columns."""
+        panel = self._make_panel(input_data)
+        try:
+            assert list(panel._species_boxes) == list(input_data.conc_df.columns)
+            assert panel.selection().species == ["DOC", "Ca++", "DIC"]
+        finally:
+            panel.deleteLater()
+            _pump()
+
+    def test_plotting_date_window(
+        self, qapp: QApplication, input_data: gui_data.GuiInputData
+    ) -> None:
+        """Moving the date pickers keeps from below to and re-emits."""
         panel = self._make_panel(input_data)
         try:
             selections: list[PlotSelection] = []
@@ -2724,26 +2741,26 @@ class TestParamPanel:
                 box.isChecked() for box in panel._species_boxes.values()
             ] == [True, True, True]
 
-            # Lower the to year; the from year (the record's start)
+            # Lower the to date; the from date (the record's start)
             # stays put.
-            panel._window_to_combo.setCurrentIndex(WATER_YEARS.index(2019))
+            panel._window_to_edit.setDate(QDate(2019, 9, 30))
             assert len(selections) == 1
-            assert selections[0].water_years_from == 2015
-            assert selections[0].water_years_to == 2019
+            assert selections[0].window_start == gui_data.DEFAULT_WINDOW_START
+            assert selections[0].window_end == "2019-09-30"
 
-            # Raise the from year past the to year: the to year
+            # Raise the from date past the to date: the to date
             # lifts to it.
-            panel._window_from_combo.setCurrentIndex(WATER_YEARS.index(2020))
+            panel._window_from_edit.setDate(QDate(2020, 1, 1))
             assert len(selections) == 2
-            assert selections[1].water_years_from == 2020
-            assert selections[1].water_years_to == 2020
+            assert selections[1].window_start == "2020-01-01"
+            assert selections[1].window_end == "2020-01-01"
 
-            # Lower the to year below the from year: the from year
+            # Lower the to date below the from date: the from date
             # lowers to it.
-            panel._window_to_combo.setCurrentIndex(WATER_YEARS.index(2016))
+            panel._window_to_edit.setDate(QDate(2016, 1, 1))
             assert len(selections) == 3
-            assert selections[2].water_years_from == 2016
-            assert selections[2].water_years_to == 2016
+            assert selections[2].window_start == "2016-01-01"
+            assert selections[2].window_end == "2016-01-01"
         finally:
             panel.deleteLater()
             _pump()
@@ -5086,6 +5103,249 @@ class TestLineSearch:
         finally:
             gate.set()
             file_gate.touch()
+            _close_window(win)
+
+
+class TestCalibration:
+    """The header's *Calibrate* button and its differential-evolution job."""
+
+    def test_metric_keys_for_terms(self) -> None:
+        """Only the supported metrics map, in first-seen order."""
+        assert gui_calibration.metric_keys_for_terms(
+            [
+                "Streamflow: KGE",
+                "Streamflow: LogKGE",
+                "Streamflow: KGE",
+                "Streamflow: Bias",
+                "bogus",
+            ]
+        ) == ("kge", "log_kge")
+
+    def test_objective_score(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """The score negates the equal-weighted metric sum."""
+        hydro, _rt = _synthetic_results(input_data)
+        expected: float = -float(
+            hydro.objective_functions["kge"]
+            + hydro.objective_functions["nse"]
+        )
+        assert gui_calibration.objective_score(
+            hydro, ("kge", "nse")
+        ) == pytest.approx(expected)
+        assert (
+            gui_calibration.objective_score(hydro, ("bogus",))
+            == float("inf")
+        )
+
+    def test_worker_passes_options_and_expands_pinned(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The worker searches the free hydrology parameters only, hands
+        the pinned values in as the fixed vector, forwards the
+        options, and reports the best full vector.
+        """
+        model_class = input_data.spec.model_class
+        num_hydro: int = model_class.get_num_hydro_parameters()
+        all_names: tuple[str, ...] = tuple(input_data.bounds)[:num_hydro]
+        x: np.ndarray = _midpoint_vector(input_data)
+        free_name: str = all_names[0]
+        free_high: float = float(x[0]) + 0.1
+        bounds: dict[str, tuple[float, float]] = {
+            name: (float(x[index]), float(x[index]))
+            for index, name in enumerate(all_names)
+        }
+        bounds[free_name] = (float(x[0]) - 0.1, free_high)
+
+        hydro, _rt = _synthetic_results(input_data)
+        records: list[dict[str, object]] = []
+
+        def fake_calibration(cls: type, /, **kwargs: object) -> tuple[object, object, object]:
+            records.append(kwargs)
+            callback = kwargs["callback"]
+            assert callable(callback)
+            for generation in range(1, 3):
+                callback(np.zeros(1), 0.5 / generation)
+            metric = kwargs["metric"]
+            assert callable(metric)
+            assert metric(hydro) == gui_calibration.objective_score(
+                hydro, ("kge", "nse")
+            )
+            return (
+                {free_name: free_high},
+                hydro,
+                SimpleNamespace(fun=-2.5, nfev=123),
+            )
+
+        monkeypatch.setattr(
+            model_class,
+            "simple_calibration",
+            classmethod(fake_calibration),
+        )
+        worker: gui_calibration._CalibrationWorker = (
+            gui_calibration._CalibrationWorker(
+                x,
+                input_data,
+                bounds,
+                ["Streamflow: KGE", "Streamflow: NSE"],
+                gui_calibration.CalibrationSettings(
+                    generations=7, population_size=19, polish=True
+                ),
+                input_data.spec.key,
+            )
+        )
+        steps: list[tuple[int, int]] = []
+        lines: list[str] = []
+        worker.progress_step.connect(
+            lambda done, total: steps.append((done, total))
+        )
+        worker.progress_line.connect(lines.append)
+
+        outcome = worker._compute()
+
+        assert outcome.error is None
+        assert outcome.x_best is not None
+        assert outcome.x_best[0] == pytest.approx(free_high)
+        # The pinned parameters keep their current values.
+        for index in range(1, num_hydro):
+            assert outcome.x_best[index] == pytest.approx(float(x[index]))
+        assert outcome.results is not None
+        assert outcome.results.rt is None
+        assert outcome.best_value == pytest.approx(2.5)
+        assert outcome.evaluations == 123
+        assert outcome.terms == ["Streamflow: KGE", "Streamflow: NSE"]
+        assert outcome.model_key == input_data.spec.key
+
+        assert len(records) == 1
+        kwargs = records[0]
+        assert kwargs["maxiter"] == 7
+        assert kwargs["popsize"] == 19
+        assert kwargs["polish"] is True
+        assert kwargs["num_threads"] == -1
+        assert kwargs["param_ranges"] == {
+            free_name: (float(x[0]) - 0.1, free_high)
+        }
+        base_params = kwargs["base_params"]
+        assert isinstance(base_params, dict)
+        for index, name in enumerate(all_names):
+            assert base_params[name] == pytest.approx(float(x[index]))
+        assert steps == [(0, 7), (1, 7), (2, 7)]
+        assert lines[0].startswith("generation 1/7")
+
+    def test_window_runs_adopts_and_saves(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The button is available only in hydrology-only mode; a
+        finished calibration adopts the best parameters, refreshes
+        the results, and saves the run.
+        """
+        calls: list[np.ndarray] = []
+        full_fake = _fake_results_factory(calls, input_data)
+        hydro_fake = _fake_results_factory(calls, input_data, hydro_only=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
+        monkeypatch.setattr(
+            gui_window, "arr_to_hydro_results", hydro_fake
+        )
+        win = gui_window.MainWindow(input_data)
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump()
+            # Full mode: the button is disabled and the direct call
+            # is refused with a message.
+            assert not win._calibrate_button.isEnabled()
+            win._on_calibrate_clicked()
+            assert win._status_label.text() == (
+                "Calibration optimizes the hydrology model only; "
+                "switch the header's *Hydrology only* checkbox on."
+            )
+            assert win._worker is None
+
+            # Hydrology-only mode: the button comes up after its run.
+            win._mode_checkbox.setChecked(True)
+            _wait_until(
+                lambda: win._current_mode() == MODE_HYDRO
+                and win._worker is None
+                and win._results is not None
+                and win._results.rt is None
+            )
+            _pump()
+            assert win._calibrate_button.isEnabled()
+
+            terms: frozenset[str] = frozenset({"Streamflow: KGE"})
+            win._objective_terms = terms
+            win._objective_model.set_selected(terms)
+            free_name: str = next(
+                name
+                for name in tuple(input_data.bounds)[
+                    : input_data.spec.model_class.get_num_hydro_parameters()
+                ]
+                if win._param_panel.current_bounds()[name][1]
+                > win._param_panel.current_bounds()[name][0]
+            )
+            high: float = win._param_panel.current_bounds()[free_name][1]
+            hydro, _rt = _synthetic_results(input_data)
+
+            def fake_calibration(cls: type, /, **kwargs: object) -> tuple[object, object, object]:
+                callback = kwargs["callback"]
+                assert callable(callback)
+                callback(np.zeros(1), 0.1)
+                return (
+                    {free_name: high},
+                    hydro,
+                    SimpleNamespace(fun=-1.5, nfev=42),
+                )
+
+            monkeypatch.setattr(
+                input_data.spec.model_class,
+                "simple_calibration",
+                classmethod(fake_calibration),
+            )
+            monkeypatch.setattr(
+                gui_window,
+                "ask_calibration_settings",
+                lambda _parent: gui_calibration.CalibrationSettings(
+                    generations=3, population_size=4, polish=False
+                ),
+            )
+            win._on_calibrate_clicked()
+            assert isinstance(win._worker, gui_calibration._CalibrationWorker)
+            _wait_until(
+                lambda: win._worker is None
+                and "Calibration finished" in win._status_label.text()
+            )
+            _pump()
+
+            assert win._param_panel.param_values()[free_name] == pytest.approx(
+                high
+            )
+            assert win._last_run_mode == MODE_HYDRO
+            assert win._results is not None
+            assert win._results.rt is None
+            assert win._results_are_up_to_date()
+            assert "Calibration finished" in win._status_label.text()
+            assert "saved to" in win._status_label.text()
+            run_dir: Path = tmp_path / "results"
+            saved: list[Path] = [
+                path
+                for path in run_dir.iterdir()
+                if (path / "gui_state.json").is_file()
+            ]
+            assert len(saved) == 1
+            assert saved[0].name in win._status_label.text()
+            assert win._calibrate_button.isEnabled()
+        finally:
             _close_window(win)
 
 

@@ -43,7 +43,12 @@ import numpy as np
 import pandas as pd
 import potions as pt
 from potions.calibration import build_rt_bounds
-from potions.gui.common import RIVER_SPECIES, WATER_YEARS, water_year_window
+from potions.gui.common import (
+    RIVER_SPECIES,
+    WATER_YEARS,
+    set_species_colors,
+    water_year_window,
+)
 from potions.gui.model_specs import (
     DEFAULT_MODEL_KEY,
     DEFAULT_MODEL_SPEC,
@@ -463,6 +468,7 @@ def load_input_data(
     )
     q_meas: pd.Series = df["q_meas"]
     conc_df: pd.DataFrame = df[measured]
+    set_species_colors(measured)
 
     return GuiInputData(
         spec=spec,
@@ -876,28 +882,81 @@ def arr_to_hydro_results(
     return GuiRunResults(hydro=hydro, rt=None)
 
 
+def network_measured_species(network: pt.ReactionNetwork) -> list[str]:
+    """
+    The measured species the figures can show for a network.
+
+    The network's primary and secondary species that have a measured
+    column in the East River record, in the network's species order,
+    followed by ``"DIC"`` when the record's DIC column is a derived
+    species of the network (its carbonate trio is carried).
+
+    Args:
+        network: The run's reaction network.
+
+    Returns:
+        The measured species, in plot order.
+    """
+    aqueous: set[str] = set(network.primary_names) | set(network.secondary_names)
+    species: list[str] = [
+        name
+        for name in network.species_order
+        if name in aqueous and name in RIVER_SPECIES
+    ]
+    if "DIC" not in species and set(CARBONATE_TRIO) <= set(network.species_names):
+        species.append("DIC")
+    return species
+
+
+def default_plot_mineral(network: pt.ReactionNetwork | None = None) -> str:
+    """
+    The default reaction-rate figure's mineral for a network.
+
+    The network's first mineral in its species order; the empty
+    string when the network carries no mineral (the reaction-rate
+    figure is then simply not shown by the caller).
+
+    Args:
+        network: The run's reaction network; the default network
+            when None.
+
+    Returns:
+        The mineral name, or the empty string.
+    """
+    net: pt.ReactionNetwork = (
+        network if network is not None else get_soc_calcite_network()
+    )
+    return net.mineral_names[0] if net.mineral_names else ""
+
+
 def default_plot_selection(
     spec: ModelSpec = DEFAULT_MODEL_SPEC,
+    network: pt.ReactionNetwork | None = None,
 ) -> PlotSelection:
     """
-    The default figure selections for a model spec.
+    The default figure selections for a model spec and network.
 
-    Every river species (streamflow on) in the river-concentration
-    figure, every non-snow zone of the spec in the storage and
-    zone-concentration figures, the dominant SOC mineral in the
-    reaction-rate figure, and the whole water-year record as the
-    plotting window.
+    Every measured species of the network (streamflow on) in the
+    river-concentration figure, every non-snow zone of the spec in
+    the storage and zone-concentration figures, the network's
+    dominant mineral in the reaction-rate figure, and the whole
+    water-year record as the plotting window.
 
     Args:
         spec: The selected model's spec; defaults to the lateral
             three-layer model.
+        network: The run's reaction network; the default network
+            when None.
 
     Returns:
         The default `PlotSelection`.
     """
+    net: pt.ReactionNetwork = (
+        network if network is not None else get_soc_calcite_network()
+    )
     return PlotSelection(
-        species=list(RIVER_SPECIES),
+        species=network_measured_species(net),
         zones=[zone for zone in spec.zones if zone not in spec.snow_zones],
-        mineral="SOC(s)",
+        mineral=default_plot_mineral(net),
     )
 # =================== #

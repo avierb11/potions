@@ -198,6 +198,23 @@ RIVER_SPECIES_MEAS_COLORS: Final[dict[str, str]] = {
     "DIC": "teal",
     "Ca++": "crimson",
 }
+# Fixed palettes for measured species beyond the legacy trio: eight
+# hues each, the simulated (lighter) and measured (darker) variants of
+# the project's published color families.
+SPECIES_SIM_PALETTE: Final[tuple[str, ...]] = (
+    "sandybrown", "turquoise", "lightcoral", "goldenrod",
+    "slateblue", "darkorange", "olive", "seagreen",
+)
+SPECIES_MEAS_PALETTE: Final[tuple[str, ...]] = (
+    "peru", "teal", "crimson", "darkgoldenrod",
+    "darkslateblue", "saddlebrown", "olivedrab", "forestgreen",
+)
+# Immutable snapshots of the legacy colors: the session maps above
+# are cleared and refilled by `set_species_colors`, so anything that
+# needs the original DOC / DIC / Ca++ colors reads these instead.
+_LEGACY_SIM: Final[dict[str, str]] = dict(RIVER_SPECIES_SIM_COLORS)
+_LEGACY_MEAS: Final[dict[str, str]] = dict(RIVER_SPECIES_MEAS_COLORS)
+_LEGACY_NAMES: Final[frozenset[str]] = frozenset(RIVER_SPECIES)
 
 # Streamflow colors, matching the project's published figures.
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
@@ -340,6 +357,52 @@ def set_rc_params() -> None:
     plt.rcParams["axes.spines.left"] = False
     plt.rcParams["axes.spines.right"] = False
     plt.rcParams["axes.titlelocation"] = "left"
+
+
+def build_species_colors(
+    measured: Sequence[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    The sim and measured color maps for a run's measured species.
+
+    Legacy species (DOC / DIC / Ca++) keep their published colors;
+    every other measured species takes the next palette hue in the
+    measured list's order (wrapping at eight).
+
+    Args:
+        measured: The measured species, in plot order.
+
+    Returns:
+        The (sim_colors, measured_colors) dicts keyed by species name.
+    """
+    sim: dict[str, str] = {}
+    meas: dict[str, str] = {}
+    for index, name in enumerate(measured):
+        if name in _LEGACY_NAMES:
+            sim[name] = _LEGACY_SIM[name]
+            meas[name] = _LEGACY_MEAS[name]
+        else:
+            sim[name] = SPECIES_SIM_PALETTE[index % len(SPECIES_SIM_PALETTE)]
+            meas[name] = SPECIES_MEAS_PALETTE[index % len(SPECIES_MEAS_PALETTE)]
+    return sim, meas
+
+
+def set_species_colors(measured: Sequence[str]) -> None:
+    """
+    Refill the session species-color maps for ``measured`` (in place).
+
+    The maps are the ``RIVER_SPECIES_SIM_COLORS`` and
+    ``RIVER_SPECIES_MEAS_COLORS`` dicts the figures read; they are
+    cleared and refilled from `build_species_colors`.
+
+    Args:
+        measured: The measured species of the run, in plot order.
+    """
+    sim, meas = build_species_colors(measured)
+    RIVER_SPECIES_SIM_COLORS.clear()
+    RIVER_SPECIES_MEAS_COLORS.clear()
+    RIVER_SPECIES_SIM_COLORS.update(sim)
+    RIVER_SPECIES_MEAS_COLORS.update(meas)
 
 
 def param_label(

@@ -53,6 +53,7 @@ from potions.result_saving import (
     save_model_run,
 )
 
+from ..gui import common as gui_common
 from ..gui import data as gui_data
 from ..gui import gradients as gui_gradients
 from ..gui import model_pool
@@ -273,6 +274,7 @@ def _full_state(
     mode: str = MODE_FULL,
     objective_terms: list[str] | None = None,
     model_key: str = model_specs.DEFAULT_MODEL_KEY,
+    network_fingerprint: str | None = None,
 ) -> GuiState:
     """A complete gui_state matching the loaded input data."""
     bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
@@ -292,6 +294,7 @@ def _full_state(
         mode=mode,
         objective_terms=objective_terms,
         model_key=model_key,
+        network_fingerprint=network_fingerprint,
     )
 
 
@@ -654,6 +657,58 @@ class TestParamSymbol:
         assert str(excinfo.value) == "Unrecognized parameter key: 'bogus'"
 
 
+class TestSpeciesPalette:
+    """The session's species color maps follow the run's measured species."""
+
+    def test_legacy_colors_unchanged(self) -> None:
+        """The default network's measured species keep the published colors."""
+        try:
+            gui_common.set_species_colors(["DOC", "Ca++", "DIC"])
+            assert gui_common.RIVER_SPECIES_SIM_COLORS == {
+                "DOC": "sandybrown",
+                "DIC": "turquoise",
+                "Ca++": "lightcoral",
+            }
+            assert gui_common.RIVER_SPECIES_MEAS_COLORS == {
+                "DOC": "peru",
+                "DIC": "teal",
+                "Ca++": "crimson",
+            }
+        finally:
+            gui_common.set_species_colors(list(RIVER_SPECIES))
+
+    def test_new_species_take_palette_hues(self) -> None:
+        """Novel species take the next palette hue in measured order."""
+        try:
+            gui_common.set_species_colors(["DOC", "Na+"])
+            assert gui_common.RIVER_SPECIES_SIM_COLORS["DOC"] == "sandybrown"
+            sim: str = gui_common.RIVER_SPECIES_SIM_COLORS["Na+"]
+            meas: str = gui_common.RIVER_SPECIES_MEAS_COLORS["Na+"]
+            assert sim == gui_common.SPECIES_SIM_PALETTE[1]
+            assert meas == gui_common.SPECIES_MEAS_PALETTE[1]
+            assert sim == "turquoise"
+            assert meas == "teal"
+        finally:
+            gui_common.set_species_colors(list(RIVER_SPECIES))
+
+    def test_palette_wraps_at_eight(self) -> None:
+        """Beyond eight species the palette wraps around."""
+        names: list[str] = [f"novel_{i}" for i in range(9)]
+        try:
+            gui_common.set_species_colors(names)
+            sim: dict[str, str] = dict(gui_common.RIVER_SPECIES_SIM_COLORS)
+            meas: dict[str, str] = dict(gui_common.RIVER_SPECIES_MEAS_COLORS)
+            assert sim[names[0]] == gui_common.SPECIES_SIM_PALETTE[0]
+            assert sim[names[8]] == gui_common.SPECIES_SIM_PALETTE[0]
+            assert sim[names[3]] == gui_common.SPECIES_SIM_PALETTE[3]
+            assert sim[names[7]] == gui_common.SPECIES_SIM_PALETTE[7]
+            assert sim[names[0]] == "sandybrown"
+            assert meas[names[0]] == gui_common.SPECIES_MEAS_PALETTE[0]
+            assert meas[names[8]] == gui_common.SPECIES_MEAS_PALETTE[0]
+        finally:
+            gui_common.set_species_colors(list(RIVER_SPECIES))
+
+
 class TestWaterYearWindow:
     """The picker's water years and the plotting window they span."""
 
@@ -703,7 +758,8 @@ class TestDefaultPlotSelection:
 
     def test_defaults(self, input_data: gui_data.GuiInputData) -> None:
         selection = gui_data.default_plot_selection()
-        assert selection.species == list(RIVER_SPECIES)
+        # The default network's measured species, in species order.
+        assert selection.species == ["DOC", "Ca++", "DIC"]
         assert selection.zones == [
             "surface_hs",
             "surface_rp",
@@ -725,6 +781,27 @@ class TestDefaultPlotSelection:
                 for zone in data.spec.zones
                 if zone not in data.spec.snow_zones
             ]
+
+    def test_measured_species_follow_the_network(self) -> None:
+        assert gui_data.network_measured_species(
+            get_soc_calcite_network()
+        ) == ["DOC", "Ca++", "DIC"]
+        assert (
+            gui_data.network_measured_species(get_carbon_network())
+            == ["DOC", "DIC"]
+        )
+        assert gui_data.network_measured_species(get_chloride_network()) == []
+
+    def test_mineral_follows_the_network(self) -> None:
+        assert gui_data.default_plot_mineral() == "SOC(s)"
+        assert gui_data.default_plot_mineral(get_carbon_network()) == "SOC(s)"
+        assert gui_data.default_plot_mineral(get_chloride_network()) == ""
+
+    def test_chloride_selection_has_no_series(self) -> None:
+        """The empty mineral is the signal that hides the rate figure."""
+        selection = gui_data.default_plot_selection(network=get_chloride_network())
+        assert selection.species == []
+        assert selection.mineral == ""
 
 
 
@@ -752,12 +829,12 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 6
-        assert state.to_dict()["version"] == 6
+        assert GUI_STATE_VERSION == 7
+        assert state.to_dict()["version"] == 7
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 6
+        assert raw["version"] == 7
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         assert raw["model_key"] == "lateral_three_layer"
         param_values = _as_dict(raw, "param_values")
@@ -765,7 +842,8 @@ class TestGuiStateRoundTrip:
         param_bounds = _as_dict(raw, "param_bounds")
         assert param_bounds["proportion.1"] == [0.25, 0.95]
         selection = _as_dict(raw, "selection")
-        assert selection["species"] == list(RIVER_SPECIES)
+        # The default network's measured species, in species order.
+        assert selection["species"] == ["DOC", "Ca++", "DIC"]
         assert selection["mineral"] == "SOC(s)"
         assert selection["streamflow"] is True
         assert selection["window_start"] == gui_data.DEFAULT_WINDOW_START
@@ -973,7 +1051,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7]).",
             ),
             (
                 {"csv_path": 12},
@@ -1273,7 +1351,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7]).\n"
         )
 
     def test_top_level_not_object(
@@ -1294,10 +1372,54 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 6,")
+        assert text.startswith("{\n  \"version\": 7,")
         assert text.endswith("\n")
 
 
+
+
+class TestNetworkState:
+    """The gui_state v7 network fingerprint round trip and recovery."""
+
+    def test_fingerprint_round_trip(
+        self, input_data: gui_data.GuiInputData, tmp_path: Path
+    ) -> None:
+        state = _full_state(input_data, network_fingerprint="9f86d081")
+        write_gui_state(tmp_path, state)
+        assert read_gui_state(tmp_path) == state
+
+    def test_v6_state_reads_without_fingerprint(
+        self, input_data: gui_data.GuiInputData, tmp_path: Path
+    ) -> None:
+        """A v6 state without the field reads with a null fingerprint."""
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["version"] = 6
+        raw.pop("network_fingerprint", None)
+        (tmp_path / "gui_state.json").write_text(json.dumps(raw, indent=2))
+        state = read_gui_state(tmp_path)
+        assert state is not None
+        assert state.network_fingerprint is None
+
+    def test_fingerprint_non_string_raises(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["network_fingerprint"] = 3.0
+        with pytest.raises(
+            ValueError,
+            match=r"network_fingerprint' must be a string or null, got float",
+        ):
+            GuiState.from_dict(raw)
+
+    def test_saved_run_network_fingerprint(
+        self,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+    ) -> None:
+        assert gui_state.saved_run_network_fingerprint(tmp_path) is None
+        state = _full_state(input_data, network_fingerprint="9f86d081")
+        write_gui_state(tmp_path, state)
+        assert gui_state.saved_run_network_fingerprint(tmp_path) == "9f86d081"
 
 
 class TestFindLatestRunDir:
