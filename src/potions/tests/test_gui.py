@@ -56,8 +56,10 @@ from potions.result_saving import (
 from ..gui import common as gui_common
 from ..gui import data as gui_data
 from ..gui import gradients as gui_gradients
+from ..gui import main as gui_main
 from ..gui import model_pool
 from ..gui import model_specs
+from ..gui import network_specs
 from ..gui import plots as gui_plots
 from ..gui import state as gui_state
 from ..gui.common import (
@@ -5103,3 +5105,106 @@ class TestExchangeInit:
             0.0, [reaction], {"DOC": 1.12e-3}
         )
         assert result == {"X-": 0.0, "XDOC": 0.0}
+
+
+class TestNetworkSpecs:
+    """The curated reaction-network registry."""
+
+    def test_registry_has_the_five_networks_in_order(self) -> None:
+        assert list(network_specs.NETWORK_SPECS) == [
+            "soc_calcite",
+            "carbon",
+            "simple_carbon",
+            "simple_carbon_adsorption",
+            "chloride",
+        ]
+        assert network_specs.DEFAULT_NETWORK_KEY == "soc_calcite"
+        assert (
+            network_specs.DEFAULT_NETWORK_SPEC
+            is network_specs.NETWORK_SPECS[network_specs.DEFAULT_NETWORK_KEY]
+        )
+
+    def test_display_names(self) -> None:
+        assert {
+            key: spec.display_name
+            for key, spec in network_specs.NETWORK_SPECS.items()
+        } == {
+            "soc_calcite": "East River SOC / DOC / calcite",
+            "carbon": "Carbon (SOC, no calcite)",
+            "simple_carbon": "Simple carbon (DOC + SOC)",
+            "simple_carbon_adsorption": "Simple carbon with adsorption",
+            "chloride": "Chloride (no speciation)",
+        }
+
+    def test_builders_are_the_common_network_factories(self) -> None:
+        from potions.reactive_transport.common_networks import (
+            get_carbon_network,
+            get_chloride_network,
+            get_simple_carbon_adsorption_network,
+            get_simple_carbon_network,
+            get_soc_calcite_network,
+        )
+
+        builders = {
+            key: spec.builder
+            for key, spec in network_specs.NETWORK_SPECS.items()
+        }
+        assert builders == {
+            "soc_calcite": get_soc_calcite_network,
+            "carbon": get_carbon_network,
+            "simple_carbon": get_simple_carbon_network,
+            "simple_carbon_adsorption": get_simple_carbon_adsorption_network,
+            "chloride": get_chloride_network,
+        }
+
+    def test_get_network_spec_unknown_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown network key"):
+            network_specs.get_network_spec("nope")
+
+
+class TestNetworkFingerprint:
+    """The stable, order-independent network fingerprint."""
+
+    def test_stable_across_fresh_builds(self) -> None:
+        spec = network_specs.get_network_spec(
+            network_specs.DEFAULT_NETWORK_KEY
+        )
+        assert gui_data.fingerprint_network(
+            spec.builder()
+        ) == gui_data.fingerprint_network(spec.builder())
+
+    def test_order_insensitive(self) -> None:
+        network = network_specs.get_network_spec(
+            network_specs.DEFAULT_NETWORK_KEY
+        ).builder()
+        fingerprint = gui_data.fingerprint_network(network)
+        # The canonical YAML sorts every map key, so reordering the
+        # primary species does not change the fingerprint.
+        reordered = pt.ReactionNetwork(
+            primary_aqueous=list(reversed(network.primary_aqueous)),
+            mineral=network.mineral,
+            secondary=network.secondary,
+            mineral_kinetics=network.mineral_kinetics,
+            exchange_species=network.exchange_species,
+        )
+        assert gui_data.fingerprint_network(reordered) == fingerprint
+
+    def test_distinct_networks_differ(self) -> None:
+        soc = network_specs.get_network_spec("soc_calcite").builder()
+        carbon = network_specs.get_network_spec("carbon").builder()
+        assert gui_data.fingerprint_network(
+            soc
+        ) != gui_data.fingerprint_network(carbon)
+
+
+class TestNetworkCli:
+    """The ``--network`` option of `main` (headless: it fails before
+    any Qt object is created)."""
+
+    def test_rejects_non_yaml_network(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            gui_main(["--network", "nope.txt"])
+        assert excinfo.value.code == 2
+        assert "must be a .yaml or .yml" in capsys.readouterr().err

@@ -34,6 +34,7 @@ hydrology-only mode).
 """
 
 import gc
+import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +56,8 @@ from potions.gui.model_specs import (
     ModelSpec,
     get_model_spec,
 )
+from potions.gui.network_specs import DEFAULT_NETWORK_KEY, get_network_spec
 from potions.hydro_model import HydrologicalModel
-from potions.reactive_transport.common_networks import get_soc_calcite_network
 from scipy.optimize import root_scalar
 
 # ==== Constants ==== #
@@ -445,7 +446,7 @@ def load_input_data(
         ValueError: Raised for an unknown model key.
     """
     spec: ModelSpec = get_model_spec(model_key)
-    network = network if network is not None else get_soc_calcite_network()
+    network = network if network is not None else default_network()
     bounds: dict[str, tuple[float, float]] = _bounds(spec, network)
 
     df: pd.DataFrame = _load_csv(csv_path)
@@ -739,6 +740,45 @@ def _primary_initial_concentrations(
     }
 
 
+def default_network() -> pt.ReactionNetwork:
+    """
+    Build the GUI's default reaction network.
+
+    The zero-argument builder of the default preset (the East River
+    SOC / DOC / calcite network); the fallback for callers and
+    persisted state that predate the network selector.
+
+    Returns:
+        A freshly built default network.
+    """
+    return get_network_spec(DEFAULT_NETWORK_KEY).builder()
+
+
+def fingerprint_network(network: pt.ReactionNetwork) -> str:
+    """
+    Compute the stable fingerprint of a reaction network.
+
+    The fingerprint is the SHA-256 hex digest of the network's
+    canonical YAML bytes (`NetworkFile.from_network(network).
+    to_bytes()`).  The canonical form fixes the section order and
+    sorts every map key, so the fingerprint is independent of the
+    order the species were added in: two networks share a
+    fingerprint exactly when they carry the same entries.  That is
+    what lets the window match a file-loaded network (species in
+    sorted file order) against the built-in preset (database order)
+    the file came from.
+
+    Args:
+        network: The network to fingerprint.
+
+    Returns:
+        The 64-character lowercase hex digest.
+    """
+    return hashlib.sha256(
+        pt.NetworkFile.from_network(network).to_bytes()
+    ).hexdigest()
+
+
 def arr_to_results(
     arr: np.ndarray,
     input_data: GuiInputData,
@@ -924,7 +964,7 @@ def default_plot_mineral(network: pt.ReactionNetwork | None = None) -> str:
         The mineral name, or the empty string.
     """
     net: pt.ReactionNetwork = (
-        network if network is not None else get_soc_calcite_network()
+        network if network is not None else default_network()
     )
     return net.mineral_names[0] if net.mineral_names else ""
 
@@ -952,7 +992,7 @@ def default_plot_selection(
         The default `PlotSelection`.
     """
     net: pt.ReactionNetwork = (
-        network if network is not None else get_soc_calcite_network()
+        network if network is not None else default_network()
     )
     return PlotSelection(
         species=network_measured_species(net),

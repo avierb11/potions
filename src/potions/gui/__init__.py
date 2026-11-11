@@ -20,13 +20,17 @@ Start the GUI with the console script installed with the package::
 
     potions-gui
 
-or programmatically with `main`.  The only option is ``--csv``::
+or programmatically with `main`.  The options are ``--csv`` (the
+series CSV to load) and ``--network`` (a reaction-network YAML
+file to run)::
 
-    potions-gui --csv path/to/series.csv
+    potions-gui --csv path/to/series.csv --network path/to/network.yaml
 """
 
 from collections.abc import Sequence
 from pathlib import Path
+
+import potions as pt
 
 __all__ = ["main"]
 
@@ -47,11 +51,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         argv: Argument list to parse; when omitted,
             ``sys.argv[1:]`` is parsed, so flags typed after the
             console script name pass through unchanged.  The
-            supported option is ``--csv``, the path of the series
-            CSV to use (default: the record shipped with the
-            package).
+            supported options are ``--csv``, the path of the
+            series CSV to use (default: the record shipped
+            with the package), and ``--network``, the path of a
+            reaction-network YAML file to run (default: the East
+            River SOC / DOC / calcite preset; a non-YAML path
+            ends with an argparse usage error).
     """
     import argparse
+    import potions as pt
     import sys
 
     from PySide6.QtGui import QFont
@@ -74,11 +82,29 @@ def main(argv: Sequence[str] | None = None) -> None:
             "shipped with the package)."
         ),
     )
+    parser.add_argument(
+        "--network",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path of a reaction-network YAML file to run (default: "
+            "the East River SOC / DOC / calcite preset)."
+        ),
+    )
     args: argparse.Namespace = parser.parse_args(argv)
 
     csv_path: Path = (
         Path(args.csv) if args.csv is not None else DEFAULT_CSV_PATH
     )
+
+    network: pt.ReactionNetwork | None = None
+    if args.network is not None:
+        network_path: Path = Path(args.network)
+        if network_path.suffix.lower() not in (".yaml", ".yml"):
+            parser.error(
+                f"--network {args.network} must be a .yaml or .yml file."
+            )
+        network = _load_network_file(network_path)
 
     set_rc_params()
     app: QApplication = QApplication([])
@@ -90,7 +116,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     font.setPointSize(12)
     app.setFont(font)
 
-    input_data = load_input_data(csv_path)
+    input_data = load_input_data(csv_path, network=network)
     window: MainWindow = MainWindow(
         input_data,
         # The state records the session's CSV only when it is not
@@ -99,4 +125,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     window.show()
     sys.exit(app.exec())
+
+
+def _load_network_file(path: Path) -> pt.ReactionNetwork:
+    """
+    Load a reaction-network YAML file for the ``--network`` option.
+
+    Args:
+        path: The path of the network file (checked for a YAML
+            suffix by the caller).
+
+    Returns:
+        The parsed `ReactionNetwork` (V-gated by `from_file`).
+
+    Raises:
+        FileNotFoundError:
+            Raised when the file does not exist.
+        ValueError:
+            Raised when the file is not valid network YAML or fails
+            validation; the message names the file and the issue(s).
+    """
+    return pt.ReactionNetwork.from_file(str(path))
 # =================== #
