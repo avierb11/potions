@@ -23,6 +23,7 @@ the state round trip, the CLI) live in `test_gui_qt.py`.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -301,3 +302,124 @@ class TestReadSpreadsheet:
         message: str = str(excinfo.value)
         assert "a" in message
         assert "b" in message
+
+
+# ------------------------------------------------------------------ #
+# Forcing-span trim and validation
+# ------------------------------------------------------------------ #
+
+
+class TestTrimRecord:
+    """`trim_record` trims an indexed, renamed record to its forcing
+    span — rows outside the span (observations beyond the forcing
+    period) are the only rows ever dropped — and rejects interior
+    forcing NaNs, gaps, and non-daily cadence."""
+
+    def test_observations_beyond_span_trimmed(self) -> None:
+        """Rows before and after the forcing span are dropped, with
+        their measured values on the surviving rows intact."""
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=20, freq="D"
+        )
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "precip": np.full(20, 1.0),
+                "temp": np.full(20, 5.0),
+                "pet": np.full(20, 2.0),
+                "q_meas": np.arange(20, dtype=float),
+            },
+            index=index,
+        )
+        df.iloc[:5, :3] = np.nan
+        df.iloc[15:, :3] = np.nan
+        out: pd.DataFrame = gui_data.trim_record(df)
+        assert len(out) == 10
+        assert out.index[0] == pd.Timestamp("2019-01-06")
+        assert out.index[-1] == pd.Timestamp("2019-01-15")
+        assert list(out["q_meas"]) == list(range(5, 15))
+
+    def test_forcing_nan_inside_rejected(self) -> None:
+        """An interior forcing NaN (inside the span) is a ValueError
+        that names the column and the affected date."""
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=10, freq="D"
+        )
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "precip": [1.0] * 10,
+                "temp": np.full(10, 5.0),
+                "pet": np.full(10, 2.0),
+            },
+            index=index,
+        )
+        df.iloc[4, 0] = np.nan
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.trim_record(df)
+        message: str = str(excinfo.value)
+        assert "precip" in message
+        assert "2019-01-05" in message
+
+    def test_missing_date_rejected(self) -> None:
+        """A gap inside the forcing span is a ValueError that names
+        the missing date."""
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=10, freq="D"
+        )
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "precip": np.full(10, 1.0),
+                "temp": np.full(10, 5.0),
+                "pet": np.full(10, 2.0),
+            },
+            index=index,
+        ).drop(index[4])
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.trim_record(df)
+        assert "2019-01-05" in str(excinfo.value)
+
+    def test_non_daily_rejected(self) -> None:
+        """A bi-daily cadence inside the span is rejected (the
+        record must be exactly daily)."""
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=10, freq="2D"
+        )
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "precip": np.full(10, 1.0),
+                "temp": np.full(10, 5.0),
+                "pet": np.full(10, 2.0),
+            },
+            index=index,
+        )
+        with pytest.raises(ValueError):
+            gui_data.trim_record(df)
+
+    def test_empty_rejected(self) -> None:
+        """No row with complete forcing is a ValueError."""
+        index: pd.DatetimeIndex = pd.date_range(
+            "2019-01-01", periods=3, freq="D"
+        )
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "precip": np.full(3, np.nan),
+                "temp": np.full(3, 5.0),
+                "pet": np.full(3, 2.0),
+            },
+            index=index,
+        )
+        with pytest.raises(ValueError):
+            gui_data.trim_record(df)
+
+    def test_bundled_span(self) -> None:
+        """The bundled record trims to its forcing span: 2,557 rows
+        over 2014-10-01 → 2021-09-30 with zero forcing NaN (the
+        standing invariant the CSV trim in Task 4 relies on)."""
+        raw: pd.DataFrame = pd.read_csv(
+            gui_data.DEFAULT_CSV_PATH, parse_dates=["date"], index_col="date"
+        )
+        df: pd.DataFrame = raw.rename(columns={"ppt": "precip"})
+        out: pd.DataFrame = gui_data.trim_record(df)
+        assert len(out) == 2557
+        assert out.index[0] == pd.Timestamp("2014-10-01")
+        assert out.index[-1] == pd.Timestamp("2021-09-30")
+        assert not out[["precip", "temp", "pet"]].isna().any().any()

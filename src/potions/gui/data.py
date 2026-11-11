@@ -713,6 +713,76 @@ def read_spreadsheet(
     return _float_frame(out.sort_index())
 
 
+def trim_record(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Trim a loaded record to its forcing span and validate it.
+
+    The forcing span is the first-to-last date over which all three
+    forcing columns (``precip``, ``temp``, ``pet``) are non-NaN.
+    Rows outside the span — observations that extend beyond the
+    forcing period — are the only rows the loader ever drops.  The
+    surviving record must then be exactly daily with no forcing NaN
+    or gaps inside the span; measured columns (``q_meas`` and
+    concentrations) may be NaN anywhere, including the whole span.
+
+    Args:
+        df: The record indexed by a sorted `pandas.DatetimeIndex`
+            with its forcing columns renamed to the internal names
+            (the `read_spreadsheet` + `resolve_columns` output).
+
+    Returns:
+        The record restricted to the forcing span, all forcing
+        complete and exactly daily.
+
+    Raises:
+        ValueError:
+            Raised when no row carries complete forcing, when a
+            forcing column has a missing value inside the span (the
+            message names the column, the missing count, and the
+            first affected date), when a date is missing inside the
+            span (the message names it), when the surviving cadence
+            is not daily (the message states the observed step), or
+            when no rows remain at all.
+    """
+    forcing: list[str] = ["precip", "temp", "pet"]
+    forcing_rows: pd.Series = df[forcing].notna().all(axis=1)
+    span_dates: pd.DatetimeIndex = df.index[forcing_rows]
+    if len(span_dates) == 0:
+        raise ValueError(
+            "The record has no forcing: no row where precipitation, "
+            "temperature, and PET are all present."
+        )
+    span_start: pd.Timestamp = span_dates.min()
+    span_end: pd.Timestamp = span_dates.max()
+    out: pd.DataFrame = df.loc[span_start:span_end]
+    for column in forcing:
+        nans: pd.Series = out[column].isna()
+        if nans.any():
+            first_date: pd.Timestamp = out.index[nans].min()
+            raise ValueError(
+                f"The forcing column {column!r} has "
+                f"{int(nans.sum())} missing value(s) inside the "
+                f"forcing span; first at {first_date.date()}."
+            )
+    expected: pd.DatetimeIndex = pd.date_range(span_start, span_end, freq="D")
+    missing: pd.DatetimeIndex = expected.difference(out.index)
+    if len(missing) > 0:
+        raise ValueError(
+            f"Missing date(s) inside the forcing span: "
+            f"{missing[0].date()} ({len(missing)} missing day(s) of "
+            f"{len(expected)})."
+        )
+    if len(out) != len(expected):
+        steps: pd.Series = out.index.to_series().diff().dropna()
+        median_step: pd.Timedelta = steps.median()
+        raise ValueError(
+            f"The record is not daily inside the forcing span: "
+            f"{len(out)} rows with a median step of {median_step} "
+            f"where {len(expected)} daily dates were expected."
+        )
+    return out
+
+
 def _with_spinup(
     df: pd.DataFrame, measured_columns: list[str]
 ) -> pd.DataFrame:
