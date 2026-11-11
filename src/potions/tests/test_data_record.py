@@ -22,12 +22,15 @@ the state round trip, the CLI) live in `test_gui_qt.py`.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from ..gui import data as gui_data
+from ..hydro_model import HydrologicalModel
+from ..model import Model
 from ..reactive_transport.common_networks import (
     get_chloride_network,
     get_soc_calcite_network,
@@ -577,3 +580,91 @@ class TestReadRecord:
         )
         assert len(data.forc.precip) == 15
         assert data.q_meas is None
+
+
+# ------------------------------------------------------------------ #
+# The None-safe run builders
+# ------------------------------------------------------------------ #
+
+
+def _midpoint_vector(input_data: gui_data.GuiInputData) -> np.ndarray:
+    """The parameter vector at every bound's midpoint."""
+    return np.array(
+        [0.5 * (lo + hi) for lo, hi in input_data.bounds.values()]
+    )
+
+
+class TestNoneSafeRunBuilders:
+    """The run builders hand the core the measured series the record
+    carries: the identical objects when present, ``None`` (the
+    core's sentinel) when the record has no column for them."""
+
+    def test_forcing_only_run_passes_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A record without a streamflow or concentration column
+        runs with every measured series passed to the models as
+        ``None`` (Review Focus 2)."""
+        index: pd.DatetimeIndex = pd.date_range("2019-01-01", periods=10)
+        path: Path = tmp_path / "forcing_only.csv"
+        _forcing_frame(index, with_streamflow=False).to_csv(
+            path, index=False
+        )
+        input_data: gui_data.GuiInputData = gui_data.load_input_data(path)
+        assert input_data.q_meas is None
+
+        seen_both: list[dict[str, object]] = []
+        seen_hydro: list[dict[str, object]] = []
+
+        def fake_run_both_models(
+            self: object, **kwargs: object
+        ) -> object:
+            seen_both.append(dict(kwargs))
+            return SimpleNamespace(hydro=None, reactive_transport=None)
+
+        def fake_run_hydro_model(
+            self: object, _forc: object, **kwargs: object
+        ) -> object:
+            seen_hydro.append(dict(kwargs))
+            return SimpleNamespace()
+
+        monkeypatch.setattr(Model, "run_both_models", fake_run_both_models)
+        monkeypatch.setattr(
+            HydrologicalModel, "run_hydro_model", fake_run_hydro_model
+        )
+
+        gui_data.arr_to_results(_midpoint_vector(input_data), input_data)
+        gui_data.arr_to_hydro_results(_midpoint_vector(input_data), input_data)
+
+        assert len(seen_both) == 1
+        assert seen_both[0]["meas_streamflow"] is None
+        assert seen_both[0]["meas_river_conc"] is None
+        assert len(seen_hydro) == 1
+        assert seen_hydro[0]["meas_streamflow"] is None
+
+    def test_measured_run_passes_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bundled record's measured series reach the model
+        unchanged: the recorder receives the identical objects, so
+        the ``None`` mapping applies to absent columns only."""
+        input_data: gui_data.GuiInputData = gui_data.load_input_data()
+        assert input_data.q_meas is not None
+
+        seen: list[dict[str, object]] = []
+
+        def fake_run_both_models(
+            self: object, **kwargs: object
+        ) -> object:
+            seen.append(dict(kwargs))
+            return SimpleNamespace(hydro=None, reactive_transport=None)
+
+        monkeypatch.setattr(Model, "run_both_models", fake_run_both_models)
+
+        gui_data.arr_to_results(_midpoint_vector(input_data), input_data)
+
+        assert len(seen) == 1
+        assert seen[0]["meas_streamflow"] is input_data.q_meas
+        assert seen[0]["meas_river_conc"] is input_data.conc_df

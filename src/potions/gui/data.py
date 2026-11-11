@@ -1321,16 +1321,21 @@ def arr_to_results(
     # DIC column against the model-computed derived series (the sum of
     # the aqueous carbonate river series) declared on the model.  The
     # model validates the column names itself and raises for a name it
-    # does not recognize.  The measured streamflow is the CSV's
+    # does not recognize.  The measured streamflow is the record's
     # ``q_meas`` column (a catchment-mean depth in millimeters per day,
     # NaN over the spin-up), so the hydrology objective functions are
-    # reported against it.
+    # reported against it.  A record without a measured column runs
+    # against no measured data: the absent series are passed as
+    # ``None`` (the core's sentinel), never as an empty stand-in.
+    meas_river_conc: pd.DataFrame | None = (
+        input_data.conc_df if not input_data.conc_df.empty else None
+    )
     model_res: pt.ModelResults = model.run_both_models(
         forc=input_data.forc,
         precip_conc=input_data.precip_conc,
         init_conc=init_state,
         meas_streamflow=input_data.q_meas,
-        meas_river_conc=input_data.conc_df,
+        meas_river_conc=meas_river_conc,
         verbose=verbose,
         save_results=False,
     )
