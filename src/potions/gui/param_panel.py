@@ -1410,11 +1410,18 @@ class ParamPanel(QScrollArea):
                         )
         return group
 
-    def _populate_initial(self) -> ThemedGroup:
+    def _populate_initial(self) -> ThemedGroup | None:
         """
         The red-themed initial-state group: the calibrated
         exchange-site state per speciation zone.
+
+        None when the network has no exchange site: the bounds
+        carry no initial-state cells then (the gate `data`
+        applies when it builds them), so the group has nothing
+        to show.
         """
+        if not self._input_data.network.has_exchange:
+            return None
         group: ThemedGroup = ThemedGroup(
             "Initial state", RT_THEME, grid_columns=_GRID_COLUMNS
         )

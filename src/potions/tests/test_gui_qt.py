@@ -77,6 +77,7 @@ from ..gui import calibration as gui_calibration
 from ..gui import figure_panel as gui_figure_panel
 from ..gui import model_specs
 from ..gui import network_editor as gui_network_editor
+from ..gui import network_specs
 from ..gui import param_panel as gui_param_panel
 from ..gui import window as gui_window
 from ..gui.common import (
@@ -321,10 +322,9 @@ def _objective_test_table() -> pd.DataFrame:
 
 class _FakeMessageBox:
     """
-    Stands in for `QMessageBox`; the window only calls `question`
-    (which returns the class-level `answer`) and `critical`
-    (whose calls are recorded, for the water-volume failure
-    dialog).
+    Stands in for `QMessageBox`; the window calls `question`
+    (which returns the class-level `answer`), `critical`, and
+    `information` (whose calls are recorded).
     """
 
     class StandardButton:
@@ -333,6 +333,7 @@ class _FakeMessageBox:
 
     answer: int = StandardButton.No
     critical_calls: list[tuple[str, str]] = []
+    information_calls: list[tuple[str, str]] = []
 
     @staticmethod
     def question(
@@ -351,6 +352,15 @@ class _FakeMessageBox:
         *buttons: object,
     ) -> None:
         _FakeMessageBox.critical_calls.append((title, text))
+
+    @staticmethod
+    def information(
+        parent: object | None,
+        title: str,
+        text: str,
+        *buttons: object,
+    ) -> None:
+        _FakeMessageBox.information_calls.append((title, text))
 
 
 # ------------------------------------------------------------------ #
@@ -5785,3 +5795,620 @@ class TestNetworkEditorDialog:
             _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
             dialog.deleteLater()
             _pump()
+
+
+class TestNetworkSelection:
+    """
+    The window's network selector (Task 10): the preset list, a
+    network switch, the load / save / edit buttons, the network-
+    aware history filtering, and the network persistence of saved
+    runs.
+    """
+
+    def test_network_combo_lists_the_presets(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The selector offers the five presets, in order, on the default."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            labels: list[str] = [
+                win._network_combo.itemText(i)
+                for i in range(win._network_combo.count())
+            ]
+            assert labels == [
+                spec.display_name
+                for spec in network_specs.NETWORK_SPECS.values()
+            ]
+            keys: list[object] = [
+                win._network_combo.itemData(i)
+                for i in range(win._network_combo.count())
+            ]
+            assert keys == list(network_specs.NETWORK_SPECS)
+            assert win._network_combo.currentData() == (
+                network_specs.DEFAULT_NETWORK_KEY
+            )
+            assert win._custom_network_name is None
+        finally:
+            _close_window(win)
+
+    def test_switching_to_carbon_resets_the_window(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A switch keeps the model, swaps the network, and clears state."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            win._network_combo.setCurrentIndex(
+                win._network_combo.findData("carbon")
+            )
+            _pump()
+
+            assert win._input_data.spec.key == "lateral_three_layer"
+            carbon_fingerprint: str = gui_data.fingerprint_network(
+                get_carbon_network()
+            )
+            assert gui_data.fingerprint_network(win._network) == (
+                carbon_fingerprint
+            )
+            assert win._network_combo.currentData() == "carbon"
+            assert win._custom_network_name is None
+            assert win._results is None
+            assert win._figure_panel.page_count() == 0
+            assert win._objective_model._table.empty
+            assert win._status_label.text() == (
+                "Switched to network Carbon (SOC, no calcite)."
+            )
+        finally:
+            _close_window(win)
+
+    def test_loading_a_preset_matching_file_selects_the_preset(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file carrying the carbon preset's network selects it by key."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            path: Path = tmp_path / "carbon.yaml"
+            pt.NetworkFile.from_network(get_carbon_network()).to_file(
+                str(path)
+            )
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), "")
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            win._on_load_network()
+            _pump()
+
+            carbon_fingerprint: str = gui_data.fingerprint_network(
+                get_carbon_network()
+            )
+            assert gui_data.fingerprint_network(win._network) == (
+                carbon_fingerprint
+            )
+            assert win._network_combo.currentData() == "carbon"
+            assert win._custom_network_name is None
+        finally:
+            _close_window(win)
+
+    def test_loading_an_invalid_file_keeps_the_network(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file that fails to load or validate is reported and ignored."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: str = gui_data.fingerprint_network(win._network)
+
+            path: Path = tmp_path / "broken.yaml"
+            path.write_text(":::")
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), "")
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            monkeypatch.setattr(
+                gui_window, "QMessageBox", _FakeMessageBox
+            )
+            _FakeMessageBox.critical_calls.clear()
+            win._on_load_network()
+            _pump()
+
+            assert len(_FakeMessageBox.critical_calls) == 1
+            assert _FakeMessageBox.critical_calls[0][0] == "Load network"
+            assert gui_data.fingerprint_network(win._network) == before
+            assert win._network_combo.currentData() == (
+                network_specs.DEFAULT_NETWORK_KEY
+            )
+        finally:
+            _close_window(win)
+
+    def test_loading_a_custom_file_adds_a_custom_entry(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-preset file becomes the selector's `custom: <stem>` entry."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            carbon: pt.ReactionNetwork = get_carbon_network()
+            # The carbon preset without its adsorption exchange:
+            # valid, and the fingerprint of no preset.
+            custom: pt.ReactionNetwork = pt.ReactionNetwork(
+                primary_aqueous=list(carbon.primary_aqueous),
+                mineral=carbon.mineral,
+                secondary=carbon.secondary,
+                mineral_kinetics=carbon.mineral_kinetics,
+                exchange_species=[],
+            )
+            fingerprint: str = gui_data.fingerprint_network(custom)
+            assert fingerprint not in (
+                gui_network_editor._preset_fingerprint_map()
+            )
+
+            path: Path = tmp_path / "my_net.yaml"
+            pt.NetworkFile.from_network(custom).to_file(str(path))
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), "")
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            win._on_load_network()
+            _pump()
+
+            assert gui_data.fingerprint_network(win._network) == (
+                fingerprint
+            )
+            assert win._network_combo.currentData() == fingerprint
+            assert win._custom_network_name == "my_net"
+            assert win._network_combo.itemText(
+                win._network_combo.findData(fingerprint)
+            ) == "custom: my_net"
+        finally:
+            _close_window(win)
+
+    def test_edit_cancel_keeps_the_network(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelling the editor dialog leaves the window untouched."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: str = gui_data.fingerprint_network(win._network)
+
+            def fake_edit(
+                network: pt.ReactionNetwork,
+                database: pt.ChemicalDatabase,
+                parent: QWidget | None,
+            ) -> pt.ReactionNetwork | None:
+                return None
+
+            monkeypatch.setattr(gui_window, "edit_network", fake_edit)
+            win._on_edit_network()
+            _pump()
+
+            assert gui_data.fingerprint_network(win._network) == before
+            assert win._network_combo.currentData() == (
+                network_specs.DEFAULT_NETWORK_KEY
+            )
+            assert win._custom_network_name is None
+        finally:
+            _close_window(win)
+
+    def test_edit_apply_adds_an_edited_entry(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Applying an edit of a preset gets the `custom: edited` entry."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            carbon: pt.ReactionNetwork = get_carbon_network()
+            edited: pt.ReactionNetwork = pt.ReactionNetwork(
+                primary_aqueous=list(carbon.primary_aqueous),
+                mineral=carbon.mineral,
+                secondary=carbon.secondary,
+                mineral_kinetics=carbon.mineral_kinetics,
+                exchange_species=[],
+            )
+            fingerprint: str = gui_data.fingerprint_network(edited)
+
+            def fake_edit(
+                network: pt.ReactionNetwork,
+                database: pt.ChemicalDatabase,
+                parent: QWidget | None,
+            ) -> pt.ReactionNetwork | None:
+                return edited
+
+            monkeypatch.setattr(gui_window, "edit_network", fake_edit)
+            win._on_edit_network()
+            _pump()
+
+            assert gui_data.fingerprint_network(win._network) == (
+                fingerprint
+            )
+            assert win._network_combo.currentData() == fingerprint
+            assert win._custom_network_name == "edited"
+            assert win._network_combo.itemText(
+                win._network_combo.findData(fingerprint)
+            ) == "custom: edited"
+        finally:
+            _close_window(win)
+
+    def test_run_matches_network(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Old runs match only the default fingerprint; new runs by equality."""
+        default_fingerprint: str = gui_data.fingerprint_network(
+            network_specs.get_network_spec(
+                network_specs.DEFAULT_NETWORK_KEY
+            ).builder()
+        )
+        carbon_fingerprint: str = gui_data.fingerprint_network(
+            get_carbon_network()
+        )
+
+        def fake_fingerprint(run_dir: Path) -> str | None:
+            return {"run_b": "abc123"}.get(run_dir.name)
+
+        monkeypatch.setattr(
+            gui_window, "saved_run_network_fingerprint", fake_fingerprint
+        )
+
+        run_a: Path = Path("run_a")
+        run_b: Path = Path("run_b")
+        assert gui_window._run_matches_network(run_a, default_fingerprint)
+        assert not gui_window._run_matches_network(run_a, carbon_fingerprint)
+        assert gui_window._run_matches_network(run_b, "abc123")
+        assert not gui_window._run_matches_network(run_b, default_fingerprint)
+        assert not gui_window._run_matches_network(run_b, carbon_fingerprint)
+
+    def test_switch_filters_history_by_model_and_network(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The history list keeps only runs of the same model and network."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            default_fingerprint: str = gui_data.fingerprint_network(
+                win._network
+            )
+            carbon_fingerprint: str = gui_data.fingerprint_network(
+                get_carbon_network()
+            )
+            keep: Path = tmp_path / "run_keep"
+            other_network: Path = tmp_path / "run_other_network"
+            other_model: Path = tmp_path / "run_other_model"
+            old_run: Path = tmp_path / "run_old"
+            models: dict[str, str] = {
+                run.name: "lateral_three_layer"
+                for run in (keep, other_network, old_run)
+            }
+            models[other_model.name] = "hbv"
+            fingerprints: dict[str, str | None] = {
+                keep.name: carbon_fingerprint,
+                other_network.name: default_fingerprint,
+                other_model.name: carbon_fingerprint,
+                old_run.name: None,
+            }
+
+            def fake_list_run_dirs() -> list[Path]:
+                return [keep, other_network, other_model, old_run]
+
+            def fake_model_key(run_dir: Path) -> str:
+                return models[run_dir.name]
+
+            def fake_fingerprint(run_dir: Path) -> str | None:
+                return fingerprints.get(run_dir.name)
+
+            monkeypatch.setattr(
+                gui_window, "list_run_dirs", fake_list_run_dirs
+            )
+            monkeypatch.setattr(
+                gui_window, "saved_run_model_key", fake_model_key
+            )
+            monkeypatch.setattr(
+                gui_window,
+                "saved_run_network_fingerprint",
+                fake_fingerprint,
+            )
+
+            win._network_combo.setCurrentIndex(
+                win._network_combo.findData("carbon")
+            )
+            _pump()
+            actual: list[str] = [
+                item.run_dir.name
+                for item in win._history_items
+                if item.run_dir is not None
+            ]
+            assert actual == [keep.name]
+
+            # Back on the default network, the old run (no recorded
+            # fingerprint) counts as one of it.
+            win._network_combo.setCurrentIndex(
+                win._network_combo.findData(
+                    network_specs.DEFAULT_NETWORK_KEY
+                )
+            )
+            _pump()
+            actual = [
+                item.run_dir.name
+                for item in win._history_items
+                if item.run_dir is not None
+            ]
+            assert actual == [other_network.name, old_run.name]
+        finally:
+            _close_window(win)
+
+    def test_on_save_network_writes_the_file(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Save network as writes the canonical file; the window is untouched."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            target: Path = tmp_path / "saved_net.yaml"
+
+            def fake_save_file(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(target), "")
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getSaveFileName", fake_save_file
+            )
+            monkeypatch.setattr(
+                gui_window, "QMessageBox", _FakeMessageBox
+            )
+            _FakeMessageBox.information_calls.clear()
+            win._on_save_network()
+
+            assert target.is_file()
+            saved: pt.ReactionNetwork = pt.ReactionNetwork.from_file(
+                str(target)
+            )
+            saved_fingerprint: str = gui_data.fingerprint_network(saved)
+            assert saved_fingerprint == gui_data.fingerprint_network(
+                win._network
+            )
+            assert _FakeMessageBox.information_calls == [
+                ("Save network", f"Network written to {target}.")
+            ]
+            assert win._network_combo.currentData() == (
+                network_specs.DEFAULT_NETWORK_KEY
+            )
+            assert win._custom_network_name is None
+        finally:
+            _close_window(win)
+
+    def test_on_save_run_persists_the_network(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Saving a run writes network.yaml and the fingerprint to state."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            win._network_combo.setCurrentIndex(
+                win._network_combo.findData("carbon")
+            )
+            _pump()
+            # Run once so there are results to save for the new
+            # network.
+            win._start_run(win._current_x())
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+
+            run_dir: Path = tmp_path / "results" / "run_fake"
+
+            def fake_save(
+                model: pt.Model,
+                hydro: pt.HydroModelResults,
+                rt: pt.RtModelResults,
+                results_dir: Path | None = None,
+            ) -> Path:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                return run_dir
+
+            monkeypatch.setattr(gui_window, "save_model_run", fake_save)
+            win._on_save_run()
+
+            fingerprint: str = gui_data.fingerprint_network(win._network)
+            carbon_fingerprint: str = gui_data.fingerprint_network(
+                get_carbon_network()
+            )
+            assert fingerprint == carbon_fingerprint
+            network_file: Path = run_dir / "network.yaml"
+            assert network_file.is_file()
+            saved: pt.ReactionNetwork = pt.ReactionNetwork.from_file(
+                str(network_file)
+            )
+            assert gui_data.fingerprint_network(saved) == fingerprint
+            state = read_gui_state(run_dir)
+            assert state is not None
+            assert state.network_fingerprint == fingerprint
+        finally:
+            _close_window(win)
+
+    def test_run_network_reads_or_skips_the_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """_run_network reads network.yaml, or skips a missing / broken one."""
+        good: Path = tmp_path / "good"
+        good.mkdir()
+        pt.NetworkFile.from_network(get_carbon_network()).to_file(
+            str(good / "network.yaml")
+        )
+        loaded: pt.ReactionNetwork | None = gui_window._run_network(good)
+        assert loaded is not None
+        assert gui_data.fingerprint_network(loaded) == (
+            gui_data.fingerprint_network(get_carbon_network())
+        )
+
+        missing: Path = tmp_path / "missing"
+        missing.mkdir()
+        assert gui_window._run_network(missing) is None
+
+        broken: Path = tmp_path / "broken"
+        broken.mkdir()
+        (broken / "network.yaml").write_text(":::")
+        assert gui_window._run_network(broken) is None
+        assert "Could not load" in capsys.readouterr().err

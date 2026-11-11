@@ -123,6 +123,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog as QFileDialog,
     QHeaderView,
     QLabel,
     QMainWindow,
@@ -160,6 +161,7 @@ from potions.gui.data import (
     arr_to_model,
     arr_to_results,
     default_plot_selection,
+    fingerprint_network,
     load_input_data,
 )
 from potions.gui.figure_panel import FigurePanel
@@ -184,6 +186,15 @@ from potions.gui.model_specs import (
     ModelSpec,
     get_model_spec,
 )
+from potions.gui.network_editor import (
+    _preset_fingerprint_map,
+    edit_network,
+)
+from potions.gui.network_specs import (
+    DEFAULT_NETWORK_KEY,
+    NETWORK_SPECS,
+    get_network_spec,
+)
 from potions.gui.param_panel import ParamPanel
 from potions.gui.plots import (
     build_objective_table,
@@ -201,6 +212,7 @@ from potions.gui.plots import (
 from potions.gui.state import (
     MODE_FULL,
     MODE_HYDRO,
+    NETWORK_FILENAME,
     GuiState,
     RunHistoryEntry,
     SavedRun,
@@ -209,6 +221,7 @@ from potions.gui.state import (
     load_saved_run,
     objectives_from_results,
     saved_run_model_key,
+    saved_run_network_fingerprint,
     write_gui_state,
 )
 
@@ -456,6 +469,81 @@ class _HistoryItem:
     results: GuiRunResults | None
     mode: str | None
     model_key: str = DEFAULT_MODEL_KEY
+
+
+# The fingerprint of the default network; None until first use, so
+# building and hashing the network is paid at most once (and only
+# when a saved run without a recorded fingerprint is actually
+# matched, which an interactive session usually never does).
+_DEFAULT_NETWORK_FINGERPRINT: str | None = None
+
+
+def _default_network_fingerprint() -> str:
+    """
+    The fingerprint of the default reaction network.
+
+    Built lazily once per process; it is the fingerprint every
+    saved run without a recorded one ran on, since the GUI has
+    always started on the default network.
+
+    Returns:
+        The SHA-256 fingerprint of the default network.
+    """
+    global _DEFAULT_NETWORK_FINGERPRINT
+    if _DEFAULT_NETWORK_FINGERPRINT is None:
+        _DEFAULT_NETWORK_FINGERPRINT = fingerprint_network(
+            get_network_spec(DEFAULT_NETWORK_KEY).builder()
+        )
+    return _DEFAULT_NETWORK_FINGERPRINT
+
+
+def _run_matches_network(run_dir: Path, fingerprint: str) -> bool:
+    """
+    Whether a saved run recorded the network ``fingerprint``.
+
+    A run whose state file carries a network fingerprint matches
+    on equality; a run that predates the field (or whose state is
+    unreadable) is treated as a run of the default network (the
+    spec's rule for pre-fingerprint runs).
+
+    Args:
+        run_dir: The saved run's directory.
+        fingerprint: The fingerprint to match against.
+
+    Returns:
+        Whether the run's recorded network is ``fingerprint``.
+    """
+    recorded: str | None = saved_run_network_fingerprint(run_dir)
+    if recorded is not None:
+        return recorded == fingerprint
+    return fingerprint == _default_network_fingerprint()
+
+
+def _run_network(run_dir: Path) -> pt.ReactionNetwork | None:
+    """
+    The network a saved run recorded in its ``network.yaml``.
+
+    `_on_save_run` writes the file; this reads it back so a
+    restore of an old run can switch the window to that run's
+    network.
+
+    Args:
+        run_dir: The saved run's directory.
+
+    Returns:
+        The recorded network, or None when the file is absent (a
+        pre-integration run) or fails to load or validate; the
+        failure is reported on stderr, not raised, since a broken
+        optional file must not block the restore.
+    """
+    path: Path = run_dir / NETWORK_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        return pt.ReactionNetwork.from_file(str(path))
+    except (OSError, ValueError) as error:
+        print(f"Could not load {path}: {error}", file=sys.stderr)
+        return None
 
 
 # ==== Worker ==== #
@@ -1920,6 +2008,10 @@ class MainWindow(QMainWindow):
         csv_path: The path of the series CSV the session used, or
             None for the record shipped with the package; stored
             in the saved run state.
+        network_name:
+            The display name of a custom network the window starts
+            on (the file's stem for a ``--network`` start); None
+            when the window starts on a preset.
         parent: The parent widget; defaults to None.
     """
 
@@ -1927,6 +2019,7 @@ class MainWindow(QMainWindow):
         self,
         input_data: GuiInputData,
         csv_path: str | None = None,
+        network_name: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1990,6 +2083,12 @@ class MainWindow(QMainWindow):
         # Set when a model switch asked for a run but a worker was
         # still in flight; the run starts once that worker ends.
         self._pending_run_after_worker: bool = False
+        # The network the window is running; the selector's
+        # entries are keyed off its fingerprint.
+        self._network: pt.ReactionNetwork = input_data.network
+        # The display name of a custom (non-preset) network, or
+        # None when the selector shows a preset entry.
+        self._custom_network_name: str | None = network_name
 
         self.setWindowTitle(_title_for(self._input_data.spec))
         self.resize(*_INITIAL_SIZE)
@@ -2103,6 +2202,55 @@ class MainWindow(QMainWindow):
         )
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
 
+        # The network selector: one entry per preset (the preset's
+        # display name in the text, its key in the item data) plus,
+        # when the window runs a network that is not one of the
+        # presets, a single `custom: <name>` entry (the network's
+        # fingerprint in the item data).  A change switches the
+        # network (see `_on_network_changed`).
+        self._network_combo: QComboBox = QComboBox()
+        self._network_combo.setToolTip(
+            "Switch the reaction network.  The measured species, "
+            "the figures, the history, and the saved outputs "
+            "follow the selected network; switching resets the "
+            "parameters to the new network's defaults.  Use "
+            "*Load network file…*, *Save network as…*, and *Edit "
+            "network…* beside it to work with a network of your "
+            "own."
+        )
+        for net_key, net_spec in NETWORK_SPECS.items():
+            self._network_combo.addItem(net_spec.display_name, net_key)
+        self._network_combo.setCurrentIndex(
+            self._network_combo.findData(DEFAULT_NETWORK_KEY)
+        )
+        self._network_combo.currentIndexChanged.connect(
+            self._on_network_changed
+        )
+
+        load_network_button: QPushButton = QPushButton(
+            "Load network file…"
+        )
+        load_network_button.setToolTip(
+            "Run the network of a YAML file.  A file whose network "
+            "matches a preset selects that preset's entry."
+        )
+        load_network_button.clicked.connect(self._on_load_network)
+
+        save_network_button: QPushButton = QPushButton(
+            "Save network as…"
+        )
+        save_network_button.setToolTip(
+            "Write the network currently running to a YAML file."
+        )
+        save_network_button.clicked.connect(self._on_save_network)
+
+        edit_network_button: QPushButton = QPushButton("Edit network…")
+        edit_network_button.setToolTip(
+            "Open the network editor.  Applying the dialog switches "
+            "the window to the edited network."
+        )
+        edit_network_button.clicked.connect(self._on_edit_network)
+
         # Off by default: the models run in full mode.
         self._mode_checkbox: QCheckBox = QCheckBox("Hydrology only")
         self._mode_checkbox.setToolTip(
@@ -2208,6 +2356,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._title_label)
         layout.addWidget(self._job_spinner)
         layout.addWidget(self._model_combo)
+        layout.addWidget(self._network_combo)
+        layout.addWidget(load_network_button)
+        layout.addWidget(save_network_button)
+        layout.addWidget(edit_network_button)
         layout.addWidget(self._mode_checkbox)
         layout.addStretch(1)
         # The status label stretches with the middle stretch (both
@@ -2223,6 +2375,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._calibrate_button)
         layout.addWidget(self._reset_button)
         layout.addWidget(self._save_button)
+        self._sync_network_selector()
         header: QWidget = QWidget(self)
         header.setLayout(layout)
         return header
@@ -2397,7 +2550,10 @@ class MainWindow(QMainWindow):
         """Build the parameter panel and connect its signals to the window."""
         self._param_panel: ParamPanel = ParamPanel(
             self._input_data,
-            default_plot_selection(self._input_data.spec),
+            default_plot_selection(
+                self._input_data.spec,
+                network=self._input_data.network,
+            ),
             self,
         )
         self._param_panel.value_changed.connect(self._on_value_changed)
@@ -2424,17 +2580,21 @@ class MainWindow(QMainWindow):
         """
         Restore the most recent saved run, or start from defaults.
 
-        The latest saved run's model decides the window's model: a
-        saved run of another curated model switches the window to it
-        first (without starting a run, since the saved run is
-        applied straight away).  The parameter panel's *History*
-        dropdown is then filled with the current model's saved run
-        directories, newest first, so the restored run is one of its
-        entries; with a restorable latest run the window opens on
-        that run's figures and parameters without a re-run, and
-        otherwise (no run, or an unreadable one) it starts from the
-        default parameters and runs the models once in the
-        background.
+        The latest saved run decides the window's model and
+        network: a saved run of another curated model switches the
+        window to it first, and a saved run whose recorded network
+        differs from the window's (a run without a recorded
+        fingerprint counts as one of the default network) switches
+        the window to the run's network as well; neither switch
+        starts a run, since the saved run is applied straight
+        away.  The parameter panel's *History* dropdown is then
+        filled with the current model's saved run directories of
+        the running network, newest first, so the restored run is
+        one of its entries; with a restorable latest run the
+        window opens on that run's figures and parameters without
+        a re-run, and otherwise (no run, or an unreadable one) it
+        starts from the default parameters and runs the models
+        once in the background.
         """
         runs: list[Path] = list_run_dirs()
         latest: Path | None = runs[0] if runs else None
@@ -2447,14 +2607,30 @@ class MainWindow(QMainWindow):
                     self._model_combo.setCurrentIndex(index)
                     self._model_combo.blockSignals(False)
                     self._switch_model(key, start_run=False)
+            recorded: str | None = (
+                saved_run_network_fingerprint(latest)
+                or _default_network_fingerprint()
+            )
+            if recorded != fingerprint_network(self._input_data.network):
+                self._switch_network(
+                    _run_network(latest)
+                    or get_network_spec(DEFAULT_NETWORK_KEY).builder(),
+                    start_run=False,
+                )
         # The saved-run directories become entries of the window's
         # history (label and path only; their state is read on
         # demand), so a selection from the dropdown can restore and
-        # overlay the same runs the dropdown shows.  Only the current
-        # model's runs are listed.
+        # overlay the same runs the dropdown shows.  Only the
+        # current model's runs of the running network are listed.
         current_key: str = self._input_data.spec.key
+        current_fingerprint: str = fingerprint_network(
+            self._input_data.network
+        )
         current_runs: list[Path] = [
-            run for run in runs if saved_run_model_key(run) == current_key
+            run
+            for run in runs
+            if saved_run_model_key(run) == current_key
+            and _run_matches_network(run, current_fingerprint)
         ]
         self._history_items = [
             _HistoryItem(
@@ -3596,6 +3772,7 @@ class MainWindow(QMainWindow):
             param_values=self._param_panel.param_values(),
             objectives=objectives_from_results(self._results),
             model_key=self._input_data.spec.key,
+            network_fingerprint=fingerprint_network(self._network),
         )
         append_run_history(Path("results"), entry)
 
@@ -4001,6 +4178,7 @@ class MainWindow(QMainWindow):
         self._input_data = load_input_data(
             Path(self._csv_path) if self._csv_path else DEFAULT_CSV_PATH,
             model_key=key,
+            network=self._network,
         )
         self._param_panel.reload(
             self._input_data, self._switch_selection(spec)
@@ -4025,6 +4203,7 @@ class MainWindow(QMainWindow):
             )
             for run in list_run_dirs()
             if saved_run_model_key(run) == key
+            and _run_matches_network(run, fingerprint_network(self._network))
         ]
         self._sync_history_combo()
         self._title_label.setText(_title_for(spec))
@@ -4041,6 +4220,262 @@ class MainWindow(QMainWindow):
             self._run_button.setEnabled(True)
             self._gradients_button.setEnabled(True)
             self._line_search_button.setEnabled(True)
+
+    def _sync_network_selector(self, name: str | None = None) -> None:
+        """
+        Sync the network selector to the network the window runs.
+
+        A network matching a preset's fingerprint selects that
+        preset's entry and drops any `custom:` entry; a network
+        that matches no preset gets, or updates, the selector's
+        single `custom: <name>` entry, keyed by the fingerprint so
+        a re-sync of the same network never adds a second one.
+        The signal is blocked for the whole update, since the
+        switch methods call this on purpose, not on user input.
+
+        Args:
+            name: The display name of a custom network; the
+                window's current custom name when None, and
+                "edited" when there is none.  Ignored for presets.
+        """
+        fingerprint: str = fingerprint_network(self._network)
+        preset_key: str | None = _preset_fingerprint_map().get(
+            fingerprint
+        )
+        self._network_combo.blockSignals(True)
+        try:
+            if preset_key is not None:
+                self._remove_custom_entry()
+                self._custom_network_name = None
+                self._network_combo.setCurrentIndex(
+                    self._network_combo.findData(preset_key)
+                )
+            else:
+                custom_name: str = (
+                    name
+                    or self._custom_network_name
+                    or "edited"
+                )
+                self._custom_network_name = custom_name
+                row: int = -1
+                for index in range(self._network_combo.count()):
+                    if self._network_combo.itemData(index) == fingerprint:
+                        row = index
+                if row >= 0:
+                    self._network_combo.setItemText(
+                        row, f"custom: {custom_name}"
+                    )
+                else:
+                    self._remove_custom_entry()
+                    self._network_combo.addItem(
+                        f"custom: {custom_name}", fingerprint
+                    )
+                    row = self._network_combo.count() - 1
+                self._network_combo.setCurrentIndex(row)
+        finally:
+            self._network_combo.blockSignals(False)
+
+    def _remove_custom_entry(self) -> None:
+        """Remove the selector's `custom:` entry, if it has one."""
+        for index in range(self._network_combo.count()):
+            if self._network_combo.itemData(index) not in NETWORK_SPECS:
+                self._network_combo.removeItem(index)
+                return
+
+    def _on_network_changed(self, _index: int) -> None:
+        """
+        The network selector changed: switch to the selected
+        network.
+
+        A change to the fingerprint already running is ignored (a
+        programmatic resync of the combo emits the same signal),
+        and a `custom:` entry never switches here: it is only ever
+        selected by `_sync_network_selector`, which already
+        performed the switch.
+        """
+        data: object = self._network_combo.currentData()
+        if not isinstance(data, str) or data not in NETWORK_SPECS:
+            return
+        if (
+            _preset_fingerprint_map().get(
+                fingerprint_network(self._network)
+            )
+            == data
+        ):
+            return
+        self._switch_network(get_network_spec(data).builder())
+
+    def _switch_network(
+        self,
+        network: pt.ReactionNetwork,
+        *,
+        name: str | None = None,
+        start_run: bool = True,
+    ) -> None:
+        """
+        Reload the window for the reaction network ``network``.
+
+        The new network's inputs replace the loaded ones (the
+        model spec is unchanged), the parameter panel's plot
+        selection follows the network's measured species and
+        dominant mineral, and every run-specific piece of state
+        is discarded: the results, the figures, the objective
+        table, the gradient and line search pages, and the
+        session history.  The saved runs listed in the history
+        dropdown are filtered to runs of the same model on this
+        network's fingerprint (`_run_matches_network`: a run
+        without a recorded fingerprint is treated as a run of the
+        default network).  The network selector follows the
+        switch.
+
+        A worker still in flight cannot be interrupted, so the run
+        the switch asks for is deferred to `_on_worker_finished`
+        (the run's own outcome is discarded by the bumped
+        generation); otherwise the run starts now when auto-run is
+        on, or the run button lights up.
+
+        Args:
+            network: The network to switch to.
+            name: The display name of a custom (non-preset)
+                network; the window's current custom name when
+                None, and "edited" when there is none.  Presets
+                ignore the name: their entry is the preset's own.
+            start_run: Whether the switch may start a run.  Startup
+                passes False: it applies a saved run immediately, so
+                a fresh run would overwrite the restored results.
+        """
+        self._run_generation += 1
+        self._debounce_timer.stop()
+        self._start_x = None
+        self._start_mode = None
+        self._network = network
+        spec: ModelSpec = self._input_data.spec
+        self._input_data = load_input_data(
+            Path(self._csv_path) if self._csv_path else DEFAULT_CSV_PATH,
+            model_key=spec.key,
+            network=network,
+        )
+        new_default: PlotSelection = default_plot_selection(
+            spec, network=network
+        )
+        old: PlotSelection = self._param_panel.selection()
+        self._param_panel.reload(
+            self._input_data,
+            PlotSelection(
+                species=new_default.species,
+                zones=old.zones,
+                mineral=new_default.mineral,
+                streamflow=old.streamflow,
+                window_start=old.window_start,
+                window_end=old.window_end,
+            ),
+        )
+        self._results = None
+        self._last_run_x = None
+        self._last_run_mode = None
+        self._gradient_state = None
+        self._line_search_state = None
+        self._figure_panel.set_figures([])
+        self._objective_model.set_table(pd.DataFrame())
+        self._fit_objective_panel()
+        self._saved_run_cache.clear()
+        self._history_items = [
+            _HistoryItem(
+                label=run.name,
+                run_dir=run,
+                param_values=None,
+                results=None,
+                mode=None,
+                model_key=spec.key,
+            )
+            for run in list_run_dirs()
+            if saved_run_model_key(run) == spec.key
+            and _run_matches_network(run, fingerprint_network(network))
+        ]
+        self._sync_history_combo()
+        self._sync_network_selector(name)
+        self._status(
+            f"Switched to network {self._network_combo.currentText()}."
+        )
+        if not start_run:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_run_after_worker = True
+            return
+        if self._auto_run_checkbox.isChecked():
+            self._start_run(self._current_x())
+        else:
+            self._run_button.setEnabled(True)
+            self._gradients_button.setEnabled(True)
+            self._line_search_button.setEnabled(True)
+
+    def _on_load_network(self) -> None:
+        """
+        Load the network of a YAML file and run it.
+
+        A file whose network matches a preset (same fingerprint)
+        selects that preset's entry; any other network becomes the
+        selector's `custom:` entry, named after the file's stem.
+        A file that fails to load or validate is reported and
+        ignored: the window keeps running its current network.
+        """
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load network file",
+            "",
+            "YAML files (*.yaml *.yml)",
+        )
+        if not path:
+            return
+        try:
+            network: pt.ReactionNetwork = pt.ReactionNetwork.from_file(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Load network", str(error))
+            return
+        self._switch_network(network, name=Path(path).stem)
+
+    def _on_save_network(self) -> None:
+        """
+        Write the network currently running to a YAML file.
+
+        The window keeps running the very same network: the write
+        is a snapshot, and the selector is untouched.
+        """
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save network as",
+            "",
+            "YAML files (*.yaml *.yml)",
+        )
+        if not path:
+            return
+        try:
+            pt.NetworkFile.from_network(self._network).to_file(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Save network", str(error))
+        else:
+            QMessageBox.information(
+                self, "Save network", f"Network written to {path}."
+            )
+
+    def _on_edit_network(self) -> None:
+        """
+        Edit the running network in the modal dialog.
+
+        Applying the dialog switches the window to the edited
+        network: a result that matches a preset keeps the
+        preset's entry, an edit of a preset gets the selector's
+        `custom: edited` entry, and an edit of a custom network
+        keeps its name.  Cancel or close leaves the window
+        untouched.
+        """
+        database: pt.ChemicalDatabase = pt.ChemicalDatabase.load_default()
+        edited: pt.ReactionNetwork | None = edit_network(
+            self._network, database, self
+        )
+        if edited is None:
+            return
+        self._switch_network(edited)
 
     def _on_value_changed(self, _key: str) -> None:
         """
@@ -4091,8 +4526,10 @@ class MainWindow(QMainWindow):
     def _on_save_run(self) -> Path | None:
         """
         Save the current run: the existing per-run model output,
-        the figures as plotted, and a ``gui_state.json`` capturing
-        the session state.
+        the running network as ``network.yaml``, the figures as
+        plotted, and a ``gui_state.json`` capturing the session
+        state, including the network's fingerprint (the key the
+        history filtering matches on).
 
         The run is saved only when the results on screen correspond
         to the current parameters and mode (a run still catching up
@@ -4156,6 +4593,12 @@ class MainWindow(QMainWindow):
                 results_dir=None,
             )
 
+        # The network the run used, in the canonical file format;
+        # a restore of this run reads it back (``_run_network``).
+        pt.NetworkFile.from_network(self._network).to_file(
+            str(run_dir / NETWORK_FILENAME)
+        )
+
         # The client geometry (rather than the frame's): the restore
         # path applies these values with setGeometry, so saving the
         # frame size would grow the window on every save and restore.
@@ -4182,6 +4625,7 @@ class MainWindow(QMainWindow):
                 else None
             ),
             model_key=self._input_data.spec.key,
+            network_fingerprint=fingerprint_network(self._network),
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(

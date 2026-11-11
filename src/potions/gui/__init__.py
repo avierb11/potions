@@ -117,11 +117,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     app.setFont(font)
 
     input_data = load_input_data(csv_path, network=network)
+    network_name: str | None = (
+        Path(args.network).stem if args.network is not None else None
+    )
     window: MainWindow = MainWindow(
         input_data,
         # The state records the session's CSV only when it is not
         # the record shipped with the package.
         csv_path=str(csv_path) if csv_path != DEFAULT_CSV_PATH else None,
+        network_name=network_name,
     )
     window.show()
     sys.exit(app.exec())
