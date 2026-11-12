@@ -1760,7 +1760,9 @@ class TestMaximizeChord:
             )
             win.show()
             _pump()
-            spin = win._param_panel.findChild(QDoubleSpinBox)
+            spin: QDoubleSpinBox | None = win._param_panel.findChild(
+                QDoubleSpinBox
+            )
             assert spin is not None
             spin.setFocus()
             _pump()

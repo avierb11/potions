@@ -2060,7 +2060,7 @@ class _MaximizeChordFilter(QObject):
                 application when the window is destroyed.
         """
         super().__init__(window)
-        self._window = window
+        self._window: QMainWindow = window
         self._held: set[Qt.Key] = set()
         self._fired: bool = False
 
