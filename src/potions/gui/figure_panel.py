@@ -38,8 +38,8 @@ from typing import Final
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent, QResizeEvent
-from PySide6.QtWidgets import QDockWidget, QMainWindow
+from PySide6.QtGui import QCloseEvent, QAction, QResizeEvent
+from PySide6.QtWidgets import QDockWidget, QMenu, QMainWindow
 
 from potions.gui.plots import relayout_below_axes_legends
 
@@ -179,15 +179,21 @@ class FigurePanel:
 
     Args:
         window: The main window the figure docks are built into.
+        view_menu: The main window's *View* menu; the panel fills it
+            with one checkable toggle per figure dock, rebuilt with
+            every figure list.
     """
 
-    def __init__(self, window: QMainWindow) -> None:
+    def __init__(self, window: QMainWindow, view_menu: QMenu) -> None:
         self._window: QMainWindow = window
+        self._view_menu: QMenu = view_menu
         # The page-order lists stay parallel: docks[i] carries
-        # canvases[i] and is titled titles[i].
+        # canvases[i], is titled titles[i], and is toggled by
+        # view_actions[i].
         self._docks: list[FigureDock] = []
         self._canvases: list[FigureCanvasQTAgg] = []
         self._titles: list[str] = []
+        self._view_actions: list[QAction] = []
         # The raised page, or -1 while no figures are loaded.
         self._current_index: int = -1
     # =================== #
@@ -207,12 +213,23 @@ class FigurePanel:
         The old docks are removed *before* the new ones are built:
         Qt's dock state addresses docks by object name, so a
         same-titled figure must have its old dock's name free to
-        take over the old dock's placement.
+        take over the old dock's placement.  The *View* menu's
+        toggles are detached before the docks they mirror die, then
+        rebuilt: each new dock gets a checked, checkable action that
+        shows and hides the dock, and whose checkbox the dock's own
+        title-bar close unchecks.
 
         Args:
             figures: The (page title, figure) pairs, in page order.
         """
         previous: int = self._current_index
+        # Detach the old toggles before the docks: removing them
+        # first keeps a `toggled` signal from touching a dying dock
+        # during the teardown below.
+        for stale_action in self._view_actions:
+            self._view_menu.removeAction(stale_action)
+            stale_action.deleteLater()
+        self._view_actions.clear()
         self._remove_docks()
 
         for index, (title, fig) in enumerate(figures):
@@ -238,6 +255,16 @@ class FigurePanel:
             dock.setWidget(canvas)
             dock.visibilityChanged.connect(self._visibility_handler(index))
             self._window.addDockWidget(DOCK_AREA, dock)
+            action: QAction = QAction(title, self._window)
+            action.setCheckable(True)
+            # Checked *before* the connections: `setChecked` itself
+            # emits `toggled`, and the pair must not run while it is
+            # still half-wired.
+            action.setChecked(True)
+            action.toggled.connect(self._toggle_handler(dock))
+            dock.closed_from_layout.connect(self._close_handler(action))
+            self._view_menu.addAction(action)
+            self._view_actions.append(action)
             self._docks.append(dock)
             self._canvases.append(canvas)
             self._titles.append(title)
@@ -379,5 +406,47 @@ class FigurePanel:
                 self._current_index = page
 
         return on_visibility
+
+    def _toggle_handler(self, dock: FigureDock) -> Callable[[bool], None]:
+        """
+        Build the *View* menu toggle slot for one figure dock.
+
+        The menu checkbox mirrors the dock's open state: checking
+        the action shows the dock (its tab returns to the strip's
+        tab bar), unchecking it hides it.  The dock's own title-bar
+        close already hides the dock, and the follow-up
+        `toggled(False)` call on the hidden dock is a no-op.
+
+        Args:
+            dock: The dock the menu action toggles.
+
+        Returns:
+            The slot to connect to the action's `toggled`.
+        """
+        def on_toggled(visible: bool) -> None:
+            dock.setVisible(visible)
+
+        return on_toggled
+
+    def _close_handler(self, action: QAction) -> Callable[[], None]:
+        """
+        Build the `closed_from_layout` slot for one *View* toggle.
+
+        The dock's title-bar close button (through
+        `FigureDock.closeEvent`, the stand-in for Qt's unexposed
+        close-button signal) unchecks the paired menu action, so the
+        menu keeps reporting which figures are open even when the
+        user closes docks with their own button.
+
+        Args:
+            action: The menu action paired with the closing dock.
+
+        Returns:
+            The slot to connect to that dock's `closed_from_layout`.
+        """
+        def on_closed() -> None:
+            action.setChecked(False)
+
+        return on_closed
     # =================== #
 # =============== #

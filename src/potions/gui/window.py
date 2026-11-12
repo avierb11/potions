@@ -182,7 +182,7 @@ from potions.gui.data import (
     prefill_mapping,
 )
 from potions.gui.data_dialog import ColumnMappingDialog
-from potions.gui.figure_panel import FigurePanel
+from potions.gui.figure_panel import FigureDock, FigurePanel
 from potions.gui.gradients import (
     _Perturbation,
     free_parameter_steps,
@@ -2369,9 +2369,12 @@ class MainWindow(QMainWindow):
         literally, so toolbar actions never get them).  The Options
         menu carries the settings toggles and Reset bounds; its
         actions are built by `_build_toolbar` (they are polled and
-        connected like the job actions) and homed here.  This method
-        builds the bar itself: the File menu with its actions, and
-        the empty Options menu the toolbar builder fills.
+        connected like the job actions) and homed here.  The View
+        menu opens with *Reset dock layout*; the figure panel appends
+        one toggle per figure dock to it (see
+        `FigurePanel.__init__`).  This method builds the bar itself:
+        the File menu with its actions, and the empty Options menu
+        the toolbar builder fills.
         """
         self._file_menu: QMenu = self.menuBar().addMenu("&File")
 
@@ -2411,6 +2414,17 @@ class MainWindow(QMainWindow):
         self._file_menu.addAction(self._edit_network_action)
 
         self._options_menu: QMenu = self.menuBar().addMenu("&Options")
+
+        self._view_menu: QMenu = self.menuBar().addMenu("&View")
+
+        self._reset_dock_action: QAction = QAction("Reset dock layout", self)
+        self._reset_dock_action.setToolTip(
+            "Return every figure dock to its tab in the figure strip "
+            "at the window's top."
+        )
+        self._reset_dock_action.triggered.connect(self._reset_dock_layout)
+        self._view_menu.addAction(self._reset_dock_action)
+        self._view_menu.addSeparator()
 
     def _build_toolbar(self) -> None:
         """
@@ -2707,9 +2721,11 @@ class MainWindow(QMainWindow):
 
         The docks it builds attach to the window's top dock area,
         not to the central layout, so they are built after the
-        chrome exactly as the retired splitter panel was.
+        chrome exactly as the retired splitter panel was.  The
+        panel's per-figure toggles live in the *View* menu built
+        above.
         """
-        return FigurePanel(self)
+        return FigurePanel(self, self._view_menu)
 
     def _build_objective_panel(self) -> None:
         """
@@ -5274,6 +5290,40 @@ class MainWindow(QMainWindow):
         # The objective panel is fixed in size; re-fit it after the
         # table's contents (and thus its size hint) changed.
         self._fit_objective_panel()
+
+    def _reset_dock_layout(self) -> None:
+        """
+        Rebuild the figure strip's default arrangement.
+
+        Docks dragged out of the strip — floated onto a second
+        monitor, dropped into another dock area — come home: every
+        dock is un-floated and re-tabbed in page order at the
+        window's top, and the raised dock is the first page.  A
+        floating or moved dock never leaves the window's dock layout
+        (`dockWidgetArea` still reports its area), so no
+        `addDockWidget` call is needed — calling it on docks the
+        layout already owns splits the tab group into two and leaves
+        a stray tab bar.  Docks the user closed stay closed: the
+        *View* menu's toggles keep reporting them, and the raised
+        dock is the first dock still open.  An empty panel is a
+        no-op.
+        """
+        docks: list[FigureDock] = self._figure_panel.docks()
+        if not docks:
+            return
+        for dock in docks:
+            dock.setFloating(False)
+        for tabbed in range(1, len(docks)):
+            self.tabifyDockWidget(docks[tabbed - 1], docks[tabbed])
+        first_open: FigureDock | None = next(
+            (dock for dock in docks if dock.isVisible()), None
+        )
+        if first_open is not None:
+            first_open.raise_()
+            self.resizeDocks(
+                [first_open], [_INITIAL_DOCK_HEIGHT], Qt.Orientation.Vertical
+            )
+        self._status("Dock layout reset.")
 
     # ==== Status ==== #
     def _status(self, text: str) -> None:

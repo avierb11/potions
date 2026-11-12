@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QLayoutItem,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -1076,7 +1077,7 @@ class TestMainWindowStartup:
 
 
 class TestWindowMenus:
-    """The menu bar carries the file actions in their menu."""
+    """The menu bar carries the window's menus and their actions."""
 
     def test_file_menu_carries_the_data_and_network_actions(
         self,
@@ -1144,6 +1145,28 @@ class TestWindowMenus:
             assert win._reset_action.text().replace("&", "") == (
                 "Reset bounds"
             )
+        finally:
+            _close_window(win)
+
+    def test_menu_bar_lists_the_menus_in_order(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The menu bar carries File, Options, and View, in that order."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            assert [
+                action.text() for action in win.menuBar().actions()
+            ] == ["&File", "&Options", "&View"]
         finally:
             _close_window(win)
 
@@ -1334,6 +1357,222 @@ class TestWindowMinimumSize:
             minimum: QSize = win.minimumSizeHint()
             assert minimum.width() <= gui_window._INITIAL_SIZE[0]
             assert minimum.height() <= gui_window._INITIAL_SIZE[1]
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# MainWindow: the View menu and the dock layout
+# ------------------------------------------------------------------ #
+
+
+def _figure_toggle_actions(win: gui_window.MainWindow) -> list[QAction]:
+    """The *View* menu's checkable per-figure toggles, in menu order."""
+    return [
+        action for action in win._view_menu.actions() if action.isCheckable()
+    ]
+
+
+def _figure_tab_texts(win: gui_window.MainWindow) -> list[str]:
+    """
+    The figure strip's tab texts.
+
+    The figure docks share one tab bar, so the window exposes exactly
+    one visible one (Qt keeps no other tab bar, and a retired or
+    stray bar stays hidden).
+    """
+    tab_bars: list[QTabBar] = [
+        bar for bar in win.findChildren(QTabBar) if bar.isVisible()
+    ]
+    assert len(tab_bars) == 1, "Expected exactly one visible tab bar."
+    return [
+        tab_bars[0].tabText(index) for index in range(tab_bars[0].count())
+    ]
+
+
+class TestViewMenu:
+    """
+    The *View* menu's per-figure toggles and *Reset dock layout*.
+
+    The menu mirrors the figure docks' open state: each open dock has
+    a checked, checkable action, closing a dock with its title-bar
+    button unchecks its action, and re-checking the action shows the
+    dock and its tab again.  *Reset dock layout* re-tabs floated and
+    moved docks into the default strip at the window's top, page
+    order intact.
+    """
+
+    def test_view_menu_lists_the_current_figures(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One checked, checkable toggle per figure page, in page order."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            assert win._view_menu.title() == "&View"
+            toggles: list[QAction] = _figure_toggle_actions(win)
+            assert [action.text() for action in toggles] == panel._titles
+            assert len(toggles) == panel.page_count() == 8
+            assert all(
+                action.isCheckable() and action.isChecked()
+                for action in toggles
+            )
+            static: list[QAction] = [
+                action
+                for action in win._view_menu.actions()
+                if not action.isSeparator() and not action.isCheckable()
+            ]
+            assert [action.text() for action in static] == ["Reset dock layout"]
+            assert static[0] is win._reset_dock_action
+            assert not win._reset_dock_action.isCheckable()
+            assert win._reset_dock_action.toolTip()
+        finally:
+            _close_window(win)
+
+    def test_closing_a_dock_unchecks_its_action(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        The title-bar close and the menu toggle drive each other.
+
+        Closing the raised dock (the ✕ button's path: the
+        `closeEvent` override emits `closed_from_layout`) unchecks
+        the action and drops the dock's tab; re-checking the action
+        shows the dock and puts the tab back.
+        """
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win.show()
+            _pump()
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            dock: gui_figure_panel.FigureDock = panel.docks()[0]
+            action: QAction = _figure_toggle_actions(win)[0]
+            assert action.text() == "Hydrology"
+            assert action.isChecked()
+            dock.close()
+            _pump()
+            assert not action.isChecked()
+            assert not dock.isVisible()
+            assert _figure_tab_texts(win) == panel._titles[1:]
+            action.setChecked(True)
+            _pump()
+            assert action.isChecked()
+            assert dock.isVisible()
+            assert _figure_tab_texts(win) == panel._titles
+        finally:
+            _close_window(win)
+
+    def test_reset_dock_layout_retabs_everything(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Floated docks return to one page-ordered tab strip."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win.show()
+            _pump()
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            panel.docks()[1].setFloating(True)
+            panel.docks()[4].setFloating(True)
+            _pump()
+            win._reset_dock_action.trigger()
+            _pump()
+            docks: list[gui_figure_panel.FigureDock] = panel.docks()
+            assert all(not dock.isFloating() for dock in docks)
+            assert all(
+                win.dockWidgetArea(dock) == gui_figure_panel.DOCK_AREA
+                for dock in docks
+            )
+            assert _figure_tab_texts(win) == panel._titles
+            assert panel.current_page() == 0
+            assert win._status_label.text() == "Dock layout reset."
+        finally:
+            _close_window(win)
+
+    def test_view_menu_tracks_mode_switch(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Switching to hydrology-only re-lists the menu for three figures."""
+        full_calls: list[np.ndarray] = []
+        hydro_calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(full_calls, input_data),
+        )
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_hydro_results",
+            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win.show()
+            _pump()
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            assert len(_figure_toggle_actions(win)) == 8
+            win._mode_action.setChecked(True)
+            _wait_until(
+                lambda: win._run_generation == 2 and win._worker is None
+            )
+            _pump(50)
+            toggles: list[QAction] = _figure_toggle_actions(win)
+            assert [action.text() for action in toggles] == [
+                "Hydrology",
+                "Storage",
+                "Partitioning",
+            ]
+            assert panel._titles == [
+                "Hydrology",
+                "Storage",
+                "Partitioning",
+            ]
+            assert all(action.isCheckable() and action.isChecked() for action in toggles)
         finally:
             _close_window(win)
 
@@ -2596,22 +2835,28 @@ def _figure(title: str) -> tuple[str, Figure]:
     return title, fig
 
 
-def _docks_window() -> QMainWindow:
-    """A bare shown main window for the standalone figure-dock tests."""
+def _docks_window() -> tuple[QMainWindow, QMenu]:
+    """
+    A bare shown main window and an empty menu for the standalone
+    figure-dock tests.
+
+    The panel fills a *View* menu with one toggle per dock; these
+    tests do not inspect the toggles, so a parentless menu is enough.
+    """
     window: QMainWindow = QMainWindow()
     window.resize(1200, 800)
     window.show()
     _pump()
-    return window
+    return window, QMenu("View")
 
 
 class TestFigureDocks:
     """The figure panel's one-dock-per-figure tabbing and paging."""
 
     def test_empty_panel(self, qapp: QApplication) -> None:
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             assert panel.page_count() == 0
             assert panel.current_page() == -1
             assert panel.docks() == []
@@ -2621,9 +2866,9 @@ class TestFigureDocks:
 
     def test_tabs_and_titles(self, qapp: QApplication) -> None:
         """One tabbed dock per figure, titled and named in page order."""
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
             # The dock area's tab bar fills its tabs on the next
             # event-loop pass (Qt defers the tab layout), so pump
@@ -2652,9 +2897,9 @@ class TestFigureDocks:
             _pump()
 
     def test_paging_and_wrap_around(self, qapp: QApplication) -> None:
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures(
                 [
                     _figure("A"),
@@ -2687,9 +2932,9 @@ class TestFigureDocks:
         self, qapp: QApplication
     ) -> None:
         """Shrinking the figure list keeps the index valid."""
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
             panel.show_page(1)
             panel.set_figures([_figure("A"), _figure("B")])
@@ -2706,9 +2951,9 @@ class TestFigureDocks:
 
     def test_set_figures_replaces_docks(self, qapp: QApplication) -> None:
         """A new figure list retires the old docks."""
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
             old_docks: list[gui_figure_panel.FigureDock] = panel.docks()
             panel.set_figures([_figure("D")])
@@ -2740,9 +2985,9 @@ class TestFigureDocks:
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         """Every page is saved as a PNG named after its title."""
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures(
                 [
                     _figure("Streamflow and river concentrations"),
@@ -2786,9 +3031,9 @@ class TestFigureDocks:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures([_figure("A"), _figure("B")])
             for canvas in panel._canvases:
                 canvas._set_device_pixel_ratio(dpr)
@@ -2816,9 +3061,9 @@ class TestFigureDocks:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        window = _docks_window()
+        window, view_menu = _docks_window()
         try:
-            panel = gui_figure_panel.FigurePanel(window)
+            panel = gui_figure_panel.FigurePanel(window, view_menu)
             fig: Figure = Figure(figsize=(15, 7))
             ax = fig.add_subplot()
             ax.plot([0.0, 1.0], [0.0, 1.0], label="Series")
