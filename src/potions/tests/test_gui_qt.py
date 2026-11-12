@@ -74,6 +74,7 @@ from potions.reactive_transport.common_networks import (
 from potions.reactive_transport.rt_zone import WaterVolumeError
 
 from ..gui import data as gui_data
+from ..gui import data_dialog as gui_data_dialog
 from ..gui import calibration as gui_calibration
 from ..gui import figure_panel as gui_figure_panel
 from ..gui import model_specs
@@ -6455,3 +6456,130 @@ class TestNetworkSelection:
         (broken / "network.yaml").write_text(":::")
         assert gui_window._run_network(broken) is None
         assert "Could not load" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ #
+# The column-mapping dialog (standalone)
+# ------------------------------------------------------------------ #
+
+
+class TestColumnMappingDialog:
+    """The role-per-row mapping dialog of the Load data flow."""
+
+    @staticmethod
+    def _columns() -> list[str]:
+        return [
+            "date",
+            "ppt",
+            "tair",
+            "evap",
+            "flow",
+            "doc_molL",
+            "ca_molL",
+            "dic_molL",
+            "unmapped_column",
+        ]
+
+    @staticmethod
+    def _prefill() -> dict[str, str | None]:
+        return {
+            "date": "date",
+            "precip": "ppt",
+            "temp": "tair",
+            "pet": "evap",
+            "q_meas": "flow",
+            "DOC": "doc_molL",
+            "Ca++": "ca_molL",
+            "DIC": "dic_molL",
+        }
+
+    @staticmethod
+    def _make(
+        qapp: QApplication,
+        prefill: dict[str, str | None],
+    ) -> gui_data_dialog.ColumnMappingDialog:
+        return gui_data_dialog.ColumnMappingDialog(
+            TestColumnMappingDialog._columns(),
+            get_soc_calcite_network(),
+            prefill,
+        )
+
+    def test_prefill_applied(
+        self, qapp: QApplication
+    ) -> None:
+        """Prefilled roles show their column in the row's combo, and
+        unmentioned rows stay on their sentinel."""
+        dialog = self._make(
+            qapp, {"precip": "ppt", "DOC": "doc_molL"}
+        )
+        try:
+            assert dialog._combos["precip"].currentText() == "ppt"
+            assert dialog._combos["DOC"].currentText() == "doc_molL"
+            assert dialog._combos["date"].currentText() == "(select…)"
+            assert dialog._combos["pet"].currentText() == "(select…)"
+            assert dialog._combos["q_meas"].currentText() == "(none)"
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_required_gates_ok(self, qapp: QApplication) -> None:
+        """OK stays disabled while a required row is "(select…)", and
+        enabling that row enables OK."""
+        prefill: dict[str, str | None] = self._prefill()
+        del prefill["pet"]
+        dialog = self._make(qapp, prefill)
+        try:
+            assert not dialog._ok_button.isEnabled()
+            dialog._combos["pet"].setCurrentText("evap")
+            assert dialog._ok_button.isEnabled()
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_none_option(self, qapp: QApplication) -> None:
+        """An optional row on "(none)" yields None in the mapping, and
+        a prefilled None is applied as the row's "(none)" item."""
+        dialog = self._make(qapp, self._prefill())
+        try:
+            dialog._combos["q_meas"].setCurrentText("(none)")
+            mapping: dict[str, str | None] = dialog.mapping()
+            assert mapping["q_meas"] is None
+            assert mapping["DOC"] == "doc_molL"
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+        prefill: dict[str, str | None] = self._prefill()
+        prefill["q_meas"] = None
+        dialog = self._make(qapp, prefill)
+        try:
+            assert dialog._combos["q_meas"].currentText() == "(none)"
+            assert dialog.mapping()["q_meas"] is None
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_mapping_roundtrip(self, qapp: QApplication) -> None:
+        """A complete mapping comes back exactly as set, with every
+        role key present."""
+        dialog = self._make(qapp, self._prefill())
+        try:
+            assert dialog.mapping() == self._prefill()
+        finally:
+            dialog.deleteLater()
+            _pump()
+
+    def test_collision_disables_ok(self, qapp: QApplication) -> None:
+        """Two rows on the same column disable OK and the status line
+        names the column and both roles."""
+        dialog = self._make(qapp, self._prefill())
+        try:
+            dialog._combos["DOC"].setCurrentText("ca_molL")
+            assert not dialog._ok_button.isEnabled()
+            status: str = dialog._status_label.text()
+            assert "ca_molL" in status
+            assert "DOC" in status
+            assert "Ca++" in status
+        finally:
+            dialog.deleteLater()
+            _pump()
