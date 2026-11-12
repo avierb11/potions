@@ -117,7 +117,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QMouseEvent, QPainter
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QMouseEvent, QPainter, QScreen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -254,8 +254,9 @@ _DEBOUNCE_MS: Final[int] = 400
 # a run is in flight.
 _ELAPSED_MS: Final[int] = 200
 
-# The initial window size (px); a restored window geometry replaces
-# it before the window is shown.
+# The initial window size (px), clamped to the screen at startup (see
+# `_available_screen_geometry`); a restored window geometry replaces it
+# before the window is shown.
 _INITIAL_SIZE: Final[tuple[int, int]] = (1360, 900)
 
 # The initial sizes (px) of the main vertical splitter: the figure
@@ -327,6 +328,51 @@ _INVALID_INDEX: Final[QModelIndex] = QModelIndex()
 
 
 # ==== Helpers ==== #
+def _available_screen_geometry() -> QRect | None:
+    """
+    The current primary screen's available area, if there is a screen.
+
+    Returns:
+        The primary screen's `availableGeometry()` (the desktop minus
+        panels), or None when the platform reports no primary screen
+        (a headless or plugin-less platform); callers then apply their
+        geometry unclamped.
+    """
+    screen: QScreen | None = QApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+
+
+def _clamped_geometry(requested: QRect, available: QRect) -> QRect:
+    """
+    Fit a requested window geometry inside the screen's available area.
+
+    Sizes larger than the area are capped to it; a position whose
+    window would hang past the area's far edge is pulled back so the
+    whole window sits inside.  This keeps a restored or default window
+    on the screen even when its saved geometry came from a bigger
+    monitor (or was recorded while the window was maximized on one).
+
+    Args:
+        requested: The geometry the window asks for.
+        available: The screen area the window must fit in.
+
+    Returns:
+        The requested geometry with its size capped to the area and
+        its position pushed inside it.
+    """
+    width: int = min(requested.width(), available.width())
+    height: int = min(requested.height(), available.height())
+    x: int = min(
+        max(requested.x(), available.x()),
+        available.x() + available.width() - width,
+    )
+    y: int = min(
+        max(requested.y(), available.y()),
+        available.y() + available.height() - height,
+    )
+    return QRect(x, y, width, height)
+
+
 def _objective_panel_size(
     heading_size: QSize,
     column_widths: list[int],
@@ -2110,7 +2156,16 @@ class MainWindow(QMainWindow):
         self._custom_network_name: str | None = network_name
 
         self.setWindowTitle(_title_for(self._input_data.spec))
-        self.resize(*_INITIAL_SIZE)
+        # The default size is clamped to the screen so a window whose
+        # saved history never existed still opens on the display.
+        initial: tuple[int, int] = _INITIAL_SIZE
+        screen_area: QRect | None = _available_screen_geometry()
+        if screen_area is not None:
+            initial = (
+                min(initial[0], screen_area.width()),
+                min(initial[1], screen_area.height()),
+            )
+        self.resize(*initial)
 
         self._build_ui()
         self._build_actions()
@@ -2736,11 +2791,17 @@ class MainWindow(QMainWindow):
                 "built from its saved output."
             )
         if saved.window_geometry is not None:
-            self.setGeometry(
+            requested: QRect = QRect(
                 saved.window_geometry.get("x", 0),
                 saved.window_geometry.get("y", 0),
                 saved.window_geometry.get("width", _INITIAL_SIZE[0]),
                 saved.window_geometry.get("height", _INITIAL_SIZE[1]),
+            )
+            screen_area: QRect | None = _available_screen_geometry()
+            self.setGeometry(
+                requested
+                if screen_area is None
+                else _clamped_geometry(requested, screen_area)
             )
         if saved.splitter_sizes is not None:
             self._splitter.setSizes(saved.splitter_sizes[:2])

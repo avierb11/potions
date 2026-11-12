@@ -370,6 +370,28 @@ class _FakeMessageBox:
 # ------------------------------------------------------------------ #
 
 
+class TestWindowGeometryClamp:
+    """`_clamped_geometry` keeps a requested geometry inside the screen."""
+
+    def test_geometry_inside_is_untouched(self) -> None:
+        assert gui_window._clamped_geometry(
+            QRect(10, 20, 1100, 800), QRect(0, 0, 1920, 1168)
+        ) == QRect(10, 20, 1100, 800)
+
+    def test_oversized_geometry_is_capped(self) -> None:
+        # The real bug's shape: a maximized client rect saved on a
+        # 1920×1200 screen, restored on a smaller available area.
+        assert gui_window._clamped_geometry(
+            QRect(0, 0, 1914, 1135), QRect(0, 64, 1024, 700)
+        ) == QRect(0, 64, 1024, 700)
+
+    def test_far_edge_position_is_pulled_back(self) -> None:
+        # Full-size window pushed fully inside the available area.
+        assert gui_window._clamped_geometry(
+            QRect(1500, 1500, 800, 600), QRect(0, 0, 1920, 1200)
+        ) == QRect(1120, 600, 800, 600)
+
+
 class TestMainWindowStartup:
     """Starting the window: from defaults, or restoring a saved run."""
 
@@ -761,10 +783,13 @@ class TestMainWindowStartup:
             )
             # The save-history toggle is part of the saved state.
             assert win._save_history_checkbox.isChecked()
-            assert win.x() == 10
-            assert win.y() == 20
-            assert win.width() == 1100
-            assert win.height() == 800
+            # The saved 1100×800 at (10, 20) is clamped to the
+            # offscreen screen's available area (800×800): the size
+            # caps and the origin pulls back to the area's corner.
+            assert win.geometry() == gui_window._clamped_geometry(
+                QRect(10, 20, 1100, 800),
+                qapp.primaryScreen().availableGeometry(),
+            )
             # Show the window first: an unshown window would normalize
             # the requested sizes against the window's size hint
             # instead of its restored geometry (where the figure
@@ -825,9 +850,15 @@ class TestMainWindowStartup:
                 assert panel.param_values()[key] == pytest.approx(
                     0.5 * (lo + hi)
                 )
-            # Geometry and splitter sizes keep their defaults.
-            assert win.width() == gui_window._INITIAL_SIZE[0]
-            assert win.height() == gui_window._INITIAL_SIZE[1]
+            # Geometry and splitter sizes keep their defaults (the
+            # default size clamped to the offscreen screen).
+            available: QRect = qapp.primaryScreen().availableGeometry()
+            assert win.width() == min(
+                gui_window._INITIAL_SIZE[0], available.width()
+            )
+            assert win.height() == min(
+                gui_window._INITIAL_SIZE[1], available.height()
+            )
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
             # No saved state carried the toggle: it restores off.
