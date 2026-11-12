@@ -141,6 +141,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -2311,6 +2312,7 @@ class MainWindow(QMainWindow):
     # ==== Building ==== #
     def _build_ui(self) -> None:
         """Assemble the header row, the figure, the lower row, and the progress strip."""
+        self._build_menus()
         header: QWidget = self._build_header()
 
         self._figure_panel: FigurePanel = self._build_figure_panel()
@@ -2365,6 +2367,55 @@ class MainWindow(QMainWindow):
         self._elapsed_timer: QTimer = QTimer(self)
         self._elapsed_timer.setInterval(_ELAPSED_MS)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
+
+    def _build_menus(self) -> None:
+        """
+        Build the menu bar's menus: fixed chrome at the window's top.
+
+        The File menu carries the data- and network-sourcing commands
+        that used to sit as header buttons: menu items are the
+        conventional home for file-ish commands, and menu items can
+        carry Alt mnemonics (a text-only toolbar would print an `&`
+        literally, so toolbar actions never get them).  Later builders
+        add further menus to this bar; this method builds the bar's
+        first menu and the actions inside it.
+        """
+        self._file_menu: QMenu = self.menuBar().addMenu("&File")
+
+        self._load_data_action: QAction = QAction("&Load data…", self)
+        self._load_data_action.setToolTip(
+            "Load a CSV or XLSX record and switch to it.  The "
+            "dialog maps the file's columns to the record's roles."
+        )
+        self._load_data_action.triggered.connect(self._on_load_data)
+        self._file_menu.addAction(self._load_data_action)
+
+        self._load_network_action: QAction = QAction(
+            "&Load network file…", self
+        )
+        self._load_network_action.setToolTip(
+            "Run the network of a YAML file.  A file whose network "
+            "matches a preset selects that preset's entry."
+        )
+        self._load_network_action.triggered.connect(self._on_load_network)
+        self._file_menu.addAction(self._load_network_action)
+
+        self._save_network_action: QAction = QAction(
+            "Save network &as…", self
+        )
+        self._save_network_action.setToolTip(
+            "Write the network currently running to a YAML file."
+        )
+        self._save_network_action.triggered.connect(self._on_save_network)
+        self._file_menu.addAction(self._save_network_action)
+
+        self._edit_network_action: QAction = QAction("&Edit network…", self)
+        self._edit_network_action.setToolTip(
+            "Open the network editor.  Applying the dialog switches "
+            "the window to the edited network."
+        )
+        self._edit_network_action.triggered.connect(self._on_edit_network)
+        self._file_menu.addAction(self._edit_network_action)
 
     def _build_header(self) -> QWidget:
         """
@@ -2436,37 +2487,6 @@ class MainWindow(QMainWindow):
         self._network_combo.currentIndexChanged.connect(
             self._on_network_changed
         )
-
-        load_data_button: QPushButton = QPushButton("Load data…")
-        load_data_button.setToolTip(
-            "Load a CSV or XLSX record and switch to it.  The "
-            "dialog maps the file's columns to the record's roles."
-        )
-        load_data_button.clicked.connect(self._on_load_data)
-
-        load_network_button: QPushButton = QPushButton(
-            "Load network file…"
-        )
-        load_network_button.setToolTip(
-            "Run the network of a YAML file.  A file whose network "
-            "matches a preset selects that preset's entry."
-        )
-        load_network_button.clicked.connect(self._on_load_network)
-
-        save_network_button: QPushButton = QPushButton(
-            "Save network as…"
-        )
-        save_network_button.setToolTip(
-            "Write the network currently running to a YAML file."
-        )
-        save_network_button.clicked.connect(self._on_save_network)
-
-        edit_network_button: QPushButton = QPushButton("Edit network…")
-        edit_network_button.setToolTip(
-            "Open the network editor.  Applying the dialog switches "
-            "the window to the edited network."
-        )
-        edit_network_button.clicked.connect(self._on_edit_network)
 
         # Off by default: the models run in full mode.
         self._mode_checkbox: QCheckBox = QCheckBox("Hydrology only")
@@ -2584,10 +2604,6 @@ class MainWindow(QMainWindow):
         for combo in combos:
             combo.setMinimumWidth(_COMBO_MIN_WIDTH)
         controls: tuple[QPushButton | QCheckBox, ...] = (
-            load_data_button,
-            load_network_button,
-            save_network_button,
-            edit_network_button,
             self._mode_checkbox,
             self._save_history_checkbox,
             self._auto_run_checkbox,
@@ -2610,10 +2626,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._job_spinner)
         layout.addWidget(self._model_combo)
         layout.addWidget(self._network_combo)
-        layout.addWidget(load_data_button)
-        layout.addWidget(load_network_button)
-        layout.addWidget(save_network_button)
-        layout.addWidget(edit_network_button)
         layout.addWidget(self._mode_checkbox)
         layout.addStretch(1)
         # The status label stretches with the middle stretch (both

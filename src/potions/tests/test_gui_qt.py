@@ -1031,6 +1031,47 @@ class TestMainWindowStartup:
 
 
 # ------------------------------------------------------------------ #
+# MainWindow: menus
+# ------------------------------------------------------------------ #
+
+
+class TestWindowMenus:
+    """The menu bar carries the file actions in their menu."""
+
+    def test_file_menu_carries_the_data_and_network_actions(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The File menu holds the four data/network actions, in order, with tooltips."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            texts = [
+                action.text().replace("&", "")
+                for action in win._file_menu.actions()
+            ]
+            assert texts == [
+                "Load data…",
+                "Load network file…",
+                "Save network as…",
+                "Edit network…",
+            ]
+            assert texts and all(
+                action.toolTip() for action in win._file_menu.actions()
+            )
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
 # MainWindow: minimum size
 # ------------------------------------------------------------------ #
 
