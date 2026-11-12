@@ -69,7 +69,7 @@ GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # `potions.reactive_transport.network_file`).
 NETWORK_FILENAME: Final[str] = "network.yaml"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 8
+GUI_STATE_VERSION: Final[int] = 9
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -82,15 +82,15 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one (8, the maximized-window flag), version 7 (the
-# run's network fingerprint), version 6 (the date-based plotting
-# window), version 5 (the selected model's key), version 4 (the
-# objective-table selection), version 3 (the time-series figure's
-# selection list), version 2 (the last version this GUI has written),
-# and version 1 (the two-splitter layout, whose splitter sizes are
-# mapped onto the current one).
+# the current one (9, the dock-layout blob), version 8 (the
+# maximized-window flag), version 7 (the run's network fingerprint),
+# version 6 (the date-based plotting window), version 5 (the selected
+# model's key), version 4 (the objective-table selection), version 3
+# (the time-series figure's selection list), version 2 (the last
+# version this GUI has written), and version 1 (the two-splitter
+# layout, whose splitter sizes are mapped onto the current one).
 _ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
-    {1, 2, 3, 4, 5, 6, 7, GUI_STATE_VERSION}
+    {1, 2, 3, 4, 5, 6, 7, 8, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
@@ -122,7 +122,9 @@ class GuiState:
         splitter_sizes: The sizes of the main vertical splitter, in
             order: the figure and the lower (table-and-parameters)
             row; None when the state predates splitter
-            persistence.
+            persistence. Accepted from state files of version 8 or
+            older; version 9 writes null because the dockable figure
+            panels replaced that splitter.
         save_history: Whether the *Save run history* checkbox was
             on in the session; an absent field in a state file
             means a state saved before the toggle existed, which
@@ -154,6 +156,11 @@ class GuiState:
             An absent field in a state file means a state saved
             before the maximized flag existed, which restores a
             normal window.
+        dock_state: The base64 encoding of the main window's
+            `saveState()` dock layout (the per-figure dock panels'
+            placement, sizing, and tabbing); None means the session
+            recorded no dock layout, which restores the window's
+            default layout.
     """
 
     csv_path: str | None
@@ -169,6 +176,7 @@ class GuiState:
     network_fingerprint: str | None = None
     column_map: dict[str, str | None] | None = None
     window_maximized: bool = False
+    dock_state: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -220,6 +228,7 @@ class GuiState:
             "model_key": self.model_key,
             "network_fingerprint": self.network_fingerprint,
             "window_maximized": self.window_maximized,
+            "dock_state": self.dock_state,
         }
         if self.column_map is not None:
             data["column_map"] = dict(self.column_map)
@@ -278,6 +287,7 @@ class GuiState:
             network_fingerprint=_optional_network_fingerprint(data),
             column_map=_optional_column_map(data),
             window_maximized=_optional_maximized(data),
+            dock_state=_optional_dock_state(data),
         )
 
 
@@ -690,6 +700,34 @@ def _optional_maximized(data: dict[str, object]) -> bool:
     if not isinstance(raw, bool):
         raise ValueError(
             f"gui_state.json 'window_maximized' must be a boolean, "
+            f"got {type(raw).__name__}."
+        )
+    return raw
+
+
+def _optional_dock_state(data: dict[str, object]) -> str | None:
+    """
+    The optional ``dock_state`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's base64 dock-layout string, or None when it is
+        absent or null (a state saved before the dockable figure
+        panels existed, or one that recorded no layout, restores the
+        window's default layout).
+
+    Raises:
+        ValueError: Raised when the field is present but is neither a
+            string nor null.
+    """
+    raw: object = data.get("dock_state")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"gui_state.json 'dock_state' must be a string or null, "
             f"got {type(raw).__name__}."
         )
     return raw

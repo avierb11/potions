@@ -893,12 +893,15 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 8
-        assert state.to_dict()["version"] == 8
+        assert GUI_STATE_VERSION == 9
+        assert state.to_dict()["version"] == 9
+        # A state built without a dock layout restores with none
+        # (the default layout).
+        assert restored.dock_state is None
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 8
+        assert raw["version"] == 9
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         assert raw["model_key"] == "lateral_three_layer"
         param_values = _as_dict(raw, "param_values")
@@ -915,6 +918,8 @@ class TestGuiStateRoundTrip:
         # The main vertical splitter's two sections: the figure and
         # the lower (table-and-parameters) row.
         assert raw["splitter_sizes"] == [300, 600]
+        # Version 9's dock-layout field: present even when unset.
+        assert raw["dock_state"] is None
 
     def test_legacy_three_size_splitter(
         self, input_data: gui_data.GuiInputData
@@ -941,6 +946,42 @@ class TestGuiStateRoundTrip:
         # Version 1 predates the field: a v1-era file restores
         # with no objective selection.
         assert restored.objective_terms is None
+
+    def test_dock_state_round_trip(self, input_data: gui_data.GuiInputData) -> None:
+        """The base64 dock-layout blob survives write/read verbatim."""
+        state = _full_state(input_data)
+        with_dock = GuiState(
+            csv_path=state.csv_path,
+            param_values=state.param_values,
+            param_bounds=state.param_bounds,
+            selection=state.selection,
+            window_geometry=state.window_geometry,
+            splitter_sizes=state.splitter_sizes,
+            save_history=state.save_history,
+            mode=state.mode,
+            objective_terms=state.objective_terms,
+            model_key=state.model_key,
+            network_fingerprint=state.network_fingerprint,
+            column_map=state.column_map,
+            window_maximized=state.window_maximized,
+            dock_state="aGVsbG8=",
+        )
+        restored = GuiState.from_dict(with_dock.to_dict())
+        assert restored == with_dock
+        assert restored.dock_state == "aGVsbG8="
+        assert with_dock.to_dict()["dock_state"] == "aGVsbG8="
+
+    def test_legacy_v8_without_dock_state(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A version-8 state file (no dock field) still loads."""
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        raw["version"] = 8
+        restored = GuiState.from_dict(raw)
+        # v9 accepts v8 files: the dock field defaults to None (the
+        # default layout) and the retired splitter sizes survive.
+        assert restored.dock_state is None
+        assert restored.splitter_sizes == [300, 600]
 
     def test_optional_fields_none(self, input_data: gui_data.GuiInputData) -> None:
         state = _full_state(input_data)
@@ -1153,7 +1194,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8, 9]).",
             ),
             (
                 {"csv_path": 12},
@@ -1182,6 +1223,10 @@ class TestFromDictErrors:
             (
                 {"splitter_sizes": [1, 2, 3, 4, 5]},
                 "gui_state.json 'splitter_sizes' must hold two, three, or four sizes, got 5.",
+            ),
+            (
+                {"dock_state": 5},
+                "gui_state.json 'dock_state' must be a string or null, got int.",
             ),
             (
                 {"save_history": "yes"},
@@ -1514,7 +1559,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8, 9]).\n"
         )
 
     def test_top_level_not_object(
@@ -1535,7 +1580,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 8,")
+        assert text.startswith("{\n  \"version\": 9,")
         assert text.endswith("\n")
 
 
