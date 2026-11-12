@@ -80,9 +80,9 @@ DEFAULT_CSV_PATH: Final[Path] = (
     _PACKAGE_DIR / "data" / "east_river_series.csv"
 )
 
-# The number of days of the two-year spin-up prepended to the CSV
-# record so the model reaches a representative state before the first
-# day of the record.
+# The number of days of the two-year spin-up prepended to the record
+# so the model reaches a representative state before the record's
+# first day.
 NUM_SPINUP_DAYS: Final[int] = 2 * 365
 
 # The (frozen) initial concentration of every mineral in a reactive

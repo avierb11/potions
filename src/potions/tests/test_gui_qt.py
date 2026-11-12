@@ -4297,6 +4297,7 @@ class TestLineSearch:
             ) = None,
             model_key: str = "lateral_three_layer",
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> list[gui_data.GuiRunResults | str]:
             payloads: list[gui_data.GuiRunResults | str] = []
             for index, point in enumerate(points):

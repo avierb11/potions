@@ -4654,6 +4654,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4696,6 +4697,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4737,6 +4739,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             raise RuntimeError("missing csv")
 
@@ -4765,6 +4768,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(f"{csv_path}\n")
@@ -4802,6 +4806,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             return input_data
 
@@ -4841,6 +4846,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             seen.append(model_key)
             return input_data
@@ -4875,6 +4881,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             seen.append(network)
             return input_data
@@ -4913,6 +4920,7 @@ class TestModelPool:
             csv_path: Path,
             model_key: str = model_specs.DEFAULT_MODEL_KEY,
             network: pt.ReactionNetwork | None = None,
+            column_map: dict[str, str | None] | None = None,
         ) -> gui_data.GuiInputData:
             seen.append(model_key)
             return input_data

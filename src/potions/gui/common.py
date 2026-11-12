@@ -5,8 +5,8 @@ calibration GUI.
 The GUI is split across the modules in this package:
 
 * ``potions.gui.window`` (the main window) wires everything together;
-* ``potions.gui.data`` loads the East River series CSV and runs the
-  models;
+* ``potions.gui.data`` loads the record spreadsheet (the East River
+  series by default) and runs the models;
 * ``potions.gui.param_panel`` renders the parameter controls;
 * ``potions.gui.plots`` builds the figures and the objective table;
 * ``potions.gui.state`` persists and restores the GUI state.
@@ -63,8 +63,8 @@ TEST_WYS: Final[list[int]] = [2017, 2020]
 VAL_WY: Final[int] = 2018
 
 # The water years the site record contains, in order: the plotting
-# range the figure panel's from / to pickers offer.  The record
-# (the East River series CSV) runs 2014-05-02 to 2025-09-18, so the
+# range the figure panel's from / to pickers offer.  The bundled
+# record (the East River series) runs 2014-05-02 to 2025-09-18, so the
 # first full water year is 2015 and the last, 2025, is partial — it
 # ends with the record rather than on September 30.
 WATER_YEARS: Final[list[int]] = list(range(2015, 2026))

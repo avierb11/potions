@@ -29,6 +29,9 @@ import pandas as pd
 import pytest
 
 from ..gui import data as gui_data
+from ..gui import model_pool
+from ..gui import model_specs
+from ..gui import state as gui_state
 from ..hydro_model import HydrologicalModel
 from ..model import Model
 from ..reactive_transport.common_networks import (
@@ -700,3 +703,104 @@ class TestDefaultPlotSelectionWindow:
         selection = gui_data.default_plot_selection()
         assert selection.window_start == gui_data.DEFAULT_WINDOW_START
         assert selection.window_end == gui_data.DEFAULT_WINDOW_END
+
+
+# ------------------------------------------------------------------ #
+# Worker-pool plumbing
+# ------------------------------------------------------------------ #
+
+
+class TestWorkerPoolPlumbing:
+    """The pool's initializer and phase runner carry the column map
+    into the record loader: a mapped record loads in a worker exactly
+    as it does in the parent, and a failed load reports through the
+    pool's error-string contract."""
+
+    def test_init_worker_with_map(self, tmp_path: Path) -> None:
+        """An xlsx whose columns only resolve through a map loads in
+        the worker's initializer: the mapped streamflow column
+        becomes ``q_meas`` (NaN over the capped spin-up)."""
+        index: pd.DatetimeIndex = pd.date_range("2020-01-01", periods=10)
+        frame: pd.DataFrame = _forcing_frame(index, with_streamflow=True)
+        frame.rename(
+            columns={
+                "date": "day",
+                "precip": "wet",
+                "temp": "degC",
+                "pet": "evap",
+                "q_meas": "flow",
+            }
+        ).to_excel(tmp_path / "mapped.xlsx", index=False)
+
+        mapping: dict[str, str | None] = {
+            "date": "day",
+            "precip": "wet",
+            "temp": "degC",
+            "pet": "evap",
+            "q_meas": "flow",
+        }
+        try:
+            model_pool.init_worker(
+                str(tmp_path / "mapped.xlsx"),
+                model_specs.DEFAULT_MODEL_KEY,
+                column_map=mapping,
+            )
+            assert model_pool._INIT_ERROR is None
+            loaded: gui_data.GuiInputData | None = model_pool._INPUT_DATA
+            assert loaded is not None
+            q_meas: pd.Series | None = loaded.q_meas
+            assert q_meas is not None
+            # A 10-day record caps the spin-up to 5 days (half the
+            # record): 15 rows, measurements NaN over the spin-up.
+            assert len(q_meas) == 15
+            assert q_meas.iloc[:5].isna().all()
+            assert list(q_meas.iloc[5:]) == list(range(10))
+        finally:
+            # In-process init leaves the module globals set.
+            model_pool._INPUT_DATA = None
+            model_pool._INIT_ERROR = None
+
+    def test_init_worker_bad_map_reports(self, tmp_path: Path) -> None:
+        """A map that points a role at a missing column does not
+        crash the worker: the initializer's failure-string contract
+        holds, and no input data is loaded."""
+        index: pd.DatetimeIndex = pd.date_range("2020-01-01", periods=10)
+        path: Path = tmp_path / "bad_map.csv"
+        _forcing_frame(index, with_streamflow=True).to_csv(
+            path, index=False
+        )
+
+        captured_error: str | None = None
+        try:
+            model_pool.init_worker(
+                str(path),
+                model_specs.DEFAULT_MODEL_KEY,
+                column_map={"q_meas": "nope"},
+            )
+            assert model_pool._INPUT_DATA is None
+            captured_error = model_pool._INIT_ERROR
+        finally:
+            # In-process init leaves the module globals set.
+            model_pool._INPUT_DATA = None
+            model_pool._INIT_ERROR = None
+        assert captured_error is not None
+        assert captured_error.startswith(
+            "ValueError: The column map points the role 'q_meas' at "
+            "the column 'nope'"
+        )
+
+    def test_map_model_runs_default_unchanged(self) -> None:
+        """A phase on the bundled record (no map, hydro mode, one
+        point) still yields one results object: the default path is
+        unchanged by the mapping parameter (the ~0.3 s cost is the
+        pool's one record re-parse plus one hydro run)."""
+        input_data: gui_data.GuiInputData = gui_data.load_input_data()
+        point: np.ndarray = _midpoint_vector(input_data)
+        runs: list[gui_data.GuiRunResults | str] = model_pool.map_model_runs(
+            [point],
+            gui_state.MODE_HYDRO,
+            str(gui_data.DEFAULT_CSV_PATH),
+            workers=1,
+        )
+        assert len(runs) == 1
+        assert isinstance(runs[0], gui_data.GuiRunResults)

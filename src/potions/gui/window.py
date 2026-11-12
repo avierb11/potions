@@ -894,6 +894,7 @@ class _GradientWorker(QThread):
             on_result=on_result,
             model_key=self._model_key,
             network=self._network,
+            column_map=self._column_map,
         )
         failed_points: int = 0
         results: dict[tuple[float, ...], GuiRunResults | str] = {}
@@ -1312,6 +1313,7 @@ class _LineSearchWorker(QThread):
                 on_result=on_phase1_result,
                 model_key=self._model_key,
                 network=self._network,
+                column_map=self._column_map,
             )
         results: dict[tuple[float, ...], GuiRunResults] = {}
         if self._base_results is not None:
@@ -1381,6 +1383,7 @@ class _LineSearchWorker(QThread):
                 on_result=on_pool_result,
                 model_key=self._model_key,
                 network=self._network,
+                column_map=self._column_map,
             )
             if pool_points
             else []

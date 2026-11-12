@@ -21,8 +21,8 @@ Start the GUI with the console script installed with the package::
     potions-gui
 
 or programmatically with `main`.  The options are ``--csv`` (the
-series CSV to load) and ``--network`` (a reaction-network YAML
-file to run)::
+series file to load — a CSV or XLSX, defaulting to the East River
+series) and ``--network`` (a reaction-network YAML file to run)::
 
     potions-gui --csv path/to/series.csv --network path/to/network.yaml
 """
