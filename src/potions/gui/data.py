@@ -418,6 +418,32 @@ def _role_names(role: str) -> tuple[str, ...]:
     return (role, _species_alias(role))
 
 
+def _auto_match(lowered: dict[str, str], role: str) -> str | None:
+    """
+    The record column matching a role's names, or None.
+
+    The role's names — its canonical name first, then its aliases —
+    are looked up in `lowered` in resolution order; the first hit
+    wins.  `lowered` maps each column name (lowercased, trimmed) to
+    the column's actual name.
+
+    Args:
+        lowered: The column-name lookup table, as built by
+            `resolve_columns` and `prefill_mapping`.
+        role: A record role key: a key of `BASE_COLUMN_ROLES` or a
+            measured-species name from `measured_roles`.
+
+    Returns:
+        The matched column's actual name, or None when the role
+        matches no column.
+    """
+    for candidate in _role_names(role):
+        match: str | None = lowered.get(candidate.strip().lower())
+        if match is not None:
+            return match
+    return None
+
+
 def measured_roles(network: pt.ReactionNetwork) -> list[str]:
     """
     The measured-species record roles a network can carry, in plot
@@ -511,11 +537,9 @@ def resolve_columns(
                 )
             resolved[role] = name
             continue
-        for candidate in _role_names(role):
-            match: str | None = lowered.get(candidate.strip().lower())
-            if match is not None:
-                resolved[role] = match
-                break
+        match: str | None = _auto_match(lowered, role)
+        if match is not None:
+            resolved[role] = match
     for column, role_names in _roles_by_column(resolved).items():
         if len(role_names) > 1:
             raise ValueError(
@@ -637,6 +661,42 @@ def _float_frame(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(converted, index=df.index)
 
 
+def _read_raw(path: Path) -> pd.DataFrame:
+    """
+    Read a record spreadsheet into a raw frame by its suffix.
+
+    ``.csv`` files are read with `pandas.read_csv`, ``.xlsx`` files
+    with `pandas.read_excel` and the openpyxl engine.  The frame is
+    as the file holds it: no index, no typing (the caller parses
+    the dates and coerces the data columns).
+
+    Args:
+        path: The record file.
+
+    Returns:
+        The spreadsheet as read: one row per record row, the file's
+        header as column names.
+
+    Raises:
+        ValueError:
+            Raised when the file has no supported extension.
+
+        OSError:
+            Raised when the file cannot be read.
+    """
+    suffix: str = path.suffix.lower()
+    if suffix == ".csv":
+        raw: pd.DataFrame = pd.read_csv(path)
+    elif suffix == ".xlsx":
+        raw = pd.read_excel(path, engine="openpyxl")
+    else:
+        raise ValueError(
+            f"Unsupported record file {path.name!r}: the record must "
+            "be a CSV (.csv) or XLSX (.xlsx) spreadsheet."
+        )
+    return raw
+
+
 def read_spreadsheet(
     path: Path,
     column_map: dict[str, str | None] | None = None,
@@ -644,7 +704,7 @@ def read_spreadsheet(
     """
     Read a CSV or XLSX record into an indexed frame.
 
-    The file is read by its suffix (``.csv`` → `pandas.read_csv`,
+    The file is read by `_read_raw` (``.csv`` → `pandas.read_csv`,
     ``.xlsx`` → `pandas.read_excel` with the openpyxl engine).  The
     record's date column — the map's ``date`` value when present,
     otherwise auto-detected by `_datetime_column` — is parsed with
@@ -670,16 +730,7 @@ def read_spreadsheet(
             duplicated date), or a data column is not numeric (the
             message names the column and the offending value).
     """
-    suffix: str = path.suffix.lower()
-    if suffix == ".csv":
-        raw: pd.DataFrame = pd.read_csv(path)
-    elif suffix == ".xlsx":
-        raw = pd.read_excel(path, engine="openpyxl")
-    else:
-        raise ValueError(
-            f"Unsupported record file {path.name!r}: the record must "
-            "be a CSV (.csv) or XLSX (.xlsx) spreadsheet."
-        )
+    raw: pd.DataFrame = _read_raw(path)
     date_column: str = _datetime_column(raw, column_map)
     dates: pd.Series = pd.to_datetime(raw[date_column])
     if dates.duplicated().any():
@@ -811,6 +862,56 @@ def read_record(
     }
     out: pd.DataFrame = raw.rename(columns=rename)[list(resolved.keys())]
     return trim_record(out)
+
+
+def prefill_mapping(
+    path: Path,
+    network: pt.ReactionNetwork,
+) -> tuple[list[str], dict[str, str | None]]:
+    """
+    The dialog prefill of the Load data flow: the record's columns
+    and the auto-detected role → column mapping.
+
+    The file is read by `_read_raw` (file-level errors — an
+    unsupported suffix, an unreadable file — propagate to the
+    caller), its date column is auto-detected by `_datetime_column`
+    (a missing date column is a file-level error, reported before
+    the dialog opens), and the data roles — streamflow and the
+    network's measured species — are resolved leniently: each
+    role's names are matched against the columns exactly as
+    `resolve_columns` matches them, but an unmatched role yields
+    None instead of an error and no collision is checked (the
+    dialog enforces the constraints and reports them live).
+
+    Args:
+        path: The record file (a ``.csv`` or ``.xlsx`` spreadsheet).
+        network: The run's reaction network: it selects the
+            measured-species roles to prefill.
+
+    Returns:
+        ``(columns, prefill)``: the file's column names in file
+        order (the date column included) and the prefill mapping
+        with a ``date`` entry plus one entry per data role (a
+        matched column name or None).
+
+    Raises:
+        ValueError:
+            Raised when the file has no supported extension or no
+            date column (the message lists the available columns).
+
+        OSError:
+            Raised when the file cannot be read.
+    """
+    raw: pd.DataFrame = _read_raw(path)
+    date_column: str = _datetime_column(raw)
+    columns: list[str] = [str(name) for name in raw.columns]
+    lowered: dict[str, str] = {
+        str(name).strip().lower(): str(name) for name in raw.columns
+    }
+    prefill: dict[str, str | None] = {"date": date_column}
+    for role in ("precip", "temp", "pet", "q_meas", *measured_roles(network)):
+        prefill[role] = _auto_match(lowered, role)
+    return columns, prefill
 
 
 def _with_spinup(

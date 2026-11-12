@@ -6583,3 +6583,508 @@ class TestColumnMappingDialog:
         finally:
             dialog.deleteLater()
             _pump()
+
+
+class TestLoadData:
+    """The header's Load data action: the file dialog, the role
+    mapping dialog, the record switch, and the switches that carry
+    a loaded record's column map."""
+
+    @staticmethod
+    def _days() -> pd.DatetimeIndex:
+        """The twelve days every record fixture spans."""
+        return pd.date_range("2020-01-01", periods=12)
+
+    @staticmethod
+    def _minimal_record(tmp_path: Path) -> Path:
+        """A 12-day XLSX whose data column names match no role
+        alias: only the date column auto-detects, so the dialog's
+        data rows start on their sentinels and the mapping must be
+        chosen by hand."""
+        index: pd.DatetimeIndex = TestLoadData._days()
+        frame: pd.DataFrame = pd.DataFrame(
+            {
+                "date": index.strftime("%Y-%m-%d"),
+                "wet": np.arange(12, dtype=float),
+                "degC": np.full(12, 5.0),
+                "evap": np.arange(12, dtype=float) / 2.0,
+            }
+        )
+        path: Path = tmp_path / "record.xlsx"
+        frame.to_excel(path, index=False)
+        return path
+
+    @staticmethod
+    def _full_record(tmp_path: Path) -> Path:
+        """A 12-day XLSX carrying streamflow and the three river
+        concentrations under names no role alias matches, so the
+        record only loads through a complete explicit mapping."""
+        index: pd.DatetimeIndex = TestLoadData._days()
+        frame: pd.DataFrame = pd.DataFrame(
+            {
+                "date": index.strftime("%Y-%m-%d"),
+                "wet": np.arange(12, dtype=float),
+                "degC": np.full(12, 5.0),
+                "evap": np.arange(12, dtype=float) / 2.0,
+                "stream_mm": np.arange(12, dtype=float) * 3.0,
+                "doc_conc": np.full(12, 1e-05),
+                "ca_conc": np.full(12, 2e-03),
+                "dic_conc": np.full(12, 1e-03),
+            }
+        )
+        path: Path = tmp_path / "record.xlsx"
+        frame.to_excel(path, index=False)
+        return path
+
+    @staticmethod
+    def _fake_dialog(
+        script: dict[str, str],
+        outcome: int,
+        columns_seen: list[list[str]],
+        prefill_seen: list[dict[str, str | None]],
+        mapping_seen: list[dict[str, str | None]],
+    ) -> type[gui_data_dialog.ColumnMappingDialog]:
+        """A stand-in for `ColumnMappingDialog` that records the
+        columns and prefill the window handed it, applies the
+        scripted combo choices, and — from `exec` — returns the
+        scripted outcome while recording the mapping the window
+        then reads."""
+
+        class _FakeDialog(gui_data_dialog.ColumnMappingDialog):
+            def __init__(
+                self,
+                columns: list[str],
+                network: pt.ReactionNetwork,
+                prefill: dict[str, str | None],
+                parent: QWidget | None = None,
+            ) -> None:
+                super().__init__(columns, network, prefill, parent)
+                columns_seen.append(columns)
+                prefill_seen.append(prefill)
+                for role, value in script.items():
+                    self._combos[role].setCurrentText(value)
+
+            def exec(self) -> int:
+                mapping_seen.append(self.mapping())
+                return outcome
+
+        return _FakeDialog
+
+    def test_load_data_switches_window(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A mapped XLSX loads: the dialog is prefilled by
+        auto-detection, accepting it switches the window to the
+        record (new inputs, path, and map), drops the old results
+        and session history, and lights up the run buttons."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+
+            path: Path = self._minimal_record(tmp_path)
+
+            opens: list[tuple[str, str]] = []
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                opens.append((title, flt))
+                return (str(path), flt)
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            columns_seen: list[list[str]] = []
+            prefill_seen: list[dict[str, str | None]] = []
+            mapping_seen: list[dict[str, str | None]] = []
+            monkeypatch.setattr(
+                gui_window,
+                "ColumnMappingDialog",
+                self._fake_dialog(
+                    {"precip": "wet", "temp": "degC", "pet": "evap"},
+                    QDialog.DialogCode.Accepted,
+                    columns_seen,
+                    prefill_seen,
+                    mapping_seen,
+                ),
+            )
+            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+            _FakeMessageBox.critical_calls.clear()
+
+            win._on_load_data()
+            _pump()
+
+            assert opens == [
+                ("Load data", "Data files (*.csv *.xlsx)")
+            ]
+            assert columns_seen == [["date", "wet", "degC", "evap"]]
+            assert prefill_seen == [
+                {
+                    "date": "date",
+                    "precip": None,
+                    "temp": None,
+                    "pet": None,
+                    "q_meas": None,
+                    "DOC": None,
+                    "Ca++": None,
+                    "DIC": None,
+                }
+            ]
+            expected_map: dict[str, str | None] = {
+                "date": "date",
+                "precip": "wet",
+                "temp": "degC",
+                "pet": "evap",
+                "q_meas": None,
+                "DOC": None,
+                "Ca++": None,
+                "DIC": None,
+            }
+            assert mapping_seen == [expected_map]
+            assert win._data_path == str(path)
+            assert win._column_map == expected_map
+            assert win._input_data.q_meas is None
+            assert win._input_data.window == (
+                pd.Timestamp("2020-01-01"),
+                pd.Timestamp("2020-01-12"),
+            )
+            assert win._history_items == []
+            assert win._results is None
+            assert win._figure_panel.page_count() == 0
+            assert win._objective_model._table.empty
+            assert win._run_button.isEnabled()
+            assert win._gradients_button.isEnabled()
+            assert win._line_search_button.isEnabled()
+            assert win._status_label.text() == "Loaded record.xlsx."
+            assert _FakeMessageBox.critical_calls == []
+        finally:
+            _close_window(win)
+
+    def test_load_data_cancellation_keeps_session(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Declining the mapping dialog leaves the session intact:
+        the inputs, the results, the path, and the map stay as
+        they were."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: gui_data.GuiInputData = win._input_data
+            before_results = win._results
+
+            path: Path = self._minimal_record(tmp_path)
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), flt)
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            columns_seen: list[list[str]] = []
+            prefill_seen: list[dict[str, str | None]] = []
+            mapping_seen: list[dict[str, str | None]] = []
+            monkeypatch.setattr(
+                gui_window,
+                "ColumnMappingDialog",
+                self._fake_dialog(
+                    {},
+                    QDialog.DialogCode.Rejected,
+                    columns_seen,
+                    prefill_seen,
+                    mapping_seen,
+                ),
+            )
+            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+            _FakeMessageBox.critical_calls.clear()
+
+            win._on_load_data()
+            _pump()
+
+            assert prefill_seen[0]["date"] == "date"
+            assert win._data_path is None
+            assert win._column_map is None
+            assert win._input_data is before
+            assert win._results is before_results
+            assert _FakeMessageBox.critical_calls == []
+        finally:
+            _close_window(win)
+
+    def test_load_data_bad_file_reports_error(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file without a date column fails before the dialog
+        opens: the error is reported, the session keeps running,
+        and the dialog is never constructed."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: gui_data.GuiInputData = win._input_data
+
+            path: Path = tmp_path / "no_date.csv"
+            pd.DataFrame(
+                {
+                    "wet": [1.0, 2.0, 3.0],
+                    "degC": [5.0, 5.0, 5.0],
+                    "evap": [0.5, 0.5, 0.5],
+                }
+            ).to_csv(path, index=False)
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), flt)
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            monkeypatch.setattr(gui_window, "ColumnMappingDialog", pytest.fail)
+            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+            _FakeMessageBox.critical_calls.clear()
+
+            win._on_load_data()
+            _pump()
+
+            assert len(_FakeMessageBox.critical_calls) == 1
+            title, message = _FakeMessageBox.critical_calls[0]
+            assert title == "Load data"
+            assert "No date column found" in message
+            assert win._data_path is None
+            assert win._column_map is None
+            assert win._input_data is before
+        finally:
+            _close_window(win)
+
+    def test_load_data_failure_keeps_session(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Accepting the dialog with required rows left on their
+        sentinel fails in the loader: the error is reported, the
+        session keeps running, and nothing on screen changed."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: gui_data.GuiInputData = win._input_data
+            before_results = win._results
+
+            path: Path = tmp_path / "record.csv"
+            pd.DataFrame(
+                {
+                    "date": TestLoadData._days()[:3].strftime("%Y-%m-%d"),
+                    "foo": [1.0, 2.0, 3.0],
+                }
+            ).to_csv(path, index=False)
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), flt)
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            columns_seen: list[list[str]] = []
+            prefill_seen: list[dict[str, str | None]] = []
+            mapping_seen: list[dict[str, str | None]] = []
+            monkeypatch.setattr(
+                gui_window,
+                "ColumnMappingDialog",
+                self._fake_dialog(
+                    {},
+                    QDialog.DialogCode.Accepted,
+                    columns_seen,
+                    prefill_seen,
+                    mapping_seen,
+                ),
+            )
+            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+            _FakeMessageBox.critical_calls.clear()
+
+            win._on_load_data()
+            _pump()
+
+            assert mapping_seen[0] == {
+                "date": "date",
+                "precip": "(select…)",
+                "temp": "(select…)",
+                "pet": "(select…)",
+                "q_meas": None,
+                "DOC": None,
+                "Ca++": None,
+                "DIC": None,
+            }
+            assert len(_FakeMessageBox.critical_calls) == 1
+            title, message = _FakeMessageBox.critical_calls[0]
+            assert title == "Load data"
+            assert (
+                "The column map points the role 'precip' at the column "
+                "'(select…)', which the record does not have."
+            ) in message
+            assert win._data_path is None
+            assert win._column_map is None
+            assert win._input_data is before
+            assert win._results is before_results
+        finally:
+            _close_window(win)
+
+    def test_model_and_network_switch_reload_with_map(
+        self,
+        qapp: QApplication,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After a mapped load (the window's stored path and map),
+        a model switch and a network switch both reload the record
+        through the stored column map, keeping the model and
+        network choices."""
+        path: Path = self._full_record(tmp_path)
+        expected_map: dict[str, str | None] = {
+            "date": "date",
+            "precip": "wet",
+            "temp": "degC",
+            "pet": "evap",
+            "q_meas": "stream_mm",
+            "DOC": "doc_conc",
+            "Ca++": "ca_conc",
+            "DIC": "dic_conc",
+        }
+        loaded = gui_data.load_input_data(path, column_map=expected_map)
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            loaded,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, loaded),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            win._data_path = str(path)
+            win._column_map = expected_map
+
+            real_load = gui_data.load_input_data
+            reloads: list[dict[str, object]] = []
+
+            def spy_load(
+                path: Path,
+                model_key: str,
+                network: pt.ReactionNetwork | None,
+                column_map: dict[str, str | None] | None = None,
+            ) -> gui_data.GuiInputData:
+                reloads.append(
+                    {
+                        "path": path,
+                        "model_key": model_key,
+                        "network": network,
+                        "column_map": column_map,
+                    }
+                )
+                return real_load(
+                    path,
+                    model_key=model_key,
+                    network=network,
+                    column_map=column_map,
+                )
+
+            monkeypatch.setattr(gui_window, "load_input_data", spy_load)
+
+            win._model_combo.setCurrentIndex(
+                win._model_combo.findData("three_layer")
+            )
+            _pump()
+
+            assert len(reloads) == 1
+            assert reloads[0]["path"] == path
+            assert reloads[0]["model_key"] == "three_layer"
+            assert reloads[0]["network"] is win._network
+            assert reloads[0]["column_map"] is expected_map
+            assert win._input_data.spec.key == "three_layer"
+            assert win._data_path == str(path)
+            assert win._column_map is expected_map
+
+            reloads.clear()
+            win._network_combo.setCurrentIndex(
+                win._network_combo.findData("carbon")
+            )
+            _pump()
+
+            assert len(reloads) == 1
+            assert reloads[0]["model_key"] == "three_layer"
+            assert reloads[0]["column_map"] is expected_map
+            assert reloads[0]["network"] is win._network
+            carbon_fingerprint: str = gui_data.fingerprint_network(
+                get_carbon_network()
+            )
+            assert gui_data.fingerprint_network(win._network) == (
+                carbon_fingerprint
+            )
+            assert win._network_combo.currentData() == "carbon"
+        finally:
+            _close_window(win)

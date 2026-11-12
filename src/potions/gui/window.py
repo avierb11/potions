@@ -123,6 +123,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog as QFileDialog,
     QHeaderView,
     QLabel,
@@ -163,7 +164,9 @@ from potions.gui.data import (
     default_plot_selection,
     fingerprint_network,
     load_input_data,
+    prefill_mapping,
 )
+from potions.gui.data_dialog import ColumnMappingDialog
 from potions.gui.figure_panel import FigurePanel
 from potions.gui.gradients import (
     _Perturbation,
@@ -758,12 +761,14 @@ class _GradientWorker(QThread):
             parameter vector's key order.
         mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
             points run in.
-        csv_path: The path of the input CSV each pool worker
+        data_path: The path of the record file each pool worker
             loads in its initializer.
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
             point too).
         model_key: The key of the model spec the job runs.
+        column_map: The record's role → column mapping; None for
+            an auto-detected record.
         parent: The parent object (the window); defaults to None.
     """
 
@@ -776,20 +781,22 @@ class _GradientWorker(QThread):
         base_x: np.ndarray,
         steps: list[_Perturbation],
         mode: str,
-        csv_path: str,
+        data_path: str,
         base_results: GuiRunResults | None,
         model_key: str = DEFAULT_MODEL_KEY,
         network: pt.ReactionNetwork | None = None,
+        column_map: dict[str, str | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._base_x: np.ndarray = base_x
         self._steps: list[_Perturbation] = steps
         self._mode: str = mode
-        self._csv_path: str = csv_path
+        self._data_path: str = data_path
         self._base_results: GuiRunResults | None = base_results
         self._model_key: str = model_key
         self._network: pt.ReactionNetwork | None = network
+        self._column_map: dict[str, str | None] | None = column_map
 
     @staticmethod
     def _key(point: np.ndarray) -> tuple[float, ...]:
@@ -883,7 +890,7 @@ class _GradientWorker(QThread):
         payloads: list[GuiRunResults | str] = map_model_runs(
             points,
             self._mode,
-            self._csv_path,
+            self._data_path,
             on_result=on_result,
             model_key=self._model_key,
             network=self._network,
@@ -1064,13 +1071,15 @@ class _LineSearchWorker(QThread):
             table's row order.
         mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
             points run in.
-        csv_path: The path of the input CSV each pool worker
+        data_path: The path of the record file each pool worker
             loads in its initializer.
         bounds: The current parameter bounds, keyed by parameter.
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
             point too).
         model_key: The key of the model spec the job runs.
+        column_map: The record's role → column mapping; None for
+            an auto-detected record.
         parent: The parent object (the window); defaults to None.
     """
 
@@ -1085,11 +1094,12 @@ class _LineSearchWorker(QThread):
         direction: np.ndarray | None,
         terms: list[str],
         mode: str,
-        csv_path: str,
+        data_path: str,
         bounds: dict[str, tuple[float, float]],
         base_results: GuiRunResults | None,
         model_key: str = DEFAULT_MODEL_KEY,
         network: pt.ReactionNetwork | None = None,
+        column_map: dict[str, str | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1098,11 +1108,12 @@ class _LineSearchWorker(QThread):
         self._direction: np.ndarray | None = direction
         self._terms: list[str] = terms
         self._mode: str = mode
-        self._csv_path: str = csv_path
+        self._data_path: str = data_path
         self._bounds: dict[str, tuple[float, float]] = bounds
         self._base_results: GuiRunResults | None = base_results
         self._model_key: str = model_key
         self._network: pt.ReactionNetwork | None = network
+        self._column_map: dict[str, str | None] | None = column_map
 
     def _key(self, x: np.ndarray) -> tuple[float, ...]:
         """The deduplication key of a parameter vector (its values)."""
@@ -1297,7 +1308,7 @@ class _LineSearchWorker(QThread):
             phase1_payloads = map_model_runs(
                 phase1_points,
                 self._mode,
-                self._csv_path,
+                self._data_path,
                 on_result=on_phase1_result,
                 model_key=self._model_key,
                 network=self._network,
@@ -1366,7 +1377,7 @@ class _LineSearchWorker(QThread):
             map_model_runs(
                 pool_points,
                 self._mode,
-                self._csv_path,
+                self._data_path,
                 on_result=on_pool_result,
                 model_key=self._model_key,
                 network=self._network,
@@ -2005,9 +2016,12 @@ class MainWindow(QMainWindow):
     Args:
         input_data: The assembled calibration inputs (the
             parameter bounds and the reaction network).
-        csv_path: The path of the series CSV the session used, or
-            None for the record shipped with the package; stored
-            in the saved run state.
+        data_path: The path of the record file (a CSV or XLSX)
+            the session used, or None for the record shipped with
+            the package; stored in the saved run state.
+        column_map: The record's role → column mapping, or None
+            when its roles auto-detected; stored in the saved run
+            state.
         network_name:
             The display name of a custom network the window starts
             on (the file's stem for a ``--network`` start); None
@@ -2018,13 +2032,15 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         input_data: GuiInputData,
-        csv_path: str | None = None,
+        data_path: str | None = None,
+        column_map: dict[str, str | None] | None = None,
         network_name: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._input_data: GuiInputData = input_data
-        self._csv_path: str | None = csv_path
+        self._data_path: str | None = data_path
+        self._column_map: dict[str, str | None] | None = column_map
 
         # The last results displayed in the figure and table.
         self._results: GuiRunResults | None = None
@@ -2227,6 +2243,13 @@ class MainWindow(QMainWindow):
             self._on_network_changed
         )
 
+        load_data_button: QPushButton = QPushButton("Load data…")
+        load_data_button.setToolTip(
+            "Load a CSV or XLSX record and switch to it.  The "
+            "dialog maps the file's columns to the record's roles."
+        )
+        load_data_button.clicked.connect(self._on_load_data)
+
         load_network_button: QPushButton = QPushButton(
             "Load network file…"
         )
@@ -2357,6 +2380,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._job_spinner)
         layout.addWidget(self._model_combo)
         layout.addWidget(self._network_combo)
+        layout.addWidget(load_data_button)
         layout.addWidget(load_network_button)
         layout.addWidget(save_network_button)
         layout.addWidget(edit_network_button)
@@ -2553,6 +2577,7 @@ class MainWindow(QMainWindow):
             default_plot_selection(
                 self._input_data.spec,
                 network=self._input_data.network,
+                window=self._input_data.window,
             ),
             self,
         )
@@ -3038,10 +3063,11 @@ class MainWindow(QMainWindow):
             x,
             steps,
             self._current_mode(),
-            self._csv_path or str(DEFAULT_CSV_PATH),
+            self._data_path or str(DEFAULT_CSV_PATH),
             base_results,
             self._input_data.spec.key,
             self._input_data.network,
+            self._column_map,
             self,
         )
         worker.progress_line.connect(self._on_gradient_progress_line)
@@ -3352,11 +3378,12 @@ class MainWindow(QMainWindow):
             direction,
             terms_list,
             self._current_mode(),
-            self._csv_path or str(DEFAULT_CSV_PATH),
+            self._data_path or str(DEFAULT_CSV_PATH),
             bounds,
             base_results,
             self._input_data.spec.key,
             self._input_data.network,
+            self._column_map,
             self,
         )
         worker: _LineSearchWorker = self._worker
@@ -4176,9 +4203,10 @@ class MainWindow(QMainWindow):
         self._start_mode = None
         spec: ModelSpec = get_model_spec(key)
         self._input_data = load_input_data(
-            Path(self._csv_path) if self._csv_path else DEFAULT_CSV_PATH,
+            Path(self._data_path) if self._data_path else DEFAULT_CSV_PATH,
             model_key=key,
             network=self._network,
+            column_map=self._column_map,
         )
         self._param_panel.reload(
             self._input_data, self._switch_selection(spec)
@@ -4351,12 +4379,15 @@ class MainWindow(QMainWindow):
         self._network = network
         spec: ModelSpec = self._input_data.spec
         self._input_data = load_input_data(
-            Path(self._csv_path) if self._csv_path else DEFAULT_CSV_PATH,
+            Path(self._data_path) if self._data_path else DEFAULT_CSV_PATH,
             model_key=spec.key,
             network=network,
+            column_map=self._column_map,
         )
         new_default: PlotSelection = default_plot_selection(
-            spec, network=network
+            spec,
+            network=network,
+            window=self._input_data.window,
         )
         old: PlotSelection = self._param_panel.selection()
         self._param_panel.reload(
@@ -4408,6 +4439,116 @@ class MainWindow(QMainWindow):
             self._run_button.setEnabled(True)
             self._gradients_button.setEnabled(True)
             self._line_search_button.setEnabled(True)
+
+    def _switch_data(
+        self,
+        input_data: GuiInputData,
+        data_path: str | None,
+        column_map: dict[str, str | None] | None,
+    ) -> None:
+        """
+        Reload the window for the record ``input_data``.
+
+        The record's path and column mapping are stored on the
+        window so later switches (model, network) and saves carry
+        them, and the parameter panel is rebuilt with the
+        record's forcing span as the default plot window.  Every
+        run-specific piece of state is discarded, exactly as in
+        `_switch_model`, with one difference: switching to a new
+        record starts a new session, so the saved runs in the
+        history dropdown are cleared rather than re-listed (the
+        disk listing would mix runs of other records).
+
+        The run (and the gradient and line search) buttons light
+        up; a run the switch asks for is deferred to
+        `_on_worker_finished` when a worker is still in flight,
+        or started now when auto-run is on.
+        """
+        self._run_generation += 1
+        self._debounce_timer.stop()
+        self._start_x = None
+        self._start_mode = None
+        self._data_path = data_path
+        self._column_map = column_map
+        self._input_data = input_data
+        self._param_panel.reload(
+            self._input_data,
+            default_plot_selection(
+                self._input_data.spec,
+                network=self._network,
+                window=self._input_data.window,
+            ),
+        )
+        self._results = None
+        self._last_run_x = None
+        self._last_run_mode = None
+        self._gradient_state = None
+        self._line_search_state = None
+        self._figure_panel.set_figures([])
+        self._objective_model.set_table(pd.DataFrame())
+        self._fit_objective_panel()
+        self._saved_run_cache.clear()
+        self._history_items = []
+        self._sync_history_combo()
+        if data_path is None:
+            self._status("Loaded the record.")
+        else:
+            self._status(f"Loaded {Path(data_path).name}.")
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_run_after_worker = True
+            return
+        if self._auto_run_checkbox.isChecked():
+            self._start_run(self._current_x())
+        else:
+            self._run_button.setEnabled(True)
+            self._gradients_button.setEnabled(True)
+            self._line_search_button.setEnabled(True)
+
+    def _on_load_data(self) -> None:
+        """
+        Load a CSV or XLSX record and switch the window to it.
+
+        The file dialog picks the record file.  `prefill_mapping`
+        reads its columns and auto-detected role mapping; a file
+        it cannot map — an unsupported suffix, an unreadable file,
+        or no date column — is reported and the session keeps
+        running.  The mapping dialog then confirms the mapping;
+        accepting it loads the record through `load_input_data`
+        with the mapping (a failure there — the mapping pointing
+        at a missing column, an interior forcing gap — is
+        reported the same way) and switches the window to the
+        record.
+        """
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load data",
+            "",
+            "Data files (*.csv *.xlsx)",
+        )
+        if not path:
+            return
+        try:
+            columns, prefill = prefill_mapping(Path(path), self._network)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Load data", str(error))
+            return
+        dialog: ColumnMappingDialog = ColumnMappingDialog(
+            columns, self._network, prefill, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        mapping: dict[str, str | None] = dialog.mapping()
+        try:
+            input_data: GuiInputData = load_input_data(
+                Path(path),
+                model_key=self._input_data.spec.key,
+                network=self._network,
+                column_map=mapping,
+            )
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Load data", str(error))
+            return
+        self._switch_data(input_data, path, mapping)
 
     def _on_load_network(self) -> None:
         """
@@ -4604,7 +4745,7 @@ class MainWindow(QMainWindow):
         # frame size would grow the window on every save and restore.
         geom: QRect = self.geometry()
         state: GuiState = GuiState(
-            csv_path=self._csv_path,
+            csv_path=self._data_path,
             param_values=self._param_panel.param_values(),
             param_bounds=self._param_panel.current_bounds(),
             selection=self._param_panel.selection(),

@@ -1160,7 +1160,11 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         results=results,
         param_values=values,
         param_bounds=dict(input_data.bounds),
-        selection=default_plot_selection(),
+        selection=default_plot_selection(
+            input_data.spec,
+            network=input_data.network,
+            window=input_data.window,
+        ),
         window_geometry=None,
         splitter_sizes=None,
         save_history=False,

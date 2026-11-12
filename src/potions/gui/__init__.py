@@ -124,7 +124,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         input_data,
         # The state records the session's CSV only when it is not
         # the record shipped with the package.
-        csv_path=str(csv_path) if csv_path != DEFAULT_CSV_PATH else None,
+        data_path=str(csv_path) if csv_path != DEFAULT_CSV_PATH else None,
         network_name=network_name,
     )
     window.show()
