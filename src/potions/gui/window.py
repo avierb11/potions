@@ -121,6 +121,7 @@ from PySide6.QtGui import (
     QAction,
     QCloseEvent,
     QFont,
+    QGuiApplication,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -342,10 +343,14 @@ def _available_screen_geometry() -> QRect | None:
 
     Returns:
         The primary screen's `availableGeometry()` (the desktop minus
-        panels), or None when the platform reports no primary screen
-        (a headless or plugin-less platform); callers then apply their
+        panels), or None when there is no screen to fit into: the
+        platform reports no primary screen, or it is the Qt offscreen
+        plugin, whose synthetic 800x800 "screen" is no display a
+        window could usefully be kept on.  Callers then apply their
         geometry unclamped.
     """
+    if QGuiApplication.platformName() == "offscreen":
+        return None
     screen: QScreen | None = QApplication.primaryScreen()
     return screen.availableGeometry() if screen is not None else None
 

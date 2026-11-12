@@ -415,6 +415,15 @@ class TestWindowGeometryClamp:
             QRect(1500, 1500, 800, 600), QRect(0, 0, 1920, 1200)
         ) == QRect(1120, 600, 800, 600)
 
+    def test_headless_platform_reports_no_screen(
+        self, qapp: QApplication
+    ) -> None:
+        # The Qt offscreen plugin reports a synthetic 800x800 "screen"
+        # that is no display to fit; the helper must call it headless
+        # so windows keep their intended geometry there.
+        assert qapp.platformName() == "offscreen"  # the suite's platform
+        assert gui_window._available_screen_geometry() is None
+
 
 class TestMainWindowStartup:
     """Starting the window: from defaults, or restoring a saved run."""
@@ -784,6 +793,10 @@ class TestMainWindowStartup:
             "arr_to_results",
             _fake_results_factory(calls, input_data),
         )
+        available: QRect = QRect(40, 30, 760, 560)
+        monkeypatch.setattr(
+            gui_window, "_available_screen_geometry", lambda: available
+        )
         win = gui_window.MainWindow(input_data)
         try:
             # No run was started: the saved results are used as is
@@ -808,11 +821,11 @@ class TestMainWindowStartup:
             # The save-history toggle is part of the saved state.
             assert win._save_history_checkbox.isChecked()
             # The saved 1100×800 at (10, 20) is clamped to the
-            # offscreen screen's available area (800×800): the size
-            # caps and the origin pulls back to the area's corner.
+            # patched screen area: the size caps to it and the
+            # origin pulls back to its corner.
             assert win.geometry() == gui_window._clamped_geometry(
                 QRect(10, 20, 1100, 800),
-                qapp.primaryScreen().availableGeometry(),
+                available,
             )
             # Show the window first: an unshown window would normalize
             # the requested sizes against the window's size hint
@@ -855,6 +868,10 @@ class TestMainWindowStartup:
             "arr_to_results",
             _fake_results_factory(calls, input_data),
         )
+        available: QRect = QRect(40, 30, 760, 560)
+        monkeypatch.setattr(
+            gui_window, "_available_screen_geometry", lambda: available
+        )
         win = gui_window.MainWindow(input_data)
         try:
             assert calls == []
@@ -875,8 +892,7 @@ class TestMainWindowStartup:
                     0.5 * (lo + hi)
                 )
             # Geometry and splitter sizes keep their defaults (the
-            # default size clamped to the offscreen screen).
-            available: QRect = qapp.primaryScreen().availableGeometry()
+            # default size clamped to the patched screen area).
             assert win.width() == min(
                 gui_window._INITIAL_SIZE[0], available.width()
             )
