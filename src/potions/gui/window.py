@@ -2704,7 +2704,11 @@ class MainWindow(QMainWindow):
         the saved-window bits: the checked objective terms (only the
         checked ones: the table cells re-check themselves against
         the restored results), the status note, the window geometry
-        and splitter sizes, and the *Save run history* checkbox.
+        and splitter sizes, the *Save run history* checkbox, and —
+        only when the run's record is the window's current one (a
+        path mismatch means the session's data did not come from
+        that run, so the mapping is ignored, not forced) — the
+        session's column mapping.
         """
         # The checked cells are restored before the shared apply, so
         # the results refresh that follows intersects them with the
@@ -2740,6 +2744,12 @@ class MainWindow(QMainWindow):
         # The checkbox state is part of the saved state; a state
         # saved before the toggle existed restores it off.
         self._save_history_checkbox.setChecked(saved.save_history)
+        # A saved mapping applies only to the record it was read
+        # from: a run saved on another record (or the shipped one,
+        # which reads by auto-detection) must not rename the
+        # columns of the window's current record.
+        if saved.column_map is not None and saved.csv_path == self._data_path:
+            self._column_map = saved.column_map
 
     # ==== Runs ==== #
     def _current_x(self) -> np.ndarray:
@@ -4767,6 +4777,7 @@ class MainWindow(QMainWindow):
             ),
             model_key=self._input_data.spec.key,
             network_fingerprint=fingerprint_network(self._network),
+            column_map=self._column_map,
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(

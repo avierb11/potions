@@ -1066,6 +1066,22 @@ class TestGuiStateRoundTrip:
         assert raw["objective_terms"] is None
         assert GuiState.from_dict(raw) == bare
 
+    def test_state_column_map_roundtrip(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        state = replace(
+            _full_state(input_data),
+            column_map={"precip": "wet", "q_meas": None},
+        )
+        raw: dict[str, object] = state.to_dict()
+        assert raw["column_map"] == {"precip": "wet", "q_meas": None}
+        assert GuiState.from_dict(raw) == state
+
+        bare = _full_state(input_data)
+        raw = bare.to_dict()
+        assert "column_map" not in raw
+        assert GuiState.from_dict(raw).column_map is None
+
 
 class TestSavedRunModelKey:
     """The model key a saved run was produced with."""
@@ -1423,6 +1439,37 @@ class TestFromDictErrors:
             "objective terms, got [1]."
         )
 
+    def test_state_old_format_no_column_map(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        assert "column_map" not in raw
+        restored = GuiState.from_dict(raw)
+        assert restored.column_map is None
+
+    def test_state_bad_column_map_rejected(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        raw: dict[str, object] = self._base(input_data)
+        raw["column_map"] = ["ppt"]
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json 'column_map' must be a mapping of role "
+            "name to column name or null, got list."
+        )
+
+        raw = self._base(input_data)
+        raw["column_map"] = {"precip": 3}
+        with pytest.raises(ValueError) as excinfo:
+            GuiState.from_dict(raw)
+        assert (
+            str(excinfo.value)
+            == "gui_state.json 'column_map' must map every role to a "
+            "column name or null, got 'precip': 3."
+        )
+
 
 class TestReadGuiState:
     """File-level reads: absent, malformed, and valid."""
@@ -1711,7 +1758,14 @@ class TestLoadSavedRunLegacy:
         assert saved.window_geometry is None
         assert saved.splitter_sizes is None
         assert saved.save_history is False
-        assert saved.selection == gui_data.default_plot_selection()
+        # The stateless restore's selection follows the record: the
+        # record-derived defaults plus the record's forcing span as
+        # the plotting window (the default window otherwise).
+        assert saved.selection == gui_data.default_plot_selection(
+            input_data.spec,
+            network=input_data.network,
+            window=input_data.window,
+        )
         assert saved.param_bounds == dict(input_data.bounds)
 
         bounds: dict[str, tuple[float, float]] = input_data.bounds
@@ -5551,6 +5605,107 @@ class TestNetworkCli:
             gui_main(["--network", "nope.txt"])
         assert excinfo.value.code == 2
         assert "must be a .yaml or .yml" in capsys.readouterr().err
+
+
+class _FakeQApplication:
+    """A stand-in for `QApplication` so the CLI tests run headless."""
+
+    def __init__(self, argv: list[str]) -> None:
+        self.argv: list[str] = argv
+
+    def setStyle(self, style: str) -> None:
+        pass
+
+    def font(self) -> "_FakeQApplication":
+        return self
+
+    def setPointSize(self, size: int) -> None:
+        pass
+
+    def setFont(self, font: object) -> None:
+        pass
+
+    def exec(self) -> int:
+        return 0
+
+
+class _MainWindowStub:
+    """Records the constructor arguments `main` hands the window."""
+
+    instances: ClassVar[list["_MainWindowStub"]] = []
+
+    def __init__(
+        self,
+        input_data: gui_data.GuiInputData,
+        data_path: str | None = None,
+        column_map: dict[str, str | None] | None = None,
+        network_name: str | None = None,
+        parent: object | None = None,
+    ) -> None:
+        self.input_data: gui_data.GuiInputData = input_data
+        self.data_path: str | None = data_path
+        self.column_map: dict[str, str | None] | None = column_map
+        self.network_name: str | None = network_name
+        _MainWindowStub.instances.append(self)
+
+    def show(self) -> None:
+        pass
+
+
+class TestCsvCli:
+    """The ``--csv`` option of `main` (headless: ``QApplication`` and,
+    where the record loads, `MainWindow` are fakes; the record loader
+    runs for real)."""
+
+    @staticmethod
+    def _write_record_xlsx(path: Path) -> None:
+        """A 12-day record with the canonical role names."""
+        frame: pd.DataFrame = pd.DataFrame(
+            {
+                "date": pd.date_range("2020-01-01", periods=12, freq="D"),
+                "precip": [float(i) for i in range(12)],
+                "temp": [5.0] * 12,
+                "pet": [0.5] * 12,
+            }
+        )
+        frame.to_excel(path, index=False)
+
+    @staticmethod
+    def _fake_qapplication(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "PySide6.QtWidgets.QApplication", _FakeQApplication
+        )
+
+    def test_cli_accepts_xlsx(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _MainWindowStub.instances.clear()
+        xlsx_path: Path = tmp_path / "record.xlsx"
+        self._write_record_xlsx(xlsx_path)
+        self._fake_qapplication(monkeypatch)
+        monkeypatch.setattr(
+            "potions.gui.window.MainWindow", _MainWindowStub
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            gui_main(["--csv", str(xlsx_path)])
+        assert excinfo.value.code == 0
+        assert len(_MainWindowStub.instances) == 1
+        window: _MainWindowStub = _MainWindowStub.instances[0]
+        assert window.data_path == str(xlsx_path)
+        assert window.input_data.window == (
+            pd.Timestamp("2020-01-01"),
+            pd.Timestamp("2020-01-12"),
+        )
+
+    def test_cli_rejects_unsupported_suffix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake_qapplication(monkeypatch)
+        with pytest.raises(ValueError) as excinfo:
+            gui_main(["--csv", "bogus.txt"])
+        assert "Unsupported record file 'bogus.txt'" in str(excinfo.value)
 
 
 class TestNetworkDraft:

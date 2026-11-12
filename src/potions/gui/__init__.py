@@ -52,8 +52,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             ``sys.argv[1:]`` is parsed, so flags typed after the
             console script name pass through unchanged.  The
             supported options are ``--csv``, the path of the
-            series CSV to use (default: the record shipped
-            with the package), and ``--network``, the path of a
+            series file to use (a CSV or XLSX spreadsheet;
+            default: the record shipped with the package), and
+            ``--network``, the path of a
             reaction-network YAML file to run (default: the East
             River SOC / DOC / calcite preset; a non-YAML path
             ends with an argparse usage error).
@@ -78,8 +79,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         metavar="PATH",
         default=None,
         help=(
-            "Path of the series CSV to load (default: the record "
-            "shipped with the package)."
+            "Path of the series file to load (CSV or XLSX; "
+            "default: the record shipped with the package)."
         ),
     )
     parser.add_argument(
@@ -122,8 +123,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     window: MainWindow = MainWindow(
         input_data,
-        # The state records the session's CSV only when it is not
-        # the record shipped with the package.
+        # The state records the session's record file only when it
+        # is not the record shipped with the package.
         data_path=str(csv_path) if csv_path != DEFAULT_CSV_PATH else None,
         network_name=network_name,
     )

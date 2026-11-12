@@ -107,8 +107,9 @@ class GuiState:
     The persisted state of the GUI at the time of a *Save run*.
 
     Attributes:
-        csv_path: The path of the series CSV the session used, or
-            None for the record shipped with the package.
+        csv_path: The path of the record file (a CSV or XLSX
+            spreadsheet) the session used, or None for the record
+            shipped with the package.
         param_values: The value of every parameter, keyed by bounds
             key, in the bounds' key order.
         param_bounds: The bounds of every parameter (the user-edited
@@ -142,6 +143,11 @@ class GuiState:
             the session ran; an absent field in a state file means a
             state saved before network persistence existed, which
             restores the default network.
+        column_map: The role-to-column mapping the session used to
+            read the record, or None when the record was read with
+            auto-detected roles (the shipped record always is); an
+            absent field in a state file means a state saved before
+            mapping persistence existed, which restores None.
     """
 
     csv_path: str | None
@@ -155,15 +161,20 @@ class GuiState:
     objective_terms: list[str] | None = None
     model_key: str = DEFAULT_MODEL_KEY
     network_fingerprint: str | None = None
+    column_map: dict[str, str | None] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """
         The JSON-serializable form of the state.
 
+        The ``column_map`` key is present only when the session read
+        the record with an explicit mapping: its absence marks an
+        old-format state (a record read with auto-detected roles).
+
         Returns:
             A plain dict (JSON-ready) with the state's fields.
         """
-        return {
+        data: dict[str, object] = {
             "version": GUI_STATE_VERSION,
             "csv_path": self.csv_path,
             "param_values": {
@@ -202,6 +213,9 @@ class GuiState:
             "model_key": self.model_key,
             "network_fingerprint": self.network_fingerprint,
         }
+        if self.column_map is not None:
+            data["column_map"] = dict(self.column_map)
+        return data
 
     @classmethod
     def from_dict(
@@ -254,6 +268,7 @@ class GuiState:
             objective_terms=_optional_objective_terms(data),
             model_key=_optional_model_key(data),
             network_fingerprint=_optional_network_fingerprint(data),
+            column_map=_optional_column_map(data),
         )
 
 
@@ -757,6 +772,56 @@ def _optional_network_fingerprint(data: dict[str, object]) -> str | None:
     return raw
 
 
+def _optional_column_map(
+    data: dict[str, object],
+) -> dict[str, str | None] | None:
+    """
+    The optional ``column_map`` field of a gui_state.json mapping.
+
+    The value is the role-to-column mapping the session used to read
+    its record: internal role name to the column it read, or null
+    when the dialog marked the role absent.  Unlike
+    ``network_fingerprint`` no registry validation applies here: the
+    mapping was already checked against the record when the run was
+    saved, and a record switch makes a stale mapping inert (the
+    window applies it only to its own record).
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's mapping, or None when it is absent (a state
+        saved before mapping persistence existed, whose record was
+        read with auto-detected roles).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            mapping of role names to column names or null.
+    """
+    raw: object = data.get("column_map")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "gui_state.json 'column_map' must be a mapping of role "
+            "name to column name or null, got "
+            f"{type(raw).__name__}."
+        )
+    mapping: dict[str, str | None] = {}
+    for role, column in raw.items():
+        if (
+            not isinstance(role, str)
+            or (column is not None and not isinstance(column, str))
+        ):
+            raise ValueError(
+                "gui_state.json 'column_map' must map every role to a "
+                "column name or null, got "
+                f"{role!r}: {column!r}."
+            )
+        mapping[role] = column
+    return mapping
+
+
 def _not_number(value: object) -> bool:
     """Whether a JSON value is not a (non-boolean) number."""
     return not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -1071,6 +1136,12 @@ class SavedRun:
         network_fingerprint: The fingerprint of the run's reaction
             network; None for a run that predates network
             persistence (no state file, or a pre-v7 state).
+        csv_path: The path of the record file the run's session
+            used, or None for a run saved from the record shipped
+            with the package (or one that predates the field).
+        column_map: The role-to-column mapping the run's session
+            used to read its record, or None for a record read with
+            auto-detected roles (or a run predating the field).
     """
 
     results: GuiRunResults
@@ -1085,6 +1156,8 @@ class SavedRun:
     objective_terms: list[str] | None
     model_key: str
     network_fingerprint: str | None
+    csv_path: str | None
+    column_map: dict[str, str | None] | None
 # =============== #
 
 
@@ -1149,6 +1222,8 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             objective_terms=state.objective_terms,
             model_key=state.model_key,
             network_fingerprint=state.network_fingerprint,
+            csv_path=state.csv_path,
+            column_map=state.column_map,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -1177,6 +1252,9 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         objective_terms=None,
         model_key=saved_run_model_key(run_dir),
         network_fingerprint=saved_run_network_fingerprint(run_dir),
+        # A stateless run never recorded a record file or a mapping.
+        csv_path=None,
+        column_map=None,
     )
 
 
