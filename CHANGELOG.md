@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   start.  PySide6 (>= 6.4) is now a core dependency (the `potions`
   conda environment's PySide6 install carries a local `py.typed`
   marker so `mypy --strict` can type-check the GUI).
+- The calibration GUI's window now restores the maximized state of
+  the run it reopens: a run saved while maximized opens maximized
+  (Home+Up toggles maximize), any restored or default window size is
+  clamped to the screen, and a save while maximized records the
+  window's normal geometry instead of the maximized client size.
+  `gui_state.json` format version 8 (version 7 files still restore).
 - **Pre-run model validation** with descriptive, typed errors:
   - New error types in `potions.utils`: `ModelStructureError` and
     `ModelInputError` (both subclass `ValueError` and `HydrologyError`).

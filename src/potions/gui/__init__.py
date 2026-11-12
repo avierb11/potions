@@ -14,7 +14,8 @@ calibrated parameter on the right, grouped by zone (hydrology in
 blue, reactive transport in red).  Parameter changes re-run the
 models on a background thread; a *Save run* click stores the
 run's model output and figures together with the session state,
-which the app restores on its next start.
+which the app restores on its next start (including the window's
+maximized state; Home+Up toggles the maximize).
 
 Start the GUI with the console script installed with the package::
 

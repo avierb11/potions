@@ -852,6 +852,65 @@ class TestMainWindowStartup:
         finally:
             _close_window(win)
 
+    def test_restores_maximized_run(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A run saved maximized reopens maximized, not oversized."""
+        run_dir: Path = _write_saved_run(
+            tmp_path,
+            input_data,
+            _full_state(input_data, window_maximized=True),
+        )
+        calls: list[np.ndarray] = []
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            gui_window,
+            "arr_to_results",
+            _fake_results_factory(calls, input_data),
+        )
+        available: QRect = QRect(40, 30, 760, 560)
+        monkeypatch.setattr(
+            gui_window, "_available_screen_geometry", lambda: available
+        )
+        win = gui_window.MainWindow(input_data)
+        try:
+            # The saved normal geometry is applied clamped to the
+            # patched screen area, before the window is shown.
+            clamped: QRect = gui_window._clamped_geometry(
+                QRect(10, 20, 1100, 800), available
+            )
+            assert win.geometry() == clamped
+            win.show()
+            _pump()
+            # The deferred maximize (the showEvent hand-off) landed:
+            # the window is genuinely maximized, not a normal window
+            # wearing a screen-sized geometry.
+            assert win.isMaximized()
+            # The deferred maximize did not corrupt the tracked
+            # normal geometry: it holds the window's own restored
+            # height (the clamped 560), while the maximized client
+            # is the offscreen plugin's fake-screen area.  (The
+            # width cannot be pinned here: the plugin expands the
+            # shown window to the figures' minimum size hint, wider
+            # than the fake screen.)
+            normal: QRect | None = win._normal_geometry
+            assert normal is not None
+            assert normal.height() == clamped.height()
+            assert win.geometry() != normal
+            _assert_restored_dir(win, run_dir)
+            # Un-maximizing returns to the tracked normal geometry:
+            # what a later save records, not the maximized client.
+            win.showNormal()
+            _pump()
+            assert not win.isMaximized()
+            assert win.geometry() == normal
+        finally:
+            _close_window(win)
+
     def test_restores_legacy_run(
         self,
         qapp: QApplication,

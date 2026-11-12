@@ -10,7 +10,7 @@ concentrations, and reaction rates figures in full mode, plus the
 gradient job's matrix and a line search's value profile as extra
 pages when those jobs have finished) and, below it, a row holding the fixed-size per-run
 objective-function table on the left and the parameter panel on
-the right.
+the right.  Home+Up toggles the window's maximize.
 
 Parameter changes re-run the models on a worker thread (a short
 debounce covers a drag or a keyboard step) and refresh the figures
@@ -72,7 +72,11 @@ edited bounds, plot selections, the window geometry, and the
 splitter sizes come from the run's ``gui_state.json`` (or, for an
 older run, best-effort from its parameters CSVs), and the figures
 are built straight from the run's saved simulation output, so the
-window opens without a re-run.  With no saved run it starts from
+window opens without a re-run.  The window comes back as it was
+left: a run saved maximized reopens maximized (a save while
+maximized records the window's normal geometry, not the maximized
+client rect), and a restored or default window size is clamped to
+the screen.  With no saved run it starts from
 the default parameters and runs the models once in the background.
 
 A *Save run* click writes the existing per-run model output, the
@@ -2154,10 +2158,12 @@ class MainWindow(QMainWindow):
 
     At startup the window restores the most recent saved run (its
     parameters, edited bounds, plot selections, run mode, window
-    geometry, and splitter sizes) and builds the figures from the
-    run's saved output, so no re-run is needed; with no saved run
-    it starts from the default parameters and runs once in the
-    background.
+    geometry, maximized state, and splitter sizes) and builds the
+    figures from the run's saved output, so no re-run is needed;
+    the restored window opens maximized when its run was saved
+    maximized, and its size is clamped to the screen.  Home+Up
+    toggles the window's maximize.  With no saved run it starts
+    from the default parameters and runs once in the background.
 
     Args:
         input_data: The assembled calibration inputs (the
