@@ -70,7 +70,7 @@ and results to the screen without a re-run.
 At startup the window restores the most recent saved run: parameter
 values,
 edited bounds, plot selections, the window geometry, and the
-splitter sizes come from the run's ``gui_state.json`` (or, for an
+figure dock layout come from the run's ``gui_state.json`` (or, for an
 older run, best-effort from its parameters CSVs), and the figures
 are built straight from the run's saved simulation output, so the
 window opens without a re-run.  The window comes back as it was
@@ -145,7 +145,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
-    QSplitter,
     QStatusBar,
     QStyle,
     QStyleOptionButton,
@@ -275,11 +274,12 @@ _ELAPSED_MS: Final[int] = 200
 # before the window is shown.
 _INITIAL_SIZE: Final[tuple[int, int]] = (1360, 900)
 
-# The initial sizes (px) of the main vertical splitter: the figure
-# and the lower (table-and-parameters) row.  Qt scales the pair
-# proportionally to the splitter's size on the first layout, and a
-# restored session state replaces them with its own.
-_INITIAL_SPLIT_SIZES: Final[tuple[int, int]] = (350, 530)
+# The initial height (px) of the docked figure area: the retired
+# splitter's 350 px figure section plus the dock title bar and tab
+# bar the figure docks add.  A first session builds the figure docks
+# at this height; a restored session state replaces it with the
+# user's own layout (see Task 4).
+_INITIAL_DOCK_HEIGHT: Final[int] = 380
 
 # The status label's width limits (px): an unbounded label would
 # grow the window's minimum width with every status message, so the
@@ -333,10 +333,6 @@ _LINE_SEARCH_METRICS: Final[frozenset[str]] = frozenset(
 # The width of the checkbox inset the objective table's delegate
 # draws in each cell's left edge (px).
 _CHECKBOX_INSET: Final[int] = 24
-
-# The figure panel's minimum height (px): even a restored state or a
-# manual drag can then never squash the plot into a sliver.
-_FIGURE_MIN_HEIGHT: Final[int] = 240
 
 # The most recent in-session runs the History dropdown keeps (the
 # session's own runs, newest first; the saved run directories listed
@@ -2174,7 +2170,7 @@ class MainWindow(QMainWindow):
 
     At startup the window restores the most recent saved run (its
     parameters, edited bounds, plot selections, run mode, window
-    geometry, maximized state, and splitter sizes) and builds the
+    geometry, maximized state, and dock layout) and builds the
     figures from the run's saved output, so no re-run is needed;
     the restored window opens maximized when its run was saved
     maximized, and its size is clamped to the screen.  Home+Up
@@ -2322,13 +2318,15 @@ class MainWindow(QMainWindow):
         self._build_objective_panel()
         param_panel: ParamPanel = self._build_param_panel()
 
-        # The main splitter stacks the figure over the lower row,
-        # which is a plain row: the fixed-size objective panel on
-        # the left and the parameter panel (stretching) on the
-        # right.  There is no inner splitter: the objective panel
-        # is fixed in size, so a seam there could only move, never
-        # resize what is on either side of it.
-        self._splitter: QSplitter = QSplitter(Qt.Orientation.Vertical)
+        # The figure area is no longer a splitter section: every
+        # figure lives in its own dock in the window's top dock
+        # area (see `FigurePanel`), tabbed in page order.  Docks are
+        # children of the window, not of any layout, so a figure can
+        # be dragged out to a floating window or onto a second
+        # monitor — spreading the figures across displays is what a
+        # splitter pane could never do.  The central widget keeps
+        # the lower row: the fixed-size objective panel on the left
+        # and the parameter panel (stretching) on the right.
         row: QWidget = QWidget(self)
         row_layout: QHBoxLayout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2340,22 +2338,12 @@ class MainWindow(QMainWindow):
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
         )
         row_layout.addWidget(param_panel, 1)
-        self._splitter.addWidget(self._figure_panel)
-        self._splitter.addWidget(row)
-        for section in range(self._splitter.count()):
-            self._splitter.setCollapsible(section, False)
-        # Without an explicit distribution Qt lays the sections out
-        # from their size hints, which squashes the figure (the
-        # canvases report a small hint) into a sliver while the lower
-        # row (large hints) takes the rest.
         self._fit_objective_panel()
-        self._splitter.setSizes(list(_INITIAL_SPLIT_SIZES))
-        self._figure_panel.setMinimumHeight(_FIGURE_MIN_HEIGHT)
 
         self._build_progress_strip()
         layout: QVBoxLayout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._splitter, 1)
+        layout.addWidget(row, 1)
         layout.addWidget(self._progress_strip)
         central: QWidget = QWidget(self)
         central.setLayout(layout)
@@ -2714,7 +2702,13 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(done)
 
     def _build_figure_panel(self) -> FigurePanel:
-        """Build the figure panel (its header carries the arrow buttons)."""
+        """
+        Build the figure dock manager.
+
+        The docks it builds attach to the window's top dock area,
+        not to the central layout, so they are built after the
+        chrome exactly as the retired splitter panel was.
+        """
         return FigurePanel(self)
 
     def _build_objective_panel(self) -> None:
@@ -2966,8 +2960,8 @@ class MainWindow(QMainWindow):
         *Save run* is immediately available; this method then adds
         the saved-window bits: the checked objective terms (only the
         checked ones: the table cells re-check themselves against
-        the restored results), the status note, the window geometry
-        and splitter sizes, the *Save run history* toggle, and —
+        the restored results), the status note, the window geometry,
+        the *Save run history* toggle, and —
         only when the run's record is the window's current one (a
         path mismatch means the session's data did not come from
         that run, so the mapping is ignored, not forced) — the
@@ -3012,8 +3006,10 @@ class MainWindow(QMainWindow):
         # (see `showEvent`), not through the clamped geometry above:
         # the saved geometry is the run's *normal* geometry.
         self._restore_maximized = saved.window_maximized
-        if saved.splitter_sizes is not None:
-            self._splitter.setSizes(saved.splitter_sizes[:2])
+        # The splitter sizes are retired with the splitter: a v8
+        # state may still carry them, and `state.py` still parses
+        # them, but the dock layout (its successor) arrives with the
+        # v9 `dock_state` handling.
         # The checkbox state is part of the saved state; a state
         # saved before the toggle existed restores it off.
         self._save_history_action.setChecked(saved.save_history)
@@ -5059,9 +5055,7 @@ class MainWindow(QMainWindow):
                 "width": geom.width(),
                 "height": geom.height(),
             },
-            splitter_sizes=[
-                int(size) for size in self._splitter.sizes()
-            ],
+            splitter_sizes=None,  # retired: the v9 layout lives in dock_state
             save_history=self._save_history_action.isChecked(),
             mode=self._current_mode(),
             objective_terms=(

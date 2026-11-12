@@ -67,9 +67,11 @@ from PySide6.QtWidgets import (
     QLayoutItem,
     QListWidget,
     QListWidgetItem,
+    QMainWindow,
     QPushButton,
     QSizePolicy,
     QStatusBar,
+    QTabBar,
     QToolBar,
     QToolButton,
     QStyleOptionViewItem,
@@ -499,6 +501,54 @@ class TestMainWindowStartup:
         finally:
             _close_window(win)
 
+    def test_starts_with_tabbed_figure_docks(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first run's eight figures open as tabbed dock panels."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            _pump(50)
+            win.show()
+            _pump()
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            assert panel.page_count() == 8
+            titles: list[str] = [
+                "Hydrology",
+                "Storage",
+                "Partitioning",
+                "River concentrations",
+                "River loads",
+                "Concentration vs. discharge",
+                "Zone concentrations",
+                "Reaction rates (SOC(s))",
+            ]
+            docks: list[gui_figure_panel.FigureDock] = panel.docks()
+            assert [dock.windowTitle() for dock in docks] == titles
+            # The docks share a single tab bar, tabified in page order.
+            tab_bars: list[QTabBar] = [
+                bar for bar in win.findChildren(QTabBar) if bar.isVisible()
+            ]
+            assert len(tab_bars) == 1
+            assert [
+                tab_bars[0].tabText(index)
+                for index in range(tab_bars[0].count())
+            ] == titles
+        finally:
+            _close_window(win)
+
     def test_objective_panel_fits_content_without_scrollbars(
         self,
         qapp: QApplication,
@@ -832,27 +882,9 @@ class TestMainWindowStartup:
                 QRect(10, 20, 1100, 800),
                 available,
             )
-            # Show the window first: an unshown window would normalize
-            # the requested sizes against the window's size hint
-            # instead of its restored geometry (where the figure
-            # panel's minimum height would dominate the split).
-            win.show()
-            _pump()
-            # Showing the window can shift it (the offscreen plugin
-            # offsets it by its fake frame); re-assert the restored
-            # size so the splitter lays out against the intended
-            # geometry.
-            win.resize(1100, 800)
-            _pump()
-            # The requested sizes are scaled to the splitter's
-            # actual size, with each section clamped to its child's
-            # minimum size hint: the proportions survive up to that
-            # clamping, so a loose tolerance is the right assertion.
-            sizes: list[float] = [float(s) for s in win._splitter.sizes()]
-            total: float = sum(sizes)
-            assert total > 0
-            for size, target in zip(sizes, (300, 600)):
-                assert size / total == pytest.approx(target / 900, abs=0.05)
+            # The eight figure pages are present (their dock layout is
+            # restored in Task 4; the splitter's proportional-sizes
+            # assertion retired with the splitter).
             assert win._figure_panel.page_count() == 8
         finally:
             _close_window(win)
@@ -955,8 +987,8 @@ class TestMainWindowStartup:
                 assert panel.param_values()[key] == pytest.approx(
                     0.5 * (lo + hi)
                 )
-            # Geometry and splitter sizes keep their defaults (the
-            # default size clamped to the patched screen area).
+            # Geometry keeps its default (the default size clamped
+            # to the patched screen area).
             assert win.width() == min(
                 gui_window._INITIAL_SIZE[0], available.width()
             )
@@ -1019,8 +1051,11 @@ class TestMainWindowStartup:
                 "Storage",
                 "Partitioning",
             ]
-            assert figure._title_label.text() == "Hydrology"
-            assert figure._page_label.text() == "1 / 3"
+            # The retired header's title and page label: the first
+            # dock is the active page and the current page is 0.
+            docks: list[gui_figure_panel.FigureDock] = figure.docks()
+            assert docks[0].windowTitle() == "Hydrology"
+            assert figure.current_page() == 0
             assert win._objective_model.columnCount() == 1
             assert win._results is not None
             assert win._results.rt is None
@@ -1539,9 +1574,9 @@ class TestMainWindowRuns:
                 )
                 return run_dir
 
-            # Show the window first: the save records the splitter's
-            # laid-out sizes, which only exist once Qt has arranged
-            # the sections against the window's actual geometry.
+            # Show the window first: the save records the client
+            # geometry Qt has actually applied, which only settles
+            # once the window is laid out against a screen.
             win.show()
             _pump()
             # Showing an offscreen window moves it off the origin;
@@ -1593,28 +1628,13 @@ class TestMainWindowRuns:
                 input_data.spec, window=input_data.window
             )
             # The window was shown and restored to the default origin
-            # and size, so it saves exactly that client geometry; the
-            # splitter saves its laid-out sizes, i.e. the initial
-            # distribution scaled to the window's height.  Compare
-            # proportions rather than raw pixels.
+            # and size, so it saves exactly that client geometry.
             assert saved.window_geometry == expected_geometry
             # The window is a normal window here: the flag is off.
             assert saved.window_maximized is False
-            # The saved list holds the main vertical splitter's
-            # laid-out sizes: scaled to the splitter's actual size,
-            # with each section clamped to its child's minimum size
-            # hint, so compare the proportions against the initial
-            # split with a loose tolerance.
-            assert saved.splitter_sizes is not None
-            sizes: list[float] = [float(s) for s in saved.splitter_sizes]
-            initial: tuple[int, int] = gui_window._INITIAL_SPLIT_SIZES
-            total: float = sum(sizes)
-            assert total > 0
-            target_total: float = float(sum(initial))
-            for size, target in zip(sizes, initial):
-                assert size / total == pytest.approx(
-                    target / target_total, abs=0.05
-                )
+            # The main splitter is retired: version 9 writes null
+            # there (the dock layout arrives with `dock_state`).
+            assert saved.splitter_sizes is None
 
             # The run-history toggle is part of the saved state:
             # off here by default, and the second save records it on.
@@ -1798,24 +1818,21 @@ class TestMainWindowRuns:
             }
             assert set(actions) == {"Previous figure", "Next figure"}
             panel: gui_figure_panel.FigurePanel = win._figure_panel
+            docks: list[gui_figure_panel.FigureDock] = panel.docks()
             assert panel.current_page() == 0
             actions["Next figure"].triggered.emit()
             assert panel.current_page() == 1
-            assert panel._title_label.text() == "Storage"
-            assert panel._page_label.text() == "2 / 8"
+            assert docks[1].windowTitle() == "Storage"
             actions["Next figure"].triggered.emit()
             assert panel.current_page() == 2
-            assert panel._title_label.text() == "Partitioning"
-            assert panel._page_label.text() == "3 / 8"
+            assert docks[2].windowTitle() == "Partitioning"
             # Wrap-around in both directions.
             for _ in range(6):
                 actions["Next figure"].triggered.emit()
             assert panel.current_page() == 0
-            assert panel._page_label.text() == "1 / 8"
             actions["Previous figure"].triggered.emit()
             assert panel.current_page() == 7
-            assert panel._title_label.text() == "Reaction rates (SOC(s))"
-            assert panel._page_label.text() == "8 / 8"
+            assert docks[7].windowTitle() == "Reaction rates (SOC(s))"
         finally:
             _close_window(win)
 
@@ -2567,7 +2584,7 @@ class TestHistory:
 
 
 # ------------------------------------------------------------------ #
-# FigurePanel (standalone)
+# FigurePanel: tabbed figure docks (standalone)
 # ------------------------------------------------------------------ #
 
 
@@ -2579,25 +2596,65 @@ def _figure(title: str) -> tuple[str, Figure]:
     return title, fig
 
 
-class TestFigurePanel:
-    """The figure panel's paging and header behavior."""
+def _docks_window() -> QMainWindow:
+    """A bare shown main window for the standalone figure-dock tests."""
+    window: QMainWindow = QMainWindow()
+    window.resize(1200, 800)
+    window.show()
+    _pump()
+    return window
+
+
+class TestFigureDocks:
+    """The figure panel's one-dock-per-figure tabbing and paging."""
 
     def test_empty_panel(self, qapp: QApplication) -> None:
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             assert panel.page_count() == 0
             assert panel.current_page() == -1
-            assert panel._title_label.text() == ""
-            assert panel._page_label.text() == ""
-            assert not panel._prev_button.isEnabled()
-            assert not panel._next_button.isEnabled()
+            assert panel.docks() == []
         finally:
-            panel.deleteLater()
+            window.close()
+            _pump()
+
+    def test_tabs_and_titles(self, qapp: QApplication) -> None:
+        """One tabbed dock per figure, titled and named in page order."""
+        window = _docks_window()
+        try:
+            panel = gui_figure_panel.FigurePanel(window)
+            panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
+            # The dock area's tab bar fills its tabs on the next
+            # event-loop pass (Qt defers the tab layout), so pump
+            # before reading the tab texts.
+            _pump()
+            docks: list[gui_figure_panel.FigureDock] = panel.docks()
+            assert [dock.windowTitle() for dock in docks] == ["A", "B", "C"]
+            assert [dock.objectName() for dock in docks] == [
+                "figure-dock-a",
+                "figure-dock-b",
+                "figure-dock-c",
+            ]
+            # The docks share one tab bar carrying the page titles.
+            tab_bars: list[QTabBar] = [
+                bar for bar in window.findChildren(QTabBar) if bar.isVisible()
+            ]
+            assert len(tab_bars) == 1
+            assert [
+                tab_bars[0].tabText(index)
+                for index in range(tab_bars[0].count())
+            ] == ["A", "B", "C"]
+            assert panel._titles == ["A", "B", "C"]
+            assert panel.current_page() == 0
+        finally:
+            window.close()
             _pump()
 
     def test_paging_and_wrap_around(self, qapp: QApplication) -> None:
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             panel.set_figures(
                 [
                     _figure("A"),
@@ -2607,17 +2664,13 @@ class TestFigurePanel:
             )
             assert panel.page_count() == 3
             assert panel.current_page() == 0
-            assert panel._title_label.text() == "A"
-            assert panel._page_label.text() == "1 / 3"
-            assert panel._prev_button.isEnabled()
-            assert panel._next_button.isEnabled()
+            assert panel.docks()[panel.current_page()].windowTitle() == "A"
             panel.next_page()
             assert panel.current_page() == 1
-            assert panel._title_label.text() == "B"
-            assert panel._page_label.text() == "2 / 3"
+            assert panel.docks()[panel.current_page()].windowTitle() == "B"
             panel.next_page()
             assert panel.current_page() == 2
-            assert panel._page_label.text() == "3 / 3"
+            assert panel.docks()[panel.current_page()].windowTitle() == "C"
             panel.next_page()  # wraps to the first page
             assert panel.current_page() == 0
             panel.previous_page()  # wraps to the last page
@@ -2627,39 +2680,69 @@ class TestFigurePanel:
             panel.show_page(-3)  # clamped to the first page
             assert panel.current_page() == 0
         finally:
-            panel.deleteLater()
+            window.close()
             _pump()
 
     def test_set_figures_clamps_the_current_page(
         self, qapp: QApplication
     ) -> None:
         """Shrinking the figure list keeps the index valid."""
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
             panel.show_page(1)
             panel.set_figures([_figure("A"), _figure("B")])
             assert panel.current_page() == 1
-            assert panel._page_label.text() == "2 / 2"
             panel.set_figures([_figure("A")])
             assert panel.current_page() == 0
-            assert panel._page_label.text() == "1 / 1"
-            assert not panel._prev_button.isEnabled()
-            assert not panel._next_button.isEnabled()
             panel.set_figures(())
             assert panel.page_count() == 0
             assert panel.current_page() == -1
-            assert panel._title_label.text() == ""
+            assert panel.docks() == []
         finally:
-            panel.deleteLater()
+            window.close()
+            _pump()
+
+    def test_set_figures_replaces_docks(self, qapp: QApplication) -> None:
+        """A new figure list retires the old docks."""
+        window = _docks_window()
+        try:
+            panel = gui_figure_panel.FigurePanel(window)
+            panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
+            old_docks: list[gui_figure_panel.FigureDock] = panel.docks()
+            panel.set_figures([_figure("D")])
+            docks: list[gui_figure_panel.FigureDock] = panel.docks()
+            assert [dock.windowTitle() for dock in docks] == ["D"]
+            assert panel.current_page() == 0
+            # Retirement: the old docks left the window's dock area
+            # (`NoDockWidgetArea`) and the new one is docked in the
+            # figure area.  The retired docks' `deleteLater` waits
+            # for the event loop to return — a test never returns to
+            # it the way a running application does — so the test
+            # checks the dock-area membership Qt actually maintains,
+            # not the deferred deletion.
+            _pump()
+            for dock in old_docks:
+                assert (
+                    window.dockWidgetArea(dock)
+                    == Qt.DockWidgetArea.NoDockWidgetArea
+                )
+            assert (
+                window.dockWidgetArea(docks[0])
+                == Qt.DockWidgetArea.TopDockWidgetArea
+            )
+        finally:
+            window.close()
             _pump()
 
     def test_save_pages(
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         """Every page is saved as a PNG named after its title."""
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             panel.set_figures(
                 [
                     _figure("Streamflow and river concentrations"),
@@ -2682,7 +2765,7 @@ class TestFigurePanel:
                 assert path.parent == out_dir
                 assert path.is_file()
         finally:
-            panel.deleteLater()
+            window.close()
             _pump()
 
     def test_hidpi_scaling_uses_the_canvas_dpi(
@@ -2703,8 +2786,9 @@ class TestFigurePanel:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             panel.set_figures([_figure("A"), _figure("B")])
             for canvas in panel._canvases:
                 canvas._set_device_pixel_ratio(dpr)
@@ -2713,7 +2797,7 @@ class TestFigurePanel:
                     gui_figure_panel.CANVAS_DPI * dpr, rel=1e-6
                 )
         finally:
-            panel.deleteLater()
+            window.close()
             _pump()
 
     def test_hidpi_legend_text_stays_at_canvas_scale(
@@ -2732,8 +2816,9 @@ class TestFigurePanel:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        panel = gui_figure_panel.FigurePanel()
+        window = _docks_window()
         try:
+            panel = gui_figure_panel.FigurePanel(window)
             fig: Figure = Figure(figsize=(15, 7))
             ax = fig.add_subplot()
             ax.plot([0.0, 1.0], [0.0, 1.0], label="Series")
@@ -2756,7 +2841,7 @@ class TestFigurePanel:
             # larger publication-dpi height.
             assert max_height <= 1.5 * em
         finally:
-            panel.deleteLater()
+            window.close()
             _pump()
 
 
