@@ -1031,6 +1031,50 @@ class TestMainWindowStartup:
 
 
 # ------------------------------------------------------------------ #
+# MainWindow: minimum size
+# ------------------------------------------------------------------ #
+
+
+class TestWindowMinimumSize:
+    """
+    The window's reported minimum must fit inside its default size.
+
+    The window manager honours `minimumSizeHint`, so a header row
+    whose minimum is the sum of its items' full text widths pins
+    the window wider than a screen — the window can never be shrunk
+    or opened onto it.  The header must instead squeeze under
+    pressure (clipping labels, whose full text stays in tooltips and
+    combo popups) rather than push the window's minimum past its
+    own default size.
+    """
+
+    def test_minimum_hint_fits_within_the_default_size(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A default-state window reports a minimum no larger than _INITIAL_SIZE."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            minimum: QSize = win.minimumSizeHint()
+            assert minimum.width() <= gui_window._INITIAL_SIZE[0]
+            assert minimum.height() <= gui_window._INITIAL_SIZE[1]
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
 # MainWindow: runs
 # ------------------------------------------------------------------ #
 

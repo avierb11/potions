@@ -291,6 +291,18 @@ _STATUS_MAX_WIDTH: Final[int] = 350
 # width constant whether or not a job is running.
 _SPINNER_SIZE: Final[int] = 24
 
+# Squeeze floors (px) for the header's shrinkable items.  Each
+# item's plain minimum hint is its full text width; summed, the
+# row would pin the window's minimumSizeHint wider than a common
+# screen — and the window manager honors that hint, so the window
+# could never be opened or shrunk onto the screen.  With floors, a
+# narrow window squeezes the row instead: a floored item clips
+# under pressure, its full text staying available in its tooltip
+# or (for the combos) their popups.
+_TITLE_MIN_WIDTH: Final[int] = 140
+_COMBO_MIN_WIDTH: Final[int] = 100
+_CONTROL_MIN_WIDTH: Final[int] = 48
+
 # The period (ms) of the running indicator's frame-advance timer.
 _SPINNER_INTERVAL_MS: Final[int] = 100
 
@@ -2363,12 +2375,14 @@ class MainWindow(QMainWindow):
         `_SpinnerLabel`) next to the title: its footprint does not
         change with the job state, so the window's minimum width is
         the same whether or not a job is in flight (the remaining
-        job indicators live in the bottom strip).  The status label
-        is the row's only compressible item: it reports a small
-        minimum (see `_StatusLabel`) and stretches between the mode
-        checkbox and the job checkboxes, so a narrow window clips
-        its text (the tooltip keeps the full message) instead of
-        pushing the window past the screen.
+        job indicators live in the bottom strip).  The row's items
+        are compressible down to squeeze floors (see
+        `_TITLE_MIN_WIDTH`, `_COMBO_MIN_WIDTH`, and
+        `_CONTROL_MIN_WIDTH`; the status label reports its own
+        small minimum, see `_StatusLabel`), so a narrow window
+        squeezes the row — clipping text whose full content stays
+        in tooltips and combo popups — instead of pushing the
+        window's minimum past the screen.
         """
         self._title_label: QLabel = QLabel(_title_for(self._input_data.spec))
         font: QFont = QFont(self._title_label.font())
@@ -2552,6 +2566,42 @@ class MainWindow(QMainWindow):
         self._save_button: QPushButton = QPushButton("Save run")
         self._save_button.clicked.connect(self._on_save_run)
         self._save_button.setEnabled(False)
+
+        # Squeeze floors for the row's shrinkable items (see the
+        # `_TITLE_MIN_WIDTH` group above): without them every item
+        # reports its full text width as its minimum and the row
+        # would pin the window's minimumSizeHint wider than a
+        # common screen.  Clipped items keep their full text
+        # available — the combos in their popups, the checkboxes
+        # and buttons in tooltips, falling back to the item's own
+        # text where a button carries no more specific one.
+        self._title_label.setMinimumWidth(_TITLE_MIN_WIDTH)
+        self._title_label.setToolTip(self._title_label.text())
+        combos: tuple[QComboBox, ...] = (
+            self._model_combo,
+            self._network_combo,
+        )
+        for combo in combos:
+            combo.setMinimumWidth(_COMBO_MIN_WIDTH)
+        controls: tuple[QPushButton | QCheckBox, ...] = (
+            load_data_button,
+            load_network_button,
+            save_network_button,
+            edit_network_button,
+            self._mode_checkbox,
+            self._save_history_checkbox,
+            self._auto_run_checkbox,
+            self._run_button,
+            self._gradients_button,
+            self._line_search_button,
+            self._calibrate_button,
+            self._reset_button,
+            self._save_button,
+        )
+        for control in controls:
+            control.setMinimumWidth(_CONTROL_MIN_WIDTH)
+            if not control.toolTip():
+                control.setToolTip(control.text())
 
         layout: QHBoxLayout = QHBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -4441,6 +4491,10 @@ class MainWindow(QMainWindow):
         ]
         self._sync_history_combo()
         self._title_label.setText(_title_for(spec))
+        # The header can clip the title under squeeze; the tooltip
+        # (set again here, since the text changed) keeps the full
+        # title readable.
+        self._title_label.setToolTip(_title_for(spec))
         self.setWindowTitle(_title_for(spec))
         self._status(f"Switched to {spec.display_name}.")
         if not start_run:

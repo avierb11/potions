@@ -235,6 +235,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to revert to stale results. A line search started while a job is in
   flight is now refused with a status message — a job cannot be
   interrupted, so the two kinds of job no longer race.
+- **GUI: the window's minimum size exceeded a common screen**: every
+  header item reported its full text width as its minimum, summing to a
+  window `minimumSizeHint` of roughly 2050 px that window managers honor,
+  so the calibration window could not be opened or shrunk onto a 1920-px
+  display. The header's items now squeeze down to fixed floors (title,
+  combos, buttons and checkboxes), so a narrow window squeezes the row —
+  clipped text stays available in tooltips and combo popups — and the
+  window's minimum (roughly 1150 px) fits inside its default size.
 
 ### Performance
 
