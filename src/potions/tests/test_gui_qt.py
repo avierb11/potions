@@ -1075,6 +1075,43 @@ class TestWindowMenus:
         finally:
             _close_window(win)
 
+    def test_options_menu_carries_the_settings_actions(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Options menu holds the settings toggles, Reset bounds, and Quit."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            texts = [
+                action.text().replace("&", "")
+                for action in win._options_menu.actions()
+                if not action.isSeparator()
+            ]
+            assert texts == [
+                "Auto-run",
+                "Save run history",
+                "Reset bounds",
+                "Quit",
+            ]
+            assert win._auto_run_action.isCheckable()
+            assert win._auto_run_action.isChecked()
+            assert win._save_history_action.isCheckable()
+            assert not win._save_history_action.isChecked()
+            assert win._reset_action.text().replace("&", "") == (
+                "Reset bounds"
+            )
+        finally:
+            _close_window(win)
+
 
 # ------------------------------------------------------------------ #
 # MainWindow: toolbar and status bar
@@ -1141,9 +1178,8 @@ class TestWindowToolbar:
                 for a in win._toolbar.actions()
                 if not isinstance(a, QWidgetAction)
             ]
-            # Interim list: Auto-run / Save run history / Reset bounds
-            # are toolbar residents only until Task 3 moves them to
-            # the Options menu.
+            # Final chrome: the settings toggles and Reset bounds
+            # live in the Options menu, not the toolbar.
             assert labels == [
                 "—",
                 "Run model",
@@ -1153,10 +1189,6 @@ class TestWindowToolbar:
                 "Save run",
                 "—",
                 "Hydrology only",
-                "—",
-                "Save run history",
-                "Auto-run",
-                "Reset bounds",
             ]
             assert win._mode_action.isCheckable()
             for widget in (win._model_combo, win._network_combo, win._job_spinner):
@@ -1203,7 +1235,10 @@ class TestWindowToolbar:
         try:
             # Qt's private extension button (») is a child tool
             # button with this object name; it becomes visible only
-            # when the toolbar must elide items.
+            # when the toolbar must elide items.  The toolbar's
+            # sizeHint is ~818 px, but the combos shrink toward
+            # their `_COMBO_MIN_WIDTH` floors first, so eliding
+            # starts only below ~680 px; 600 is safely past that.
             extension = win._toolbar.findChild(
                 QToolButton, "qt_toolbar_ext_button"
             )
@@ -1213,7 +1248,7 @@ class TestWindowToolbar:
             win.resize(1600, 700)
             _pump(50)
             assert not extension.isVisible()
-            win.resize(700, 700)
+            win.resize(600, 700)
             _pump(50)
             assert extension.isVisible()
             win.resize(1600, 700)

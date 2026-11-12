@@ -127,6 +127,7 @@ from PySide6.QtGui import (
     QFont,
     QGuiApplication,
     QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QScreen,
@@ -2372,9 +2373,12 @@ class MainWindow(QMainWindow):
         that used to sit as header buttons: menu items are the
         conventional home for file-ish commands, and menu items can
         carry Alt mnemonics (a text-only toolbar would print an `&`
-        literally, so toolbar actions never get them).  Later builders
-        add further menus to this bar; this method builds the bar's
-        first menu and the actions inside it.
+        literally, so toolbar actions never get them).  The Options
+        menu carries the settings toggles and Reset bounds; its
+        actions are built by `_build_toolbar` (they are polled and
+        connected like the job actions) and homed here.  This method
+        builds the bar itself: the File menu with its actions, and
+        the empty Options menu the toolbar builder fills.
         """
         self._file_menu: QMenu = self.menuBar().addMenu("&File")
 
@@ -2412,6 +2416,8 @@ class MainWindow(QMainWindow):
         )
         self._edit_network_action.triggered.connect(self._on_edit_network)
         self._file_menu.addAction(self._edit_network_action)
+
+        self._options_menu: QMenu = self.menuBar().addMenu("&Options")
 
     def _build_toolbar(self) -> None:
         """
@@ -2622,12 +2628,25 @@ class MainWindow(QMainWindow):
         self._toolbar.addSeparator()
         self._toolbar.addWidget(self._job_spinner)
         self._toolbar.addAction(self._mode_action)
-        self._toolbar.addSeparator()
-        # Settings actions and Reset bounds: temporary toolbar
-        # residents until the Options menu takes them.
-        self._toolbar.addAction(self._save_history_action)
-        self._toolbar.addAction(self._auto_run_action)
-        self._toolbar.addAction(self._reset_action)
+
+        # The settings actions and Reset bounds live in the Options
+        # menu: they are settings, not jobs, and menu items can carry
+        # mnemonics.  The same action objects built above are homed
+        # here — state, tooltips, and connections intact — with menu
+        # mnemonics added to their texts.
+        self._auto_run_action.setText("&Auto-run")
+        self._save_history_action.setText("&Save run history")
+        self._reset_action.setText("Reset &bounds")
+        self._options_menu.addAction(self._auto_run_action)
+        self._options_menu.addAction(self._save_history_action)
+        self._options_menu.addSeparator()
+        self._options_menu.addAction(self._reset_action)
+        self._options_menu.addSeparator()
+
+        self._quit_action: QAction = QAction("&Quit", self)
+        self._quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        self._quit_action.triggered.connect(self.close)
+        self._options_menu.addAction(self._quit_action)
 
         # The status label shares the bar with the bar's own stretch
         # (factor 1) up to its maximum width; beyond that the bar
