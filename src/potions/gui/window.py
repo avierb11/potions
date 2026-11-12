@@ -117,7 +117,15 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QMouseEvent, QPainter, QScreen
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QFont,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QScreen,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -2009,6 +2017,90 @@ class _SpinnerLabel(QLabel):
         self._show_frame()
 
 
+# ==== Maximize chord ==== #
+class _MaximizeChordFilter(QObject):
+    """
+    Detect the Home+Up key chord on one window and toggle its maximize.
+
+    Qt shortcuts cannot express a two-key chord: ``Home+Up`` is not a
+    key, adding the key codes parses to a wrong sequence, and a
+    two-entry *sequence* shortcut never fires when a focused child
+    consumes the first key.  So the chord is detected from raw key
+    events: the filter is installed on the application (application
+    filters run before any widget's own handling, unlike window
+    actions, which a focused child's shortcut handling can beat),
+    watches only the events delivered to its window's own widget
+    tree, and consumes only the *completing* press of the pair — a
+    lone Home or a lone Up reaches its widget untouched.
+
+    The chord fires on the second key pressed (either order) with no
+    modifier held; auto-repeat and further presses do not re-fire
+    until both keys have been released, so holding the chord down
+    toggles exactly once.
+    """
+
+    _CHORD_KEYS: Final[frozenset[Qt.Key]] = frozenset(
+        {Qt.Key.Key_Home, Qt.Key.Key_Up}
+    )
+
+    def __init__(self, window: QMainWindow) -> None:
+        """
+        Args:
+            window: The window whose maximize the chord toggles.  The
+                filter is parented to it, so Qt removes it from the
+                application when the window is destroyed.
+        """
+        super().__init__(window)
+        self._window = window
+        self._held: set[Qt.Key] = set()
+        self._fired: bool = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """
+        Consume the completing key press of the Home+Up chord.
+
+        Args:
+            watched: The object receiving the event — every object in
+                the application, so the guards run before anything is
+                touched: non-key events first, then only events aimed
+                at a widget belonging to this filter's own window (a
+                non-widget receiver like the shared style has no
+                window to compare).
+            event: The event being delivered.
+
+        Returns:
+            True when the event is the completing press of the chord
+            and was consumed; False otherwise.
+        """
+        if event.type() not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            return False
+        if not isinstance(watched, QWidget):
+            return False
+        if watched.window() is not self._window:
+            return False
+        assert isinstance(event, QKeyEvent)
+        key: Qt.Key = event.key()
+        if event.type() == QEvent.Type.KeyRelease:
+            self._held.discard(key)
+            if not self._CHORD_KEYS & self._held:
+                # Both chord keys are up again: the chord may fire once more.
+                self._fired = False
+            return False
+        if (
+            key in self._CHORD_KEYS
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._CHORD_KEYS & self._held
+            and not self._fired
+            and not event.isAutoRepeat()
+        ):
+            self._fired = True
+            self._held.add(key)
+            self._window._toggle_maximized()
+            return True
+        self._held.add(key)
+        return False
+
+
 # ==== Main window ==== #
 class MainWindow(QMainWindow):
     """
@@ -2180,6 +2272,14 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_actions()
+        # The Home+Up maximize chord (see `_MaximizeChordFilter`): a
+        # window action cannot express a key chord, so the chord is
+        # detected with an application-level filter that Qt removes
+        # when the window is destroyed (it is parented to the window).
+        self._chord_filter: _MaximizeChordFilter = _MaximizeChordFilter(self)
+        application: QCoreApplication | None = QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self._chord_filter)
         self._restore_or_start()
         # The restored mode (or the default) is final by now, so the
         # window can take it as its background tint.
@@ -2660,7 +2760,13 @@ class MainWindow(QMainWindow):
         return self._param_panel
 
     def _build_actions(self) -> None:
-        """Register the Left / Right arrow actions that flip the figure pages."""
+        """
+        Register the Left / Right arrow actions that flip the figure pages.
+
+        Maximizing is not an action here: a QAction shortcut cannot
+        express the Home+Up key chord, which `_MaximizeChordFilter`
+        detects from raw key events instead.
+        """
         previous_action: QAction = QAction("Previous figure", self)
         previous_action.setShortcut(Qt.Key.Key_Left)
         previous_action.triggered.connect(self._figure_panel.previous_page)
@@ -5142,6 +5248,13 @@ class MainWindow(QMainWindow):
             self._restore_maximized = False
             QTimer.singleShot(0, self.showMaximized)
         super().showEvent(event)
+
+    def _toggle_maximized(self) -> None:
+        """Toggle the window between maximized and its normal geometry."""
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     # ==== Closing ==== #
     def closeEvent(self, event: QCloseEvent) -> None:

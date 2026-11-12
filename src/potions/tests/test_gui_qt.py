@@ -45,12 +45,20 @@ from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.text import Text
 from PySide6.QtCore import QDate, QEvent, QPointF, QRect, QSize, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QImage, QMouseEvent
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QFont,
+    QKeyEvent,
+    QImage,
+    QMouseEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -160,6 +168,22 @@ def _pump(iterations: int = 50) -> None:
     for _ in range(iterations):
         app.processEvents()
         time.sleep(0.002)
+
+
+def _key_press(widget: QWidget, key: Qt.Key) -> None:
+    """Deliver one synthetic key press and pump the event loop."""
+    QApplication.sendEvent(
+        widget, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+    )
+    _pump(5)
+
+
+def _key_release(widget: QWidget, key: Qt.Key) -> None:
+    """Deliver one synthetic key release and pump the event loop."""
+    QApplication.sendEvent(
+        widget, QKeyEvent(QEvent.Type.KeyRelease, key, Qt.KeyboardModifier.NoModifier)
+    )
+    _pump(5)
 
 
 def _fake_results_factory(
@@ -1582,6 +1606,111 @@ class TestMainWindowRuns:
             assert win._save_button.isEnabled()
             assert not win._run_button.isEnabled()
         finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# MainWindow: the Home+Up maximize chord
+# ------------------------------------------------------------------ #
+
+
+class TestMaximizeChord:
+    """Home+Up toggles the window's maximize; single keys do not."""
+
+    def test_chord_toggles_maximize(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win.show()
+            _pump()
+            normal_geometry: QRect = win.geometry()
+
+            # Home held, then Up: maximize.
+            _key_press(win, Qt.Key.Key_Home)
+            _key_press(win, Qt.Key.Key_Up)
+            _key_release(win, Qt.Key.Key_Home)
+            _key_release(win, Qt.Key.Key_Up)
+            assert win.isMaximized()
+
+            # Up held, then Home (either order works): un-maximize,
+            # back to the previous normal geometry.
+            _key_press(win, Qt.Key.Key_Up)
+            _key_press(win, Qt.Key.Key_Home)
+            _key_release(win, Qt.Key.Key_Up)
+            _key_release(win, Qt.Key.Key_Home)
+            assert not win.isMaximized()
+            assert win.geometry() == normal_geometry
+
+            # A lone Home and a lone Up never maximize, even when the
+            # one follows the other with the key released in between.
+            _key_press(win, Qt.Key.Key_Home)
+            _key_release(win, Qt.Key.Key_Home)
+            _key_press(win, Qt.Key.Key_Up)
+            _key_release(win, Qt.Key.Key_Up)
+            assert not win.isMaximized()
+        finally:
+            _close_window(win)
+
+    def test_single_up_keeps_spinbox_behavior(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win.show()
+            _pump()
+            spin = win._param_panel.findChild(QDoubleSpinBox)
+            assert spin is not None
+            spin.setFocus()
+            _pump()
+
+            # A lone Up still steps the spin box (the chord filter
+            # only ever consumes the *second* key of the pair).
+            before: float = spin.value()
+            _key_press(spin, Qt.Key.Key_Up)
+            _key_release(spin, Qt.Key.Key_Up)
+            assert spin.value() == pytest.approx(before + spin.singleStep())
+            assert not win.isMaximized()
+
+            # With Home held, Up is the chord: it maximizes the window
+            # and is consumed (the spin box does not step on it).  The
+            # lone Home itself is not the chord and reaches the spin
+            # box, which Qt moves to its minimum.
+            _key_press(spin, Qt.Key.Key_Home)
+            value_after_home: float = spin.value()
+            _key_press(spin, Qt.Key.Key_Up)
+            _key_release(spin, Qt.Key.Key_Home)
+            _key_release(spin, Qt.Key.Key_Up)
+            assert win.isMaximized()
+            assert spin.value() == value_after_home
+        finally:
+            win._debounce_timer.stop()
             _close_window(win)
 
 
