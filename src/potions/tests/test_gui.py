@@ -337,6 +337,7 @@ def _full_state(
     objective_terms: list[str] | None = None,
     model_key: str = model_specs.DEFAULT_MODEL_KEY,
     network_fingerprint: str | None = None,
+    window_maximized: bool = False,
 ) -> GuiState:
     """A complete gui_state matching the loaded input data."""
     bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
@@ -357,6 +358,7 @@ def _full_state(
         objective_terms=objective_terms,
         model_key=model_key,
         network_fingerprint=network_fingerprint,
+        window_maximized=window_maximized,
     )
 
 
@@ -891,12 +893,12 @@ class TestGuiStateRoundTrip:
         state = _full_state(input_data)
         restored = GuiState.from_dict(state.to_dict())
         assert restored == state
-        assert GUI_STATE_VERSION == 7
-        assert state.to_dict()["version"] == 7
+        assert GUI_STATE_VERSION == 8
+        assert state.to_dict()["version"] == 8
 
     def test_to_dict_shape(self, input_data: gui_data.GuiInputData) -> None:
         raw: dict[str, object] = _full_state(input_data).to_dict()
-        assert raw["version"] == 7
+        assert raw["version"] == 8
         assert raw["csv_path"] == str(gui_data.DEFAULT_CSV_PATH)
         assert raw["model_key"] == "lateral_three_layer"
         param_values = _as_dict(raw, "param_values")
@@ -987,6 +989,28 @@ class TestGuiStateRoundTrip:
         raw: dict[str, object] = _full_state(input_data).to_dict()
         del raw["save_history"]
         assert GuiState.from_dict(raw).save_history is False
+
+    def test_window_maximized_defaults_off(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        state = _full_state(input_data)
+        assert state.window_maximized is False
+        assert state.to_dict()["window_maximized"] is False
+
+    def test_window_maximized_on_round_trips(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        state = _full_state(input_data, window_maximized=True)
+        assert state.to_dict()["window_maximized"] is True
+        assert GuiState.from_dict(state.to_dict()).window_maximized is True
+
+    def test_window_maximized_absent_restores_off(
+        self, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A state saved before the maximized flag existed restores off."""
+        raw: dict[str, object] = _full_state(input_data).to_dict()
+        del raw["window_maximized"]
+        assert GuiState.from_dict(raw).window_maximized is False
 
     def test_mode_defaults_to_full(
         self, input_data: gui_data.GuiInputData
@@ -1129,7 +1153,7 @@ class TestFromDictErrors:
         [
             (
                 {"version": 99},
-                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7]).",
+                "Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8]).",
             ),
             (
                 {"csv_path": 12},
@@ -1162,6 +1186,10 @@ class TestFromDictErrors:
             (
                 {"save_history": "yes"},
                 "gui_state.json 'save_history' must be a boolean, got str.",
+            ),
+            (
+                {"window_maximized": "yes"},
+                "gui_state.json 'window_maximized' must be a boolean, got str.",
             ),
             (
                 {"mode": "fuller"},
@@ -1486,7 +1514,7 @@ class TestReadGuiState:
         assert (
             stderr
             == f"Could not restore the GUI state from {state_path}: "
-            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7]).\n"
+            f"Unsupported gui_state.json version 99 (expected [1, 2, 3, 4, 5, 6, 7, 8]).\n"
         )
 
     def test_top_level_not_object(
@@ -1507,7 +1535,7 @@ class TestReadGuiState:
         path: Path = write_gui_state(tmp_path, _full_state(input_data))
         assert path == tmp_path / "gui_state.json"
         text: str = path.read_text()
-        assert text.startswith("{\n  \"version\": 7,")
+        assert text.startswith("{\n  \"version\": 8,")
         assert text.endswith("\n")
 
 
@@ -1680,6 +1708,7 @@ class TestLoadSavedRunFullState:
         assert saved.window_geometry == state.window_geometry
         assert saved.splitter_sizes == state.splitter_sizes
         assert saved.save_history is False
+        assert saved.window_maximized is False
 
     def test_results_reconstructed(self, tmp_path: Path, input_data: gui_data.GuiInputData) -> None:
         run_dir = _write_saved_run(tmp_path, input_data, _full_state(input_data))
@@ -1738,6 +1767,17 @@ class TestLoadSavedRunFullState:
         assert saved.restore_note is None
         assert saved.save_history is True
 
+    def test_restore_window_maximized_on(
+        self, tmp_path: Path, input_data: gui_data.GuiInputData
+    ) -> None:
+        """A run saved maximized carries the maximized flag through."""
+        state = _full_state(input_data, window_maximized=True)
+        run_dir = _write_saved_run(tmp_path, input_data, state)
+
+        saved = load_saved_run(run_dir, input_data)
+        assert saved.restore_note is None
+        assert saved.window_maximized is True
+
 
 class TestLoadSavedRunLegacy:
     """A run without gui_state.json restores best-effort values."""
@@ -1754,6 +1794,7 @@ class TestLoadSavedRunLegacy:
         assert saved.window_geometry is None
         assert saved.splitter_sizes is None
         assert saved.save_history is False
+        assert saved.window_maximized is False
         # The stateless restore's selection follows the record: the
         # record-derived defaults plus the record's forcing span as
         # the plotting window (the default window otherwise).

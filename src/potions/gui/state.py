@@ -69,7 +69,7 @@ GUI_STATE_FILENAME: Final[str] = "gui_state.json"
 # `potions.reactive_transport.network_file`).
 NETWORK_FILENAME: Final[str] = "network.yaml"
 # The version of the gui_state.json format written here.
-GUI_STATE_VERSION: Final[int] = 7
+GUI_STATE_VERSION: Final[int] = 8
 # The name of the session's abbreviated run-history file, kept in
 # the results directory: one JSON object per finished run (see
 # `append_run_history`).
@@ -82,14 +82,15 @@ MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
 _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
-# the current one (7, the run's network fingerprint), version 6 (the
-# date-based plotting window), version 5 (the selected model's key),
-# version 4 (the objective-table selection), version 3 (the
-# time-series figure's selection list), version 2 (the last version
-# this GUI has written), and version 1 (the two-splitter layout,
-# whose splitter sizes are mapped onto the current one).
+# the current one (8, the maximized-window flag), version 7 (the
+# run's network fingerprint), version 6 (the date-based plotting
+# window), version 5 (the selected model's key), version 4 (the
+# objective-table selection), version 3 (the time-series figure's
+# selection list), version 2 (the last version this GUI has written),
+# and version 1 (the two-splitter layout, whose splitter sizes are
+# mapped onto the current one).
 _ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
-    {1, 2, 3, 4, 5, 6, GUI_STATE_VERSION}
+    {1, 2, 3, 4, 5, 6, 7, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
@@ -148,6 +149,11 @@ class GuiState:
             auto-detected roles (the shipped record always is); an
             absent field in a state file means a state saved before
             mapping persistence existed, which restores None.
+        window_maximized: Whether the window was maximized when the
+            run was saved; restoring such a run opens it maximized.
+            An absent field in a state file means a state saved
+            before the maximized flag existed, which restores a
+            normal window.
     """
 
     csv_path: str | None
@@ -162,6 +168,7 @@ class GuiState:
     model_key: str = DEFAULT_MODEL_KEY
     network_fingerprint: str | None = None
     column_map: dict[str, str | None] | None = None
+    window_maximized: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """
@@ -212,6 +219,7 @@ class GuiState:
             ),
             "model_key": self.model_key,
             "network_fingerprint": self.network_fingerprint,
+            "window_maximized": self.window_maximized,
         }
         if self.column_map is not None:
             data["column_map"] = dict(self.column_map)
@@ -269,6 +277,7 @@ class GuiState:
             model_key=_optional_model_key(data),
             network_fingerprint=_optional_network_fingerprint(data),
             column_map=_optional_column_map(data),
+            window_maximized=_optional_maximized(data),
         )
 
 
@@ -654,6 +663,33 @@ def _optional_save_history(data: dict[str, object]) -> bool:
     if not isinstance(raw, bool):
         raise ValueError(
             f"gui_state.json 'save_history' must be a boolean, "
+            f"got {type(raw).__name__}."
+        )
+    return raw
+
+
+def _optional_maximized(data: dict[str, object]) -> bool:
+    """
+    The optional ``window_maximized`` field of a gui_state.json mapping.
+
+    Args:
+        data: The parsed JSON mapping.
+
+    Returns:
+        The field's boolean value, or False when it is absent (a state
+        saved before the maximized flag existed restores a normal
+        window).
+
+    Raises:
+        ValueError: Raised when the field is present but is not a
+            boolean.
+    """
+    raw: object = data.get("window_maximized")
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError(
+            f"gui_state.json 'window_maximized' must be a boolean, "
             f"got {type(raw).__name__}."
         )
     return raw
@@ -1142,6 +1178,10 @@ class SavedRun:
         column_map: The role-to-column mapping the run's session
             used to read its record, or None for a record read with
             auto-detected roles (or a run predating the field).
+        window_maximized: Whether the window was maximized when the
+            run was saved; restoring the run reopens it maximized.
+            False for a run saved before the flag existed or without
+            a state file.
     """
 
     results: GuiRunResults
@@ -1158,6 +1198,7 @@ class SavedRun:
     network_fingerprint: str | None
     csv_path: str | None
     column_map: dict[str, str | None] | None
+    window_maximized: bool
 # =============== #
 
 
@@ -1224,6 +1265,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             network_fingerprint=state.network_fingerprint,
             csv_path=state.csv_path,
             column_map=state.column_map,
+            window_maximized=state.window_maximized,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -1255,6 +1297,8 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         # A stateless run never recorded a record file or a mapping.
         csv_path=None,
         column_map=None,
+        # A stateless run never recorded a maximized state.
+        window_maximized=False,
     )
 
 
