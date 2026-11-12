@@ -862,11 +862,15 @@ impl ReactionNetwork {
         self.mobile_mask_rust().to_pyarray(py)
     }
 
+    /// The network of a YAML network file (V-gated: a blocking
+    /// finding aborts the load).
     #[staticmethod]
     pub fn from_file(path: &str) -> PyResult<ReactionNetwork> {
         load_network_file(path)?.build_to_network()
     }
 
+    /// Write the network as a YAML network file (the canonical
+    /// six-section format) to `path`.
     pub fn to_file(&self, path: &str) -> PyResult<()> {
         NetworkFile::build_from_network(self).to_file(path)
     }

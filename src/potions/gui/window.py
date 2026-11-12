@@ -4749,9 +4749,22 @@ class MainWindow(QMainWindow):
 
         # The network the run used, in the canonical file format;
         # a restore of this run reads it back (``_run_network``).
-        pt.NetworkFile.from_network(self._network).to_file(
-            str(run_dir / NETWORK_FILENAME)
-        )
+        # A failure here would leave a partially saved run (the
+        # run saver has already written the directory) that the
+        # restore path would misclassify as pre-fingerprint, so
+        # it is reported and the save is abandoned.
+        try:
+            pt.NetworkFile.from_network(self._network).to_file(
+                str(run_dir / NETWORK_FILENAME)
+            )
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(
+                self,
+                "Save run",
+                f"Could not write the run's network file "
+                f"({run_dir / NETWORK_FILENAME}): {error}",
+            )
+            return None
 
         # The client geometry (rather than the frame's): the restore
         # path applies these values with setGeometry, so saving the

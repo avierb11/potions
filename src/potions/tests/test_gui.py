@@ -48,10 +48,6 @@ matplotlib.use("Agg")
 
 import potions as pt
 from potions.hydro_model import HydrologicalModel
-from potions.reactive_transport.common_networks import (
-    get_chloride_network,
-    get_soc_calcite_network,
-)
 from potions.result_saving import (
     DEFAULT_RESULTS_DIR,
     save_hydro_run,

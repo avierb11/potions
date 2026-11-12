@@ -2265,10 +2265,13 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
 
         A database reaction for (mineral, current kind, new
         label) re-seeds log10 k and the terms and rebuilds the
-        row — without the rebuild, a later term commit would
+        row — without the rebuild, later term commits would
         overwrite the seed with the stale table.  Otherwise only
         the label changes: the entry keeps its log10 k and its
-        terms.
+        terms.  An unchanged label is a no-op: re-seeding here
+        would silently revert any k/term edits made after the
+        original seed, so it is refused — the mirror of the name
+        field's unchanged-name guard.
         """
         if self._rebuilding or name not in self._kinetics_type:
             return
@@ -2279,6 +2282,8 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
             label = field.text().strip()
         kind: str = self._kinetics_type[name].currentText()
         entry: DraftTst | DraftMonod | None = self._kinetics_entry(name)
+        if entry is not None and entry.label == label:
+            return
         seeded: _SeededKinetic | None = self._seeded_kinetic(
             name, kind, label
         )

@@ -60,7 +60,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             ends with an argparse usage error).
     """
     import argparse
-    import potions as pt
     import sys
 
     from PySide6.QtGui import QFont
