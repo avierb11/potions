@@ -45,9 +45,11 @@ hydrology-only mode).
 import gc
 import hashlib
 import math
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+from xml.etree.ElementTree import ParseError
 
 import numpy as np
 import pandas as pd
@@ -679,21 +681,31 @@ def _read_raw(path: Path) -> pd.DataFrame:
 
     Raises:
         ValueError:
-            Raised when the file has no supported extension.
+            Raised when the file has no supported extension, or the
+            spreadsheet cannot be parsed (a non-zip file or a zip
+            whose XML is malformed — the message includes the
+            parser's error).
 
         OSError:
-            Raised when the file cannot be read.
+            Raised when the file cannot be read or holds no valid
+            workbook part.
     """
     suffix: str = path.suffix.lower()
-    if suffix == ".csv":
-        raw: pd.DataFrame = pd.read_csv(path)
-    elif suffix == ".xlsx":
-        raw = pd.read_excel(path, engine="openpyxl")
-    else:
+    if suffix not in {".csv", ".xlsx"}:
         raise ValueError(
             f"Unsupported record file {path.name!r}: the record must "
             "be a CSV (.csv) or XLSX (.xlsx) spreadsheet."
         )
+    try:
+        if suffix == ".csv":
+            raw: pd.DataFrame = pd.read_csv(path)
+        else:
+            raw = pd.read_excel(path, engine="openpyxl")
+    except (zipfile.BadZipFile, ParseError) as err:
+        raise ValueError(
+            f"Could not read the record spreadsheet {path.name!r}: "
+            f"{err}."
+        ) from err
     return raw
 
 
@@ -725,10 +737,13 @@ def read_spreadsheet(
     Raises:
         ValueError:
             Raised when the file has no supported extension, the
-            date column is missing (the message lists the available
-            columns), two rows share a date (the message names the
-            duplicated date), or a data column is not numeric (the
-            message names the column and the offending value).
+            spreadsheet cannot be parsed (a non-zip file or a zip
+            whose XML is malformed — the message includes the
+            parser's error), the date column is missing (the message
+            lists the available columns), two rows share a date (the
+            message names the duplicated date), or a data column is
+            not numeric (the message names the column and the
+            offending value).
     """
     raw: pd.DataFrame = _read_raw(path)
     date_column: str = _datetime_column(raw, column_map)
@@ -896,8 +911,11 @@ def prefill_mapping(
 
     Raises:
         ValueError:
-            Raised when the file has no supported extension or no
-            date column (the message lists the available columns).
+            Raised when the file has no supported extension, the
+            spreadsheet cannot be parsed (a non-zip file or a zip
+            whose XML is malformed — the message includes the
+            parser's error), or no date column (the message lists
+            the available columns).
 
         OSError:
             Raised when the file cannot be read.

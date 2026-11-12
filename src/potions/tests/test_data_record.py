@@ -21,6 +21,7 @@ The Qt-layer tests (the column-mapping dialog, the Load Data action,
 the state round trip, the CLI) live in `test_gui_qt.py`.
 """
 
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -308,6 +309,30 @@ class TestReadSpreadsheet:
         message: str = str(excinfo.value)
         assert "a" in message
         assert "b" in message
+
+    def test_corrupt_xlsx_rejected(self, tmp_path: Path) -> None:
+        """A file that is not a valid zip (a text file renamed
+        ``.xlsx``) is a ``ValueError``, not an uncaught
+        ``zipfile.BadZipFile``: the Load data slot reports any
+        ``ValueError`` and keeps the session running."""
+        path: Path = tmp_path / "renamed_text.xlsx"
+        path.write_text("this is not a zip file\n")
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        message: str = str(excinfo.value)
+        assert "Could not read the record spreadsheet" in message
+
+    def test_corrupt_xml_xlsx_rejected(self, tmp_path: Path) -> None:
+        """A valid zip whose XML parts are malformed is a
+        ``ValueError``, not an uncaught xml ``ParseError``."""
+        path: Path = tmp_path / "bad_xml.xlsx"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types><Type invalid=")
+            archive.writestr("xl/workbook.xml", "<<<not xml>>>")
+        with pytest.raises(ValueError) as excinfo:
+            gui_data.read_spreadsheet(path)
+        message: str = str(excinfo.value)
+        assert "Could not read the record spreadsheet" in message
 
 
 # ------------------------------------------------------------------ #

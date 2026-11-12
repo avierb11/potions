@@ -6905,6 +6905,63 @@ class TestLoadData:
         finally:
             _close_window(win)
 
+    def test_load_data_corrupt_xlsx_reports_error(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A spreadsheet that cannot be parsed (a text file renamed
+        ``.xlsx`` — not a valid zip) fails before the dialog opens:
+        the reader converts the parser's error to a ``ValueError``,
+        the slot reports it, the session keeps running, and the
+        dialog is never constructed."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            win._auto_run_checkbox.setChecked(False)
+            before: gui_data.GuiInputData = win._input_data
+
+            path: Path = tmp_path / "renamed_text.xlsx"
+            path.write_text("this is not a zip file\n")
+
+            def fake_open(
+                parent: object,
+                title: str,
+                directory: str,
+                flt: str,
+            ) -> tuple[str, str]:
+                return (str(path), flt)
+
+            monkeypatch.setattr(
+                gui_window.QFileDialog, "getOpenFileName", fake_open
+            )
+            monkeypatch.setattr(gui_window, "ColumnMappingDialog", pytest.fail)
+            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+            _FakeMessageBox.critical_calls.clear()
+
+            win._on_load_data()
+            _pump()
+
+            assert len(_FakeMessageBox.critical_calls) == 1
+            title, message = _FakeMessageBox.critical_calls[0]
+            assert title == "Load data"
+            assert "Could not read the record spreadsheet" in message
+            assert win._data_path is None
+            assert win._column_map is None
+            assert win._input_data is before
+        finally:
+            _close_window(win)
+
     def test_load_data_failure_keeps_session(
         self,
         qapp: QApplication,
