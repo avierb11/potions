@@ -220,6 +220,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   disabled no longer carry their (always zero) rate columns, so the RT
   `simulation.csv` and `results.pkl` shrink by one rate column per mineral
   per non-reacting zone.
+- **The calibration GUI's chrome is reorganized.** The window's header
+  row is replaced by standard window chrome: a **File menu** (*Load
+  data…*, *Load network file…*, *Save network as…*, *Edit network…*);
+  an **Options menu** (*Auto-run*, *Save run history*, *Reset bounds*,
+  and *Quit* with the standard Ctrl+Q shortcut); a fixed (non-movable,
+  text-only) **toolbar** carrying the model and network selectors, the
+  running-job spinner, the *Run model*, *Gradients*, *Line search*,
+  *Calibrate*, and *Save run* actions, and the *Hydrology only* toggle;
+  and a bottom **status bar** for the status line. The bold header title
+  label is dropped (the same text was already the window title), and the
+  header's minimum-width squeeze floors are replaced by the toolbar's
+  overflow (») button, so the chrome can no longer pin the window wider
+  than the screen. Session state is unchanged: the same
+  `gui_state.json` (format version 8) restores the parameters, mode,
+  toggles, geometry, and splitter sizes.
 
 ### Fixed
 

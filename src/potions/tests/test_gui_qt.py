@@ -1267,13 +1267,14 @@ class TestWindowMinimumSize:
     """
     The window's reported minimum must fit inside its default size.
 
-    The window manager honours `minimumSizeHint`, so a header row
-    whose minimum is the sum of its items' full text widths pins
-    the window wider than a screen — the window can never be shrunk
-    or opened onto it.  The header must instead squeeze under
-    pressure (clipping labels, whose full text stays in tooltips and
-    combo popups) rather than push the window's minimum past its
-    own default size.
+    The window manager honours `minimumSizeHint`, so chrome whose
+    minimum is the sum of its items' full text widths pins the
+    window wider than a screen — the window can never be shrunk
+    or opened onto it.  The toolbar must instead elide under
+    pressure (its extension button collecting the items that no
+    longer fit, and labels clipping, their full text staying in
+    tooltips and combo popups) rather than push the window's
+    minimum past its own default size.
     """
 
     def test_minimum_hint_fits_within_the_default_size(
@@ -1545,9 +1546,9 @@ class TestMainWindowRuns:
             _pump()
             # Showing an offscreen window moves it off the origin;
             # restore the intended client geometry so the saved state
-            # is exactly the geometry the constructor asked for.  The
-            # header's minimum width can exceed the initial width, so
-            # record the geometry Qt actually applied.
+            # is exactly the geometry the constructor asked for.
+            # Qt can still apply a different size, so record the
+            # geometry it actually applied.
             win.setGeometry(0, 0, *gui_window._INITIAL_SIZE)
             _pump()
             applied: QRect = win.geometry()
@@ -2078,7 +2079,7 @@ class TestMaximizeChord:
 
 
 class TestAutoRunToggle:
-    """The auto-run checkbox and the manual run model button."""
+    """The *Auto-run* toggle and the manual *Run model* action."""
 
     def test_run_action_manual_run_with_auto_run_off(
         self,
@@ -2087,7 +2088,7 @@ class TestAutoRunToggle:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """With auto-run off, edits wait for a click on the run button."""
+        """With auto-run off, edits wait for the *Run model* action."""
         calls: list[np.ndarray] = []
         win = _make_window(
             input_data,
@@ -3628,7 +3629,7 @@ class TestBoundsDialog:
 
 
 # ------------------------------------------------------------------ #
-# The header's *Gradients* button: the finite-difference jobs
+# The toolbar's *Gradients* action: the finite-difference jobs
 # ------------------------------------------------------------------ #
 
 
@@ -3777,7 +3778,7 @@ def _only_csv(tmp_path: Path) -> Path:
 
 
 class TestSpinnerLabel:
-    """The header's running-job indicator."""
+    """The toolbar's running-job indicator."""
 
     def test_spinner_label_cycles_frames(self, qapp: QApplication) -> None:
         """
@@ -3818,7 +3819,7 @@ class TestSpinnerLabel:
 
 
 class TestGradients:
-    """The header's *Gradients* button: the finite-difference jobs."""
+    """The toolbar's *Gradients* action: the finite-difference jobs."""
 
     def test_full_mode_job(
         self,
@@ -4225,7 +4226,7 @@ class TestGradients:
         """
         A gradient job reports each completed point as a
         (done, total) step count, so the bar is determinate and the
-        header's spinner spins while the job runs; both go back to
+        toolbar's spinner spins while the job runs; both go back to
         their rest state when the job finishes.
         """
         free = _free_keys(input_data)
@@ -4508,12 +4509,12 @@ class TestLineSearchHelpers:
 
 
 # ------------------------------------------------------------------ #
-# The header's *Line search* button: the steepest-ascent jobs
+# The toolbar's *Line search* action: the steepest-ascent jobs
 # ------------------------------------------------------------------ #
 
 
 class TestLineSearch:
-    """The header's *Line search* button: the steepest-ascent jobs."""
+    """The toolbar's *Line search* action: the steepest-ascent jobs."""
 
     def test_full_mode_job(
         self,
@@ -5754,7 +5755,7 @@ class TestLineSearch:
 
 
 class TestCalibration:
-    """The header's *Calibrate* button and its differential-evolution job."""
+    """The toolbar's *Calibrate* action and its differential-evolution job."""
 
     def test_metric_keys_for_terms(self) -> None:
         """Only the supported metrics map, in first-seen order."""
@@ -5909,17 +5910,17 @@ class TestCalibration:
                 lambda: win._worker is None and win._results is not None
             )
             _pump()
-            # Full mode: the button is disabled and the direct call
+            # Full mode: the action is disabled and the direct call
             # is refused with a message.
             assert not win._calibrate_action.isEnabled()
             win._on_calibrate_clicked()
             assert win._status_label.text() == (
                 "Calibration optimizes the hydrology model only; "
-                "switch the header's *Hydrology only* checkbox on."
+                "switch the toolbar's *Hydrology only* toggle on."
             )
             assert win._worker is None
 
-            # Hydrology-only mode: the button comes up after its run.
+            # Hydrology-only mode: the action comes up after its run.
             win._mode_action.setChecked(True)
             _wait_until(
                 lambda: win._current_mode() == MODE_HYDRO
@@ -5997,7 +5998,7 @@ class TestCalibration:
 
 
 class TestModelSelection:
-    """The header model selector and the state a switch resets."""
+    """The toolbar's model selector and the state a switch resets."""
 
     def test_starts_on_lateral_and_titles_it(
         self,
@@ -7171,7 +7172,7 @@ class TestColumnMappingDialog:
 
 
 class TestLoadData:
-    """The header's Load data action: the file dialog, the role
+    """The File menu's Load data action: the file dialog, the role
     mapping dialog, the record switch, and the switches that carry
     a loaded record's column map."""
 

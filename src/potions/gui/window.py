@@ -17,17 +17,18 @@ debounce covers a drag or a keyboard step) and refresh the figures
 and the table when the run finishes; a generation counter discards
 stale results if the parameters change mid-run.  Plot-selection
 changes rebuild the figures from the last results without
-re-running.  The header's *Auto-run* checkbox (checked by default)
-switches the edit-triggered re-runs off, so a batch of edits can
-wait for one manual run from the *Run model* button.  The header's
-*Hydrology only* checkbox (off by default) switches the run to
+re-running.  The Options menu's *Auto-run* item (checked by
+default) switches the edit-triggered re-runs off, so a batch of
+edits can wait for one manual run from the toolbar's *Run model*
+action.  The toolbar's *Hydrology only* toggle (off by default)
+switches the run to
 hydrology-only mode: only the hydrology model is run, scored
 against the measured streamflow, the reactive-transport parameter
 groups are hidden, the figures reduce to the streamflow figure
 and a figure of each zone's water storage, and the objective
 table carries only the streamflow column.
 
-The header's *Gradients* button differentiates every objective
+The toolbar's *Gradients* action differentiates every objective
 function with respect to every free parameter (a parameter whose
 range has a positive width) by central differences: each
 parameter is nudged up and down by 1% of its current range,
@@ -38,7 +39,7 @@ row per objective function and one column per free parameter, is
 written to a ``gradients_YYYYMMDD_HHMMSS.csv`` file in the results
 directory and drawn as an extra page of the figure panel.
 
-The header's *Line search* button follows the steepest ascent of
+The toolbar's *Line search* action follows the steepest ascent of
 one objective function — chosen from a menu listing the
 objectives the current results report a finite value for, among
 the metrics with 1 as their optimal value — from the current
@@ -51,7 +52,7 @@ the panel, and the value profile is written to a
 ``line_search_YYYYMMDD_HHMMSS.csv`` file in the results directory
 and drawn as an extra page of the figure panel.
 
-The header's *Calibrate* button (available only in hydrology-only
+The toolbar's *Calibrate* action (available only in hydrology-only
 mode) optimizes the free hydrology parameters with differential
 evolution against the checked objective terms: a small dialog asks
 for the generation count, population size, and whether to polish,
@@ -83,7 +84,7 @@ A *Save run* click writes the existing per-run model output, the
 figures as plotted (PNGs into the run directory's ``figures``
 subfolder), and a ``gui_state.json`` capturing the session state,
 so the next start restores exactly what the user saw.  With the
-header's *Save run history* checkbox on, every finished run also
+Options menu's *Save run history* item on, every finished run also
 appends one abbreviated record (timestamp, mode, parameter values,
 objective values) to a ``gui_run_history.jsonl`` file in the
 results directory.
@@ -1965,7 +1966,7 @@ class _StatusLabel(QLabel):
     text, so a long message (a run failure, for instance) would
     push the window's minimum width past a small screen, and the
     window could never be squeezed back below it.  This label
-    reports a small constant minimum hint instead: the header row
+    reports a small constant minimum hint instead: the status bar
     then squeezes the label to that width (clipping the text)
     rather than growing, and the full message stays in the
     label's tooltip.  The size hint still follows the text, so the
@@ -1981,13 +1982,13 @@ class _StatusLabel(QLabel):
 
 class _SpinnerLabel(QLabel):
     """
-    The header's running-job indicator: a small square label that
+    The toolbar's running-job indicator: a small square label that
     cycles through its frames while a job (a run, a gradient
     computation, or a line search) is in flight.
 
     The label is hidden while no job runs and has a fixed square
     footprint (see `_SPINNER_SIZE`), so showing or hiding it never
-    changes the header's minimum width and never resizes the
+    changes the toolbar's minimum width and never resizes the
     window.  While spinning, a timer advances the displayed frame
     on each tick (see `_SPINNER_INTERVAL_MS`).
 
@@ -2134,24 +2135,28 @@ class MainWindow(QMainWindow):
     full mode, plus the gradient and line search pages when those
     jobs have finished) and, below it, a row
     with the fixed-size per-run objective-function table on the
-    left and the parameter panel on the right.  The header row
-    carries the title, a *Hydrology only* checkbox next to it (off
-    by default), a status line, a *Save run history* checkbox (off
-    by default), an *Auto-run* checkbox, and the *Run model*,
-    *Gradients*, *Line search*, *Reset bounds*, and *Save run*
-    buttons.  A thin strip along the window's bottom edge shows an
+    left and the parameter panel on the right.  The window's
+    chrome is a menu bar, a toolbar, and a status bar: the menu
+    bar carries a File menu (the data- and network-sourcing
+    commands) and an Options menu (*Auto-run* and *Save run
+    history* toggles, *Reset bounds*, and *Quit*); the toolbar
+    carries the model and network selectors, the running-job
+    spinner, a *Hydrology only* toggle (off by default), and the
+    *Run model*, *Gradients*, *Line search*, and *Save run*
+    actions; the status line lives in the window's status bar.  A
+    thin strip along the window's bottom edge shows an
     indeterminate progress bar and the elapsed time while a job is
-    in flight; the job indicators are kept out of the header so
-    the window's width never depends on a job's state or the
-    length of a status message.
+    in flight; the spinner has a fixed footprint and the status
+    line can be clipped, so the window's width never depends on a
+    job's state or the length of a status message.
 
     Parameter changes re-run the models on a worker thread, 400 ms
     after the last change, and refresh the figures and the table
     when the run finishes; a generation counter discards stale
     results and starts the next run with the latest values.  With
-    the *Auto-run* checkbox unchecked, edits only mark the results
-    on screen as stale and the *Run model* button starts the run
-    manually.  With the *Hydrology only* checkbox on, a run
+    the *Auto-run* item unchecked, edits only mark the results
+    on screen as stale and the *Run model* action starts the run
+    manually.  With the *Hydrology only* toggle on, a run
     executes the hydrology model alone, scored against the
     measured streamflow: the reactive-transport parameter groups
     and the species / zone / mineral figure checkboxes are hidden,
@@ -2470,9 +2475,9 @@ class MainWindow(QMainWindow):
             "Switch the reaction network.  The measured species, "
             "the figures, the history, and the saved outputs "
             "follow the selected network; switching resets the "
-            "parameters to the new network's defaults.  Use "
-            "*Load network file…*, *Save network as…*, and *Edit "
-            "network…* beside it to work with a network of your "
+            "parameters to the new network's defaults.  The File "
+            "menu's *Load network file…*, *Save network as…*, and "
+            "*Edit network…* items work with a network of your "
             "own."
         )
         for net_key, net_spec in NETWORK_SPECS.items():
@@ -2523,7 +2528,7 @@ class MainWindow(QMainWindow):
         self._auto_run_action.setChecked(True)
         self._auto_run_action.setToolTip(
             "Re-run the models automatically after each parameter "
-            "change.  When unchecked, use the Run model button to "
+            "change.  When unchecked, use the Run model action to "
             "start a run manually."
         )
 
@@ -2666,11 +2671,11 @@ class MainWindow(QMainWindow):
         indeterminate at rest and becomes determinate while a job
         reports its completed steps (`progress_step`); the job's
         finish handlers restore the indeterminate rest state.
-        Keeping the job indicators out of the header row means the
-        header's width — and with it the window's minimum width —
-        is the same whether or not a job is running, so switching
-        between run modes can never push the window past the
-        screen.
+        Keeping the job indicators in this strip — and giving the
+        toolbar spinner a fixed footprint — means the chrome's
+        width, and with it the window's minimum width, is the
+        same whether or not a job is running, so switching between
+        run modes can never push the window past the screen.
         """
         self._progress_bar: QProgressBar = QProgressBar()
         # Range (0, 0): the indeterminate (animated) rest state; a
@@ -2962,7 +2967,7 @@ class MainWindow(QMainWindow):
         the saved-window bits: the checked objective terms (only the
         checked ones: the table cells re-check themselves against
         the restored results), the status note, the window geometry
-        and splitter sizes, the *Save run history* checkbox, and —
+        and splitter sizes, the *Save run history* toggle, and —
         only when the run's record is the window's current one (a
         path mismatch means the session's data did not come from
         that run, so the mapping is ignored, not forced) — the
@@ -3037,8 +3042,8 @@ class MainWindow(QMainWindow):
         The run mode the next run will use.
 
         Returns:
-            `MODE_HYDRO` when the header's *Hydrology only*
-            checkbox is on, `MODE_FULL` otherwise.
+            `MODE_HYDRO` when the toolbar's *Hydrology only*
+            toggle is on, `MODE_FULL` otherwise.
         """
         return MODE_HYDRO if self._mode_action.isChecked() else MODE_FULL
 
@@ -3074,9 +3079,9 @@ class MainWindow(QMainWindow):
 
     def _update_calibrate_action(self) -> None:
         """
-        Sync the calibrate button with the run mode and the job state.
+        Sync the calibrate action with the run mode and the job state.
 
-        Calibration optimizes only the hydrology model, so the button
+        Calibration optimizes only the hydrology model, so the action
         is available only in hydrology-only mode and only when no job
         is in flight.
         """
@@ -3107,13 +3112,13 @@ class MainWindow(QMainWindow):
 
     def _on_run_clicked(self) -> None:
         """
-        The run model button: start a run with the current
+        The *Run model* action: start a run with the current
         parameters.
 
-        Bypasses the auto-run checkbox (the user asked for this run
+        Bypasses the *Auto-run* toggle (the user asked for this run
         explicitly); skipped while a run is in flight or when the
         results on screen already correspond to the current
-        parameters (the button is disabled in both cases, so this
+        parameters (the action is disabled in both cases, so this
         only guards a click that races a run start).
         """
         if self._worker is not None and self._worker.isRunning():
@@ -3260,13 +3265,13 @@ class MainWindow(QMainWindow):
             x_up_to_date and completed_mode == self._current_mode()
         )
         self._save_action.setEnabled(up_to_date)
-        # The run button mirrors the same staleness; it does not look
+        # The run action mirrors the same staleness; it does not look
         # at the worker here because this handler runs before the
         # worker's finished signal clears the reference.
         self._run_action.setEnabled(not up_to_date)
         # No run is in flight any more, so the gradient and the
         # line search jobs can start again (a stale restart below
-        # re-disables them via `_start_run`); the calibrate button
+        # re-disables them via `_start_run`); the calibrate action
         # follows the run mode.
         self._gradients_action.setEnabled(True)
         self._line_search_action.setEnabled(True)
@@ -3288,7 +3293,7 @@ class MainWindow(QMainWindow):
     # ==== Gradients ==== #
     def _on_gradients_clicked(self) -> None:
         """
-        Start a gradient job from the header's *Gradients* button.
+        Start a gradient job from the toolbar's *Gradients* action.
 
         A job already in flight (a model run or an earlier
         gradient job) takes precedence: the click is ignored,
@@ -3433,8 +3438,8 @@ class MainWindow(QMainWindow):
         # No job is in flight by the time this handler runs (the
         # worker's finished signal clears the reference after this
         # one, like in `_on_finished_run`): the run and the save
-        # buttons mirror the results' staleness and the gradients
-        # and line search buttons always come back up.
+        # actions mirror the results' staleness and the gradients
+        # and line search actions always come back up.
         up_to_date: bool = self._results_are_up_to_date()
         self._save_action.setEnabled(up_to_date)
         self._run_action.setEnabled(not up_to_date)
@@ -3446,7 +3451,7 @@ class MainWindow(QMainWindow):
     def _on_line_search_clicked(self) -> None:
         """
         Start a line search of the checked objectives from the
-        *Line search* button.
+        *Line search* action.
 
         The search's objectives are the cells of the objective
         table the user checked (any combination of its KGE, LogKGE,
@@ -3868,7 +3873,7 @@ class MainWindow(QMainWindow):
         if self._current_mode() != MODE_HYDRO:
             self._status(
                 "Calibration optimizes the hydrology model only; "
-                "switch the header's *Hydrology only* checkbox on."
+                "switch the toolbar's *Hydrology only* toggle on."
             )
             return
         table: pd.DataFrame = self._objective_model._table
@@ -4052,7 +4057,7 @@ class MainWindow(QMainWindow):
         """
         Append the finished run to the session's run-history file.
 
-        With the *Save run history* checkbox on, one abbreviated
+        With the *Save run history* toggle on, one abbreviated
         record (timestamp, mode, parameter values, and objective
         values) is appended to the results directory's
         ``gui_run_history.jsonl``; with it off nothing is written.
@@ -4394,7 +4399,7 @@ class MainWindow(QMainWindow):
 
     def _on_mode_changed(self, _enabled: bool) -> None:
         """
-        The header's *Hydrology only* checkbox was toggled.
+        The toolbar's *Hydrology only* toggle was flipped.
 
         The parameter panel hides or shows its reactive-transport
         parts, the window takes the new mode's tint, the results on
@@ -4415,7 +4420,7 @@ class MainWindow(QMainWindow):
 
     def _on_model_changed(self, _index: int) -> None:
         """
-        The header's model selector changed: switch to its model.
+        The toolbar's model selector changed: switch to its model.
 
         The combo's item data is the selected model's spec key; a
         change to the key already loaded is ignored (a programmatic
@@ -4736,7 +4741,7 @@ class MainWindow(QMainWindow):
         history dropdown are cleared rather than re-listed (the
         disk listing would mix runs of other records).
 
-        The run (and the gradient and line search) buttons light
+        The run (and the gradient and line search) actions light
         up; a run the switch asks for is deferred to
         `_on_worker_finished` when a worker is still in flight,
         or started now when auto-run is on.
@@ -5279,7 +5284,7 @@ class MainWindow(QMainWindow):
     # ==== Status ==== #
     def _status(self, text: str) -> None:
         """
-        Set the status line of the header row.
+        Set the window's status-bar line.
 
         The label clips text longer than its maximum width, so the
         full text is mirrored into the label's tooltip.
