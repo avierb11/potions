@@ -2154,6 +2154,17 @@ class MainWindow(QMainWindow):
         # The display name of a custom (non-preset) network, or
         # None when the selector shows a preset entry.
         self._custom_network_name: str | None = network_name
+        # The window's normal (pre-maximize) geometry: captured the
+        # instant the window becomes maximized and updated whenever
+        # the window moves or resizes as a normal window, so a *Save
+        # run* while maximized records it instead of the maximized
+        # client rect (see `_on_save_run`).  None until the first
+        # resize or move.
+        self._normal_geometry: QRect | None = None
+        # Set by `_apply_saved_run` when the restored run was saved
+        # maximized; consumed once by `showEvent`, which defers the
+        # maximize until the window is fully shown.
+        self._restore_maximized: bool = False
 
         self.setWindowTitle(_title_for(self._input_data.spec))
         # The default size is clamped to the screen so a window whose
@@ -2803,6 +2814,10 @@ class MainWindow(QMainWindow):
                 if screen_area is None
                 else _clamped_geometry(requested, screen_area)
             )
+        # The maximized state is restored through the window system
+        # (see `showEvent`), not through the clamped geometry above:
+        # the saved geometry is the run's *normal* geometry.
+        self._restore_maximized = saved.window_maximized
         if saved.splitter_sizes is not None:
             self._splitter.setSizes(saved.splitter_sizes[:2])
         # The checkbox state is part of the saved state; a state
@@ -4830,7 +4845,16 @@ class MainWindow(QMainWindow):
         # The client geometry (rather than the frame's): the restore
         # path applies these values with setGeometry, so saving the
         # frame size would grow the window on every save and restore.
-        geom: QRect = self.geometry()
+        # While maximized the client rect *is* the screen area, so
+        # the tracked normal (pre-maximize) geometry is saved with
+        # the maximized flag instead; the restore then reopens the
+        # window maximized from a sane normal geometry.
+        maximized: bool = self.isMaximized()
+        geom: QRect = (
+            self._normal_geometry
+            if maximized and self._normal_geometry is not None
+            else self.geometry()
+        )
         state: GuiState = GuiState(
             csv_path=self._data_path,
             param_values=self._param_panel.param_values(),
@@ -4855,6 +4879,7 @@ class MainWindow(QMainWindow):
             model_key=self._input_data.spec.key,
             network_fingerprint=fingerprint_network(self._network),
             column_map=self._column_map,
+            window_maximized=maximized,
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(
@@ -5073,6 +5098,50 @@ class MainWindow(QMainWindow):
         """
         self._status_label.setText(text)
         self._status_label.setToolTip(text)
+
+    # ==== Window-state events ==== #
+    def changeEvent(self, event: QEvent) -> None:
+        """
+        Capture the normal geometry the instant the window maximizes.
+
+        Qt delivers `WindowStateChange` before resizing the window to
+        the maximized client area, so at that instant `geometry()` is
+        still the normal geometry — the value a maximized *Save run*
+        records.  Un-maximizing delivers the same event with the
+        maximized geometry, which is deliberately ignored.
+        """
+        if event.type() == QEvent.Type.WindowStateChange and self.isMaximized():
+            self._normal_geometry = self.geometry()
+        super().changeEvent(event)
+
+    def resizeEvent(self, event: QEvent) -> None:
+        """Keep the normal geometry current while the window resizes normally."""
+        if not self.isMaximized():
+            self._normal_geometry = self.geometry()
+        super().resizeEvent(event)
+
+    def moveEvent(self, event: QEvent) -> None:
+        """Keep the normal geometry current while the window moves normally."""
+        if not self.isMaximized():
+            self._normal_geometry = self.geometry()
+        super().moveEvent(event)
+
+    def showEvent(self, event: QEvent) -> None:
+        """
+        Apply a deferred restore-maximize when the window is shown.
+
+        A restored run that was saved maximized maximizes here rather
+        than through its saved client rect.  The maximize is deferred
+        one turn through the event loop: maximizing synchronously
+        inside `showEvent` makes Qt deliver the state changes out of
+        order (a spurious un-maximized `WindowStateChange` after the
+        maximized resize on the offscreen plugin), which would corrupt
+        the tracked normal geometry.
+        """
+        if self._restore_maximized:
+            self._restore_maximized = False
+            QTimer.singleShot(0, self.showMaximized)
+        super().showEvent(event)
 
     # ==== Closing ==== #
     def closeEvent(self, event: QCloseEvent) -> None:

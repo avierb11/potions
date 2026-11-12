@@ -1226,6 +1226,8 @@ class TestMainWindowRuns:
             # distribution scaled to the window's height.  Compare
             # proportions rather than raw pixels.
             assert saved.window_geometry == expected_geometry
+            # The window is a normal window here: the flag is off.
+            assert saved.window_maximized is False
             # The saved list holds the main vertical splitter's
             # laid-out sizes: scaled to the splitter's actual size,
             # with each section clamped to its child's minimum size
@@ -1264,6 +1266,70 @@ class TestMainWindowRuns:
                 "finish before saving."
             )
             assert len(saves) == 2
+        finally:
+            _close_window(win)
+
+    def test_save_run_while_maximized(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A maximized save records the flag and the normal geometry."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            _wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            run_dir: Path = tmp_path / "results" / "run_fake"
+            saves: list[dict[str, object]] = []
+
+            def fake_save(
+                model: pt.Model,
+                hydro: pt.HydroModelResults,
+                rt: pt.RtModelResults,
+                results_dir: Path | None = None,
+            ) -> Path:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                saves.append({"results_dir": results_dir})
+                return run_dir
+
+            win.show()
+            _pump()
+            # Record the geometry Qt actually applied after show (the
+            # offscreen plugin offsets the origin by its fake frame and
+            # expands the window to its content's minimum size hint,
+            # which on this platform is wider than the fake screen —
+            # so maximizing *shrinks* it here; that is fine, what the
+            # save must record is the tracked normal geometry, never
+            # the maximized client rect).
+            win.setGeometry(10, 10, 500, 400)
+            _pump()
+            normal: QRect = win.geometry()
+            win.showMaximized()
+            _pump()
+            assert win.isMaximized()
+            assert win.geometry() != normal  # sanity: truly maximized
+
+            monkeypatch.setattr(gui_window, "save_model_run", fake_save)
+            win._on_save_run()
+            assert len(saves) == 1
+            saved = read_gui_state(run_dir)
+            assert saved is not None
+            assert saved.window_maximized is True
+            assert saved.window_geometry == {
+                "x": normal.x(),
+                "y": normal.y(),
+                "width": normal.width(),
+                "height": normal.height(),
+            }
         finally:
             _close_window(win)
 
