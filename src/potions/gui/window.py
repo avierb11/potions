@@ -134,7 +134,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog as QFileDialog,
@@ -144,13 +143,14 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
-    QPushButton,
     QSplitter,
+    QStatusBar,
     QStyle,
     QStyleOptionButton,
     QStyleOptionViewItem,
     QStyledItemDelegate,
     QTableView,
+    QToolBar,
     QHBoxLayout,
     QVBoxLayout,
     QWidget,
@@ -287,22 +287,19 @@ _INITIAL_SPLIT_SIZES: Final[tuple[int, int]] = (350, 530)
 _STATUS_MIN_WIDTH: Final[int] = 80
 _STATUS_MAX_WIDTH: Final[int] = 350
 
-# The side (px) of the header's running-indicator square.  Its
-# fixed size keeps the header's — and so the window's — minimum
+# The side (px) of the toolbar's running-indicator square.  Its
+# fixed size keeps the toolbar's — and so the window's — minimum
 # width constant whether or not a job is running.
 _SPINNER_SIZE: Final[int] = 24
 
-# Squeeze floors (px) for the header's shrinkable items.  Each
-# item's plain minimum hint is its full text width; summed, the
-# row would pin the window's minimumSizeHint wider than a common
-# screen — and the window manager honors that hint, so the window
-# could never be opened or shrunk onto the screen.  With floors, a
-# narrow window squeezes the row instead: a floored item clips
-# under pressure, its full text staying available in its tooltip
-# or (for the combos) their popups.
-_TITLE_MIN_WIDTH: Final[int] = 140
+# Squeeze floor (px) for the toolbar combos.  A combo's plain
+# minimum hint is the width of its current text; without a floor a
+# narrow toolbar collapses a combo to a sliver that is hard to
+# read or click.  With the floor the combo clips under pressure,
+# its full text staying available in its popup.  (The toolbar
+# itself needs no floor: items that no longer fit move into its
+# extension button instead of widening the window.)
 _COMBO_MIN_WIDTH: Final[int] = 100
-_CONTROL_MIN_WIDTH: Final[int] = 48
 
 # The period (ms) of the running indicator's frame-advance timer.
 _SPINNER_INTERVAL_MS: Final[int] = 100
@@ -2311,9 +2308,9 @@ class MainWindow(QMainWindow):
 
     # ==== Building ==== #
     def _build_ui(self) -> None:
-        """Assemble the header row, the figure, the lower row, and the progress strip."""
+        """Assemble the chrome, the figure, the lower row, and the progress strip."""
         self._build_menus()
-        header: QWidget = self._build_header()
+        self._build_toolbar()
 
         self._figure_panel: FigurePanel = self._build_figure_panel()
         self._build_objective_panel()
@@ -2352,7 +2349,6 @@ class MainWindow(QMainWindow):
         self._build_progress_strip()
         layout: QVBoxLayout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(header)
         layout.addWidget(self._splitter, 1)
         layout.addWidget(self._progress_strip)
         central: QWidget = QWidget(self)
@@ -2417,32 +2413,26 @@ class MainWindow(QMainWindow):
         self._edit_network_action.triggered.connect(self._on_edit_network)
         self._file_menu.addAction(self._edit_network_action)
 
-    def _build_header(self) -> QWidget:
+    def _build_toolbar(self) -> None:
         """
-        Build the header row: title, running indicator, status, and
-        buttons.
+        Build the toolbar and status bar: the window's fixed chrome.
 
-        The row carries the fixed-size running indicator (a
-        `_SpinnerLabel`) next to the title: its footprint does not
-        change with the job state, so the window's minimum width is
-        the same whether or not a job is in flight (the remaining
-        job indicators live in the bottom strip).  The row's items
-        are compressible down to squeeze floors (see
-        `_TITLE_MIN_WIDTH`, `_COMBO_MIN_WIDTH`, and
-        `_CONTROL_MIN_WIDTH`; the status label reports its own
-        small minimum, see `_StatusLabel`), so a narrow window
-        squeezes the row — clipping text whose full content stays
-        in tooltips and combo popups — instead of pushing the
-        window's minimum past the screen.
+        The toolbar carries the model and network selectors, the
+        running indicator (a `_SpinnerLabel`), the job actions, and
+        the hydrology toggle; the status label lives in the window's
+        status bar.  The toolbar is pinned chrome — not movable, not
+        floatable, text-only — because movable chrome can be dragged
+        out of the window frame and left where nothing can reason
+        about it.  A window narrower than the toolbar's full set
+        pushes the items that no longer fit into the toolbar's
+        extension button (»), so the chrome never pins the window's
+        minimum width past the screen.  The combos keep a squeeze
+        floor (see `_COMBO_MIN_WIDTH`) so they stay readable under
+        pressure, and the status label reports its own small minimum
+        and maximum width (see `_StatusLabel`).
         """
-        self._title_label: QLabel = QLabel(_title_for(self._input_data.spec))
-        font: QFont = QFont(self._title_label.font())
-        font.setBold(True)
-        font.setPointSize(max(9, font.pointSize() + 2))
-        self._title_label.setFont(font)
-
         # The running-job indicator: hidden at rest, its fixed size
-        # keeps the row's footprint constant either way.
+        # keeps the toolbar's footprint constant either way.
         self._job_spinner: _SpinnerLabel = _SpinnerLabel()
 
         # The model selector: one entry per curated model spec, the
@@ -2489,8 +2479,9 @@ class MainWindow(QMainWindow):
         )
 
         # Off by default: the models run in full mode.
-        self._mode_checkbox: QCheckBox = QCheckBox("Hydrology only")
-        self._mode_checkbox.setToolTip(
+        self._mode_action: QAction = QAction("Hydrology only", self)
+        self._mode_action.setCheckable(True)
+        self._mode_action.setToolTip(
             "Run only the hydrology model, scored against the "
             "measured streamflow.  When checked, the reactive-"
             "transport parameter groups and the species / zone / "
@@ -2499,40 +2490,48 @@ class MainWindow(QMainWindow):
             "zone's water storage, and the objective table carries "
             "only the streamflow column."
         )
-        self._mode_checkbox.toggled.connect(self._on_mode_changed)
+        self._mode_action.toggled.connect(self._on_mode_changed)
 
         self._status_label: _StatusLabel = _StatusLabel("Preparing…")
         self._status_label.setStyleSheet("color: gray;")
         self._status_label.setMaximumWidth(_STATUS_MAX_WIDTH)
 
-        self._save_history_checkbox: QCheckBox = QCheckBox(
-            "Save run history"
+        self._save_history_action: QAction = QAction(
+            "Save run history", self
         )
+        self._save_history_action.setCheckable(True)
         # Off by default: the history file only grows when the user
         # opts in.
-        self._save_history_checkbox.setChecked(False)
-        self._save_history_checkbox.setToolTip(
+        self._save_history_action.setChecked(False)
+        self._save_history_action.setToolTip(
             "Append an abbreviated record of each finished run (the "
             "timestamp, mode, parameter values, and objective "
             "values) to gui_run_history.jsonl in the results "
             "directory."
         )
 
-        self._auto_run_checkbox: QCheckBox = QCheckBox("Auto-run")
-        self._auto_run_checkbox.setChecked(True)
-        self._auto_run_checkbox.setToolTip(
+        # No `triggered` connection: the window polls `isChecked()`
+        # at the points of use.
+        self._auto_run_action: QAction = QAction("Auto-run", self)
+        self._auto_run_action.setCheckable(True)
+        self._auto_run_action.setChecked(True)
+        self._auto_run_action.setToolTip(
             "Re-run the models automatically after each parameter "
             "change.  When unchecked, use the Run model button to "
             "start a run manually."
         )
 
-        self._run_button: QPushButton = QPushButton("Run model")
-        self._run_button.clicked.connect(self._on_run_clicked)
-        self._run_button.setEnabled(False)
+        # The job actions.  `triggered` replaces `clicked`; where an
+        # action carries no more specific tooltip its own text serves
+        # as one (Run model, Save run, Reset bounds).
+        self._run_action: QAction = QAction("Run model", self)
+        self._run_action.triggered.connect(self._on_run_clicked)
+        self._run_action.setEnabled(False)
+        self._run_action.setToolTip("Run model")
 
-        self._gradients_button: QPushButton = QPushButton("Gradients")
-        self._gradients_button.clicked.connect(self._on_gradients_clicked)
-        self._gradients_button.setToolTip(
+        self._gradients_action: QAction = QAction("Gradients", self)
+        self._gradients_action.triggered.connect(self._on_gradients_clicked)
+        self._gradients_action.setToolTip(
             "Differentiate every objective function with respect "
             "to every free parameter by central differences (each "
             "parameter is nudged up and down by 1% of its current "
@@ -2545,9 +2544,11 @@ class MainWindow(QMainWindow):
             "drawn as an extra page of the figure panel."
         )
 
-        self._line_search_button: QPushButton = QPushButton("Line search")
-        self._line_search_button.clicked.connect(self._on_line_search_clicked)
-        self._line_search_button.setToolTip(
+        self._line_search_action: QAction = QAction("Line search", self)
+        self._line_search_action.triggered.connect(
+            self._on_line_search_clicked
+        )
+        self._line_search_action.setToolTip(
             "Follow the steepest ascent of the selected objective "
             "functions' equal-weighted sum from the current "
             "parameters: check the cells of the objective table to "
@@ -2568,10 +2569,10 @@ class MainWindow(QMainWindow):
             "page of the figure panel."
         )
 
-        self._calibrate_button: QPushButton = QPushButton("Calibrate")
-        self._calibrate_button.clicked.connect(self._on_calibrate_clicked)
-        self._calibrate_button.setEnabled(False)
-        self._calibrate_button.setToolTip(
+        self._calibrate_action: QAction = QAction("Calibrate", self)
+        self._calibrate_action.triggered.connect(self._on_calibrate_clicked)
+        self._calibrate_action.setEnabled(False)
+        self._calibrate_action.setToolTip(
             "Optimize the free hydrology parameters with differential "
             "evolution against the checked objective terms (or every "
             "selectable term when none is checked).  A parameter "
@@ -2580,71 +2581,61 @@ class MainWindow(QMainWindow):
             "Available in hydrology-only mode."
         )
 
-        self._reset_button: QPushButton = QPushButton("Reset bounds")
-        self._reset_button.clicked.connect(self._on_reset_bounds)
+        self._reset_action: QAction = QAction("Reset bounds", self)
+        self._reset_action.triggered.connect(self._on_reset_bounds)
+        self._reset_action.setToolTip("Reset bounds")
 
-        self._save_button: QPushButton = QPushButton("Save run")
-        self._save_button.clicked.connect(self._on_save_run)
-        self._save_button.setEnabled(False)
+        self._save_action: QAction = QAction("Save run", self)
+        self._save_action.triggered.connect(self._on_save_run)
+        self._save_action.setEnabled(False)
+        self._save_action.setToolTip("Save run")
 
-        # Squeeze floors for the row's shrinkable items (see the
-        # `_TITLE_MIN_WIDTH` group above): without them every item
-        # reports its full text width as its minimum and the row
-        # would pin the window's minimumSizeHint wider than a
-        # common screen.  Clipped items keep their full text
-        # available — the combos in their popups, the checkboxes
-        # and buttons in tooltips, falling back to the item's own
-        # text where a button carries no more specific one.
-        self._title_label.setMinimumWidth(_TITLE_MIN_WIDTH)
-        self._title_label.setToolTip(self._title_label.text())
+        # Squeeze floor for the toolbar combos: without it a combo
+        # collapses to the width of its current text and becomes
+        # hard to read or click; with it a squeezed combo clips, its
+        # full text staying available in its popup.  (The toolbar
+        # itself needs no floor: items that no longer fit move into
+        # its extension button instead of widening the window.)
         combos: tuple[QComboBox, ...] = (
             self._model_combo,
             self._network_combo,
         )
         for combo in combos:
             combo.setMinimumWidth(_COMBO_MIN_WIDTH)
-        controls: tuple[QPushButton | QCheckBox, ...] = (
-            self._mode_checkbox,
-            self._save_history_checkbox,
-            self._auto_run_checkbox,
-            self._run_button,
-            self._gradients_button,
-            self._line_search_button,
-            self._calibrate_button,
-            self._reset_button,
-            self._save_button,
-        )
-        for control in controls:
-            control.setMinimumWidth(_CONTROL_MIN_WIDTH)
-            if not control.toolTip():
-                control.setToolTip(control.text())
 
-        layout: QHBoxLayout = QHBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
-        layout.addWidget(self._title_label)
-        layout.addWidget(self._job_spinner)
-        layout.addWidget(self._model_combo)
-        layout.addWidget(self._network_combo)
-        layout.addWidget(self._mode_checkbox)
-        layout.addStretch(1)
-        # The status label stretches with the middle stretch (both
-        # factor 1) up to its maximum width; beyond that the middle
-        # stretch absorbs the rest, so the label can grow but never
-        # forces the row wider than the other items.
-        layout.addWidget(self._status_label, 1)
-        layout.addWidget(self._save_history_checkbox)
-        layout.addWidget(self._auto_run_checkbox)
-        layout.addWidget(self._run_button)
-        layout.addWidget(self._gradients_button)
-        layout.addWidget(self._line_search_button)
-        layout.addWidget(self._calibrate_button)
-        layout.addWidget(self._reset_button)
-        layout.addWidget(self._save_button)
+        self._toolbar: QToolBar = QToolBar("Main toolbar")
+        self._toolbar.setObjectName("main_toolbar")
+        self._toolbar.setMovable(False)
+        self._toolbar.setFloatable(False)
+        self._toolbar.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self.addToolBar(self._toolbar)
+        self._toolbar.addWidget(self._model_combo)
+        self._toolbar.addWidget(self._network_combo)
+        self._toolbar.addSeparator()
+        self._toolbar.addAction(self._run_action)
+        self._toolbar.addAction(self._gradients_action)
+        self._toolbar.addAction(self._line_search_action)
+        self._toolbar.addAction(self._calibrate_action)
+        self._toolbar.addAction(self._save_action)
+        self._toolbar.addSeparator()
+        self._toolbar.addWidget(self._job_spinner)
+        self._toolbar.addAction(self._mode_action)
+        self._toolbar.addSeparator()
+        # Settings actions and Reset bounds: temporary toolbar
+        # residents until the Options menu takes them.
+        self._toolbar.addAction(self._save_history_action)
+        self._toolbar.addAction(self._auto_run_action)
+        self._toolbar.addAction(self._reset_action)
+
+        # The status label shares the bar with the bar's own stretch
+        # (factor 1) up to its maximum width; beyond that the bar
+        # absorbs the rest, so the label can grow but never forces
+        # the window wider.
+        self.statusBar().addWidget(self._status_label, 1)
+
         self._sync_network_selector()
-        header: QWidget = QWidget(self)
-        header.setLayout(layout)
-        return header
 
     def _build_progress_strip(self) -> None:
         """
@@ -3001,7 +2992,7 @@ class MainWindow(QMainWindow):
             self._splitter.setSizes(saved.splitter_sizes[:2])
         # The checkbox state is part of the saved state; a state
         # saved before the toggle existed restores it off.
-        self._save_history_checkbox.setChecked(saved.save_history)
+        self._save_history_action.setChecked(saved.save_history)
         # A saved mapping applies only to the record it was read
         # from: a run saved on another record (or the shipped one,
         # which reads by auto-detection) must not rename the
@@ -3030,7 +3021,7 @@ class MainWindow(QMainWindow):
             `MODE_HYDRO` when the header's *Hydrology only*
             checkbox is on, `MODE_FULL` otherwise.
         """
-        return MODE_HYDRO if self._mode_checkbox.isChecked() else MODE_FULL
+        return MODE_HYDRO if self._mode_action.isChecked() else MODE_FULL
 
     def _results_are_up_to_date(self) -> bool:
         """
@@ -3049,7 +3040,7 @@ class MainWindow(QMainWindow):
             and np.array_equal(self._current_x(), self._last_run_x)
         )
 
-    def _update_run_button(self) -> None:
+    def _update_run_action(self) -> None:
         """
         Sync the run button's enabled state with the window's.
 
@@ -3058,11 +3049,11 @@ class MainWindow(QMainWindow):
         the current parameters, that is, exactly when a manual run
         would produce new results.
         """
-        self._run_button.setEnabled(
+        self._run_action.setEnabled(
             self._worker is None and not self._results_are_up_to_date()
         )
 
-    def _update_calibrate_button(self) -> None:
+    def _update_calibrate_action(self) -> None:
         """
         Sync the calibrate button with the run mode and the job state.
 
@@ -3071,7 +3062,7 @@ class MainWindow(QMainWindow):
         is in flight.
         """
         busy: bool = self._worker is not None and self._worker.isRunning()
-        self._calibrate_button.setEnabled(
+        self._calibrate_action.setEnabled(
             not busy and self._current_mode() == MODE_HYDRO
         )
 
@@ -3087,7 +3078,7 @@ class MainWindow(QMainWindow):
         here also covers a debounce that outlives the checkbox being
         turned off).
         """
-        if not self._auto_run_checkbox.isChecked():
+        if not self._auto_run_action.isChecked():
             return
         if self._worker is not None and self._worker.isRunning():
             return
@@ -3124,11 +3115,11 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
         self._job_spinner.set_spinning(True)
-        self._run_button.setEnabled(False)
-        self._save_button.setEnabled(False)
-        self._gradients_button.setEnabled(False)
-        self._line_search_button.setEnabled(False)
-        self._calibrate_button.setEnabled(False)
+        self._run_action.setEnabled(False)
+        self._save_action.setEnabled(False)
+        self._gradients_action.setEnabled(False)
+        self._line_search_action.setEnabled(False)
+        self._calibrate_action.setEnabled(False)
         self._status("Running the model…")
 
         worker: _RunWorker = _RunWorker(
@@ -3174,13 +3165,13 @@ class MainWindow(QMainWindow):
         if not self._pending_run_after_worker:
             return
         self._pending_run_after_worker = False
-        if self._auto_run_checkbox.isChecked():
+        if self._auto_run_action.isChecked():
             self._start_run(self._current_x())
         else:
-            self._run_button.setEnabled(True)
-            self._gradients_button.setEnabled(True)
-            self._line_search_button.setEnabled(True)
-            self._update_calibrate_button()
+            self._run_action.setEnabled(True)
+            self._gradients_action.setEnabled(True)
+            self._line_search_action.setEnabled(True)
+            self._update_calibrate_action()
 
     def _on_finished_run(self, payload: object) -> None:
         """
@@ -3249,18 +3240,18 @@ class MainWindow(QMainWindow):
         up_to_date: bool = (
             x_up_to_date and completed_mode == self._current_mode()
         )
-        self._save_button.setEnabled(up_to_date)
+        self._save_action.setEnabled(up_to_date)
         # The run button mirrors the same staleness; it does not look
         # at the worker here because this handler runs before the
         # worker's finished signal clears the reference.
-        self._run_button.setEnabled(not up_to_date)
+        self._run_action.setEnabled(not up_to_date)
         # No run is in flight any more, so the gradient and the
         # line search jobs can start again (a stale restart below
         # re-disables them via `_start_run`); the calibrate button
         # follows the run mode.
-        self._gradients_button.setEnabled(True)
-        self._line_search_button.setEnabled(True)
-        self._update_calibrate_button()
+        self._gradients_action.setEnabled(True)
+        self._line_search_action.setEnabled(True)
+        self._update_calibrate_action()
         # The parameters or the mode changed while this run was in
         # flight: the results are stale, so start the next one with
         # the latest values (this is what the generation counter is
@@ -3271,7 +3262,7 @@ class MainWindow(QMainWindow):
                 not np.array_equal(completed_x, self._current_x())
                 or completed_mode != self._current_mode()
             )
-            and self._auto_run_checkbox.isChecked()
+            and self._auto_run_action.isChecked()
         ):
             self._start_run(self._current_x())
 
@@ -3320,11 +3311,11 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
         self._job_spinner.set_spinning(True)
-        self._run_button.setEnabled(False)
-        self._save_button.setEnabled(False)
-        self._gradients_button.setEnabled(False)
-        self._line_search_button.setEnabled(False)
-        self._calibrate_button.setEnabled(False)
+        self._run_action.setEnabled(False)
+        self._save_action.setEnabled(False)
+        self._gradients_action.setEnabled(False)
+        self._line_search_action.setEnabled(False)
+        self._calibrate_action.setEnabled(False)
         self._status("Computing gradients…")
 
         worker: _GradientWorker = _GradientWorker(
@@ -3380,10 +3371,10 @@ class MainWindow(QMainWindow):
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it and restore
             # the job buttons the switch left disabled.
-            self._gradients_button.setEnabled(True)
-            self._line_search_button.setEnabled(True)
-            self._update_calibrate_button()
-            self._update_run_button()
+            self._gradients_action.setEnabled(True)
+            self._line_search_action.setEnabled(True)
+            self._update_calibrate_action()
+            self._update_run_action()
             return
         if outcome.error is not None:
             self._status(f"Gradients failed: {outcome.error}")
@@ -3426,11 +3417,11 @@ class MainWindow(QMainWindow):
         # buttons mirror the results' staleness and the gradients
         # and line search buttons always come back up.
         up_to_date: bool = self._results_are_up_to_date()
-        self._save_button.setEnabled(up_to_date)
-        self._run_button.setEnabled(not up_to_date)
-        self._gradients_button.setEnabled(True)
-        self._line_search_button.setEnabled(True)
-        self._update_calibrate_button()
+        self._save_action.setEnabled(up_to_date)
+        self._run_action.setEnabled(not up_to_date)
+        self._gradients_action.setEnabled(True)
+        self._line_search_action.setEnabled(True)
+        self._update_calibrate_action()
 
     # ==== Line search ==== #
     def _on_line_search_clicked(self) -> None:
@@ -3628,11 +3619,11 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
         self._job_spinner.set_spinning(True)
-        self._run_button.setEnabled(False)
-        self._save_button.setEnabled(False)
-        self._gradients_button.setEnabled(False)
-        self._line_search_button.setEnabled(False)
-        self._calibrate_button.setEnabled(False)
+        self._run_action.setEnabled(False)
+        self._save_action.setEnabled(False)
+        self._gradients_action.setEnabled(False)
+        self._line_search_action.setEnabled(False)
+        self._calibrate_action.setEnabled(False)
         if len(terms_list) == 1:
             self._status(f"Line search in progress: {terms_list[0]} …")
         else:
@@ -3699,8 +3690,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
-        self._gradients_button.setEnabled(True)
-        self._line_search_button.setEnabled(True)
+        self._gradients_action.setEnabled(True)
+        self._line_search_action.setEnabled(True)
 
         if not isinstance(payload, _LineSearchOutcome):
             return
@@ -3709,8 +3700,8 @@ class MainWindow(QMainWindow):
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it (the job
             # buttons were already restored above).
-            self._update_calibrate_button()
-            self._update_run_button()
+            self._update_calibrate_action()
+            self._update_run_action()
             return
         if (
             outcome.error is not None
@@ -3725,9 +3716,9 @@ class MainWindow(QMainWindow):
             # this one, like in `_on_finished_gradient`): the run
             # and the save buttons mirror the results' staleness.
             up_to_date: bool = self._results_are_up_to_date()
-            self._save_button.setEnabled(up_to_date)
-            self._run_button.setEnabled(not up_to_date)
-            self._update_calibrate_button()
+            self._save_action.setEnabled(up_to_date)
+            self._run_action.setEnabled(not up_to_date)
+            self._update_calibrate_action()
             return
 
         # The best point is the profile's largest finite value.
@@ -3789,9 +3780,9 @@ class MainWindow(QMainWindow):
                 )
             self._status(no_improvement_message)
             up_to_date = self._results_are_up_to_date()
-            self._save_button.setEnabled(up_to_date)
-            self._run_button.setEnabled(not up_to_date)
-            self._update_calibrate_button()
+            self._save_action.setEnabled(up_to_date)
+            self._run_action.setEnabled(not up_to_date)
+            self._update_calibrate_action()
             return
 
         bounds: dict[str, tuple[float, float]] = (
@@ -3833,9 +3824,9 @@ class MainWindow(QMainWindow):
         # where the panel now sits and the job ran in the current
         # mode; the run button mirrors the same staleness.
         up_to_date = self._results_are_up_to_date()
-        self._save_button.setEnabled(up_to_date)
-        self._run_button.setEnabled(not up_to_date)
-        self._update_calibrate_button()
+        self._save_action.setEnabled(up_to_date)
+        self._run_action.setEnabled(not up_to_date)
+        self._update_calibrate_action()
 
     # ==== Calibration ==== #
     def _on_calibrate_clicked(self) -> None:
@@ -3930,11 +3921,11 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
         self._job_spinner.set_spinning(True)
-        self._run_button.setEnabled(False)
-        self._save_button.setEnabled(False)
-        self._gradients_button.setEnabled(False)
-        self._line_search_button.setEnabled(False)
-        self._calibrate_button.setEnabled(False)
+        self._run_action.setEnabled(False)
+        self._save_action.setEnabled(False)
+        self._gradients_action.setEnabled(False)
+        self._line_search_action.setEnabled(False)
+        self._calibrate_action.setEnabled(False)
         self._status("Calibrating the hydrology model…")
 
         worker: _CalibrationWorker = _CalibrationWorker(
@@ -3977,8 +3968,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
-        self._gradients_button.setEnabled(True)
-        self._line_search_button.setEnabled(True)
+        self._gradients_action.setEnabled(True)
+        self._line_search_action.setEnabled(True)
 
         if not isinstance(payload, _CalibrationOutcome):
             return
@@ -3986,8 +3977,8 @@ class MainWindow(QMainWindow):
         if outcome.model_key != self._input_data.spec.key:
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it.
-            self._update_calibrate_button()
-            self._update_run_button()
+            self._update_calibrate_action()
+            self._update_run_action()
             return
         if (
             outcome.error is not None
@@ -3996,9 +3987,9 @@ class MainWindow(QMainWindow):
         ):
             self._status(f"Calibration failed: {outcome.error}")
             up_to_date: bool = self._results_are_up_to_date()
-            self._save_button.setEnabled(up_to_date)
-            self._run_button.setEnabled(not up_to_date)
-            self._update_calibrate_button()
+            self._save_action.setEnabled(up_to_date)
+            self._run_action.setEnabled(not up_to_date)
+            self._update_calibrate_action()
             return
 
         bounds: dict[str, tuple[float, float]] = (
@@ -4034,9 +4025,9 @@ class MainWindow(QMainWindow):
             f"the best parameters are in the panel and {saved_text}"
         )
         up_to_date = self._results_are_up_to_date()
-        self._save_button.setEnabled(up_to_date)
-        self._run_button.setEnabled(not up_to_date)
-        self._update_calibrate_button()
+        self._save_action.setEnabled(up_to_date)
+        self._run_action.setEnabled(not up_to_date)
+        self._update_calibrate_action()
 
     def _record_run_history(self) -> None:
         """
@@ -4051,7 +4042,7 @@ class MainWindow(QMainWindow):
         `append_run_history`).
         """
         if (
-            not self._save_history_checkbox.isChecked()
+            not self._save_history_action.isChecked()
             or self._results is None
         ):
             return
@@ -4353,16 +4344,16 @@ class MainWindow(QMainWindow):
         # The run mode is part of the entry too: the checkbox and
         # the panel's visibility follow it (the checkbox's signal
         # is blocked, so the restore does not trigger a re-run).
-        self._mode_checkbox.blockSignals(True)
-        self._mode_checkbox.setChecked(mode == MODE_HYDRO)
-        self._mode_checkbox.blockSignals(False)
+        self._mode_action.blockSignals(True)
+        self._mode_action.setChecked(mode == MODE_HYDRO)
+        self._mode_action.blockSignals(False)
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
         self._set_mode_tint(mode)
         self._last_run_mode = mode
-        self._save_button.setEnabled(True)
+        self._save_action.setEnabled(True)
         # The restored results correspond to the restored parameters,
         # so there is nothing for a manual run to do yet.
-        self._update_run_button()
+        self._update_run_action()
         self._refresh_from_results()
 
     # ==== Parameter panel ==== #
@@ -4397,10 +4388,10 @@ class MainWindow(QMainWindow):
         mode: str = self._current_mode()
         self._param_panel.set_hydro_only(mode == MODE_HYDRO)
         self._set_mode_tint(mode)
-        self._update_run_button()
-        self._update_calibrate_button()
+        self._update_run_action()
+        self._update_calibrate_action()
         self._sync_objective_selection(self._selectable_objective_terms())
-        if self._auto_run_checkbox.isChecked():
+        if self._auto_run_action.isChecked():
             self._debounce_timer.start()
 
     def _on_model_changed(self, _index: int) -> None:
@@ -4502,11 +4493,6 @@ class MainWindow(QMainWindow):
             and _run_matches_network(run, fingerprint_network(self._network))
         ]
         self._sync_history_combo()
-        self._title_label.setText(_title_for(spec))
-        # The header can clip the title under squeeze; the tooltip
-        # (set again here, since the text changed) keeps the full
-        # title readable.
-        self._title_label.setToolTip(_title_for(spec))
         self.setWindowTitle(_title_for(spec))
         self._status(f"Switched to {spec.display_name}.")
         if not start_run:
@@ -4514,12 +4500,12 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._pending_run_after_worker = True
             return
-        if self._auto_run_checkbox.isChecked():
+        if self._auto_run_action.isChecked():
             self._start_run(self._current_x())
         else:
-            self._run_button.setEnabled(True)
-            self._gradients_button.setEnabled(True)
-            self._line_search_button.setEnabled(True)
+            self._run_action.setEnabled(True)
+            self._gradients_action.setEnabled(True)
+            self._line_search_action.setEnabled(True)
 
     def _sync_network_selector(self, name: str | None = None) -> None:
         """
@@ -4705,12 +4691,12 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._pending_run_after_worker = True
             return
-        if self._auto_run_checkbox.isChecked():
+        if self._auto_run_action.isChecked():
             self._start_run(self._current_x())
         else:
-            self._run_button.setEnabled(True)
-            self._gradients_button.setEnabled(True)
-            self._line_search_button.setEnabled(True)
+            self._run_action.setEnabled(True)
+            self._gradients_action.setEnabled(True)
+            self._line_search_action.setEnabled(True)
 
     def _switch_data(
         self,
@@ -4769,12 +4755,12 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._pending_run_after_worker = True
             return
-        if self._auto_run_checkbox.isChecked():
+        if self._auto_run_action.isChecked():
             self._start_run(self._current_x())
         else:
-            self._run_button.setEnabled(True)
-            self._gradients_button.setEnabled(True)
-            self._line_search_button.setEnabled(True)
+            self._run_action.setEnabled(True)
+            self._gradients_action.setEnabled(True)
+            self._line_search_action.setEnabled(True)
 
     def _on_load_data(self) -> None:
         """
@@ -4898,8 +4884,8 @@ class MainWindow(QMainWindow):
         The run button always reflects the new staleness of the
         results on screen, so it can start the run manually.
         """
-        self._update_run_button()
-        if self._auto_run_checkbox.isChecked():
+        self._update_run_action()
+        if self._auto_run_action.isChecked():
             self._debounce_timer.start()
 
     def _on_bounds_changed(self, _key: str, _lo: float, _hi: float) -> None:
@@ -4907,8 +4893,8 @@ class MainWindow(QMainWindow):
         A parameter range changed (the value changed with it):
         re-run after the debounce, when auto-run is on.
         """
-        self._update_run_button()
-        if self._auto_run_checkbox.isChecked():
+        self._update_run_action()
+        if self._auto_run_action.isChecked():
             self._debounce_timer.start()
 
     def _on_selection_changed(self, _selection: PlotSelection) -> None:
@@ -4931,8 +4917,8 @@ class MainWindow(QMainWindow):
             return
         self._param_panel.reset_bounds()
         self._status("Parameter ranges reset to their loaded defaults.")
-        self._update_run_button()
-        if self._auto_run_checkbox.isChecked():
+        self._update_run_action()
+        if self._auto_run_action.isChecked():
             self._debounce_timer.start()
 
     # ==== Save ==== #
@@ -5052,7 +5038,7 @@ class MainWindow(QMainWindow):
             splitter_sizes=[
                 int(size) for size in self._splitter.sizes()
             ],
-            save_history=self._save_history_checkbox.isChecked(),
+            save_history=self._save_history_action.isChecked(),
             mode=self._current_mode(),
             objective_terms=(
                 list(self._objective_terms)

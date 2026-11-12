@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QFont,
     QKeyEvent,
+    QKeySequence,
     QImage,
     QMouseEvent,
 )
@@ -68,9 +69,13 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSizePolicy,
+    QStatusBar,
+    QToolBar,
+    QToolButton,
     QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 import potions as pt
@@ -460,12 +465,12 @@ class TestMainWindowStartup:
             assert re.fullmatch(
                 r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
             )
-            assert win._save_button.isEnabled()
+            assert win._save_action.isEnabled()
             # The run-history toggle starts off.
-            assert not win._save_history_checkbox.isChecked()
+            assert not win._save_history_action.isChecked()
             # The results on screen correspond to the current
             # parameters, so a manual run would do nothing.
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
             # The progress strip (bar and elapsed label) is hidden when
             # no job is in flight.  `isHidden()` only reflects a
             # widget's own visibility flag, so assert the strip rather
@@ -809,9 +814,9 @@ class TestMainWindowStartup:
                 "Restored the most recent saved run; the figures were "
                 "built from its saved output."
             )
-            assert win._save_button.isEnabled()
+            assert win._save_action.isEnabled()
             # The restored results match the restored parameters.
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
             assert panel.current_bounds() == dict(input_data.bounds)
@@ -819,7 +824,7 @@ class TestMainWindowStartup:
                 input_data.spec, window=input_data.window
             )
             # The save-history toggle is part of the saved state.
-            assert win._save_history_checkbox.isChecked()
+            assert win._save_history_action.isChecked()
             # The saved 1100×800 at (10, 20) is clamped to the
             # patched screen area: the size caps to it and the
             # origin pulls back to its corner.
@@ -958,10 +963,10 @@ class TestMainWindowStartup:
             assert win.height() == min(
                 gui_window._INITIAL_SIZE[1], available.height()
             )
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
             # No saved state carried the toggle: it restores off.
-            assert not win._save_history_checkbox.isChecked()
+            assert not win._save_history_action.isChecked()
             _assert_restored_dir(win, run_dir)
         finally:
             _close_window(win)
@@ -997,7 +1002,7 @@ class TestMainWindowStartup:
             # running either model.
             assert calls == []
             assert hydro_calls == []
-            assert win._mode_checkbox.isChecked()
+            assert win._mode_action.isChecked()
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
             win.show()
@@ -1019,8 +1024,8 @@ class TestMainWindowStartup:
             assert win._objective_model.columnCount() == 1
             assert win._results is not None
             assert win._results.rt is None
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
             assert win._status_label.text() == (
                 "Restored the most recent saved run; the figures were "
                 "built from its saved output."
@@ -1067,6 +1072,153 @@ class TestWindowMenus:
             assert texts and all(
                 action.toolTip() for action in win._file_menu.actions()
             )
+        finally:
+            _close_window(win)
+
+
+# ------------------------------------------------------------------ #
+# MainWindow: toolbar and status bar
+# ------------------------------------------------------------------ #
+
+
+class TestWindowToolbar:
+    """
+    The window's chrome: a fixed toolbar and a bottom status bar.
+
+    The toolbar replaces the old header row.  It is pinned chrome
+    (not movable, not floatable, text-only), and a window too narrow
+    for its full set reaches the overflow actions through the
+    toolbar's extension button (») instead of pinning the window's
+    minimum width.
+    """
+
+    def test_toolbar_is_fixed_chrome(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The toolbar cannot be dragged, floated, or shown as icons."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            assert not win._toolbar.isMovable()
+            assert not win._toolbar.isFloatable()
+            assert (
+                win._toolbar.toolButtonStyle()
+                == Qt.ToolButtonStyle.ToolButtonTextOnly
+            )
+        finally:
+            _close_window(win)
+
+    def test_toolbar_carries_the_combos_spinner_and_job_actions_in_order(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The toolbar's items are the combos, the job actions, and the mode toggle."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            # `actions()` also contains the `QWidgetAction` wrappers
+            # of the combos and the spinner; those tell apart from
+            # the real toolbar actions by type.
+            labels = [
+                a.text() if not a.isSeparator() else "—"
+                for a in win._toolbar.actions()
+                if not isinstance(a, QWidgetAction)
+            ]
+            # Interim list: Auto-run / Save run history / Reset bounds
+            # are toolbar residents only until Task 3 moves them to
+            # the Options menu.
+            assert labels == [
+                "—",
+                "Run model",
+                "Gradients",
+                "Line search",
+                "Calibrate",
+                "Save run",
+                "—",
+                "Hydrology only",
+                "—",
+                "Save run history",
+                "Auto-run",
+                "Reset bounds",
+            ]
+            assert win._mode_action.isCheckable()
+            for widget in (win._model_combo, win._network_combo, win._job_spinner):
+                assert isinstance(widget.parent(), QToolBar)
+        finally:
+            _close_window(win)
+
+    def test_status_label_lives_in_the_status_bar(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The status label moved from the header row to the status bar."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            assert isinstance(win._status_label.parent(), QStatusBar)
+            assert win._status_label.maximumWidth() == gui_window._STATUS_MAX_WIDTH
+        finally:
+            _close_window(win)
+
+    def test_narrow_window_elides_the_toolbar(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A window narrower than the toolbar shows the extension button (»)."""
+        calls: list[np.ndarray] = []
+        win = _make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            _fake_results_factory(calls, input_data),
+        )
+        try:
+            # Qt's private extension button (») is a child tool
+            # button with this object name; it becomes visible only
+            # when the toolbar must elide items.
+            extension = win._toolbar.findChild(
+                QToolButton, "qt_toolbar_ext_button"
+            )
+            assert extension is not None
+            win.show()
+            _pump(50)
+            win.resize(1600, 700)
+            _pump(50)
+            assert not extension.isVisible()
+            win.resize(700, 700)
+            _pump(50)
+            assert extension.isVisible()
+            win.resize(1600, 700)
+            _pump(50)
+            assert not extension.isVisible()
         finally:
             _close_window(win)
 
@@ -1157,8 +1309,8 @@ class TestMainWindowRuns:
             assert re.fullmatch(
                 r"Run 2 finished in \d+\.\d s\.", win._status_label.text()
             )
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -1188,7 +1340,7 @@ class TestMainWindowRuns:
             # history file.
             assert not history_file.is_file()
 
-            win._save_history_checkbox.setChecked(True)
+            win._save_history_action.setChecked(True)
             row = win._param_panel._rows["proportion.1"]
             assert isinstance(row, gui_param_panel._FreeCell)
             row._spin.setValue(0.775)
@@ -1226,7 +1378,7 @@ class TestMainWindowRuns:
             ).tzinfo is not None
 
             # With the toggle off again the history stays put.
-            win._save_history_checkbox.setChecked(False)
+            win._save_history_action.setChecked(False)
             row._spin.setValue(0.825)
             _wait_until(
                 lambda: win._run_generation == 3 and win._worker is None
@@ -1261,9 +1413,9 @@ class TestMainWindowRuns:
             )
             assert win._results is None
             assert win._last_run_x is None
-            assert not win._save_button.isEnabled()
+            assert not win._save_action.isEnabled()
             # No valid results on screen: a manual run can retry.
-            assert win._run_button.isEnabled()
+            assert win._run_action.isEnabled()
             assert win._figure_panel.page_count() == 0
             # No objectives were reported: the table keeps its metric
             # rows but carries no target columns.
@@ -1307,8 +1459,8 @@ class TestMainWindowRuns:
                 ("Water volume error", message)
             ]
             assert win._results is None
-            assert not win._save_button.isEnabled()
-            assert win._run_button.isEnabled()
+            assert not win._save_action.isEnabled()
+            assert win._run_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -1431,7 +1583,7 @@ class TestMainWindowRuns:
             # The run-history toggle is part of the saved state:
             # off here by default, and the second save records it on.
             assert saved.save_history is False
-            win._save_history_checkbox.setChecked(True)
+            win._save_history_action.setChecked(True)
             win._on_save_run()
             assert len(saves) == 2
             saved_on = read_gui_state(run_dir)
@@ -1596,8 +1748,17 @@ class TestMainWindowRuns:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
+            # The window now carries menu and toolbar actions too;
+            # the arrow-key shortcuts single out the two figure-page
+            # actions from them.  (`matches` alone is not a filter:
+            # every key is a `PartialMatch` of an empty sequence, so
+            # only an `ExactMatch` counts.)
+            exact_left = QKeySequence.SequenceMatch.ExactMatch
             actions: dict[str, QAction] = {
-                action.text(): action for action in win.findChildren(QAction)
+                action.text(): action
+                for action in win.findChildren(QAction)
+                if action.shortcut().matches(Qt.Key.Key_Left) == exact_left
+                or action.shortcut().matches(Qt.Key.Key_Right) == exact_left
             }
             assert set(actions) == {"Previous figure", "Next figure"}
             panel: gui_figure_panel.FigurePanel = win._figure_panel
@@ -1661,7 +1822,7 @@ class TestMainWindowRuns:
 
             # Switching to hydrology-only re-runs in that mode and
             # hides the reactive-transport parts of the panel.
-            win._mode_checkbox.setChecked(True)
+            win._mode_action.setChecked(True)
             _wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
@@ -1685,12 +1846,12 @@ class TestMainWindowRuns:
                 "Partitioning",
             ]
             assert win._objective_model.columnCount() == 1
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
 
             # A parameter change in hydro mode records the mode in
             # the run history (Streamflow is the only target).
-            win._save_history_checkbox.setChecked(True)
+            win._save_history_action.setChecked(True)
             row = win._param_panel._rows["proportion.1"]
             assert isinstance(row, gui_param_panel._FreeCell)
             row._spin.setValue(0.775)
@@ -1751,7 +1912,7 @@ class TestMainWindowRuns:
 
             # Switching back to full mode re-runs with the edited
             # value and restores the full layout.
-            win._mode_checkbox.setChecked(False)
+            win._mode_action.setChecked(False)
             _wait_until(
                 lambda: win._run_generation == 4 and win._worker is None
             )
@@ -1763,8 +1924,8 @@ class TestMainWindowRuns:
             assert not panel._groups["initial"].isHidden()
             assert win._figure_panel.page_count() == 8
             assert win._objective_model.columnCount() == 4
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -1884,7 +2045,7 @@ class TestMaximizeChord:
 class TestAutoRunToggle:
     """The auto-run checkbox and the manual run model button."""
 
-    def test_run_button_manual_run_with_auto_run_off(
+    def test_run_action_manual_run_with_auto_run_off(
         self,
         qapp: QApplication,
         input_data: gui_data.GuiInputData,
@@ -1904,32 +2065,32 @@ class TestAutoRunToggle:
                 lambda: win._worker is None and win._results is not None
             )
             _pump(50)
-            assert win._auto_run_checkbox.isChecked()
-            assert not win._run_button.isEnabled()
-            win._auto_run_checkbox.setChecked(False)
+            assert win._auto_run_action.isChecked()
+            assert not win._run_action.isEnabled()
+            win._auto_run_action.setChecked(False)
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
             assert isinstance(row, gui_param_panel._FreeCell)
             row._spin.setValue(0.775)
             # The results on screen are stale, so the run button is
             # enabled; no auto-run is armed, so nothing else happens.
-            assert win._run_button.isEnabled()
+            assert win._run_action.isEnabled()
             _pump(200)
             assert len(calls) == 1
-            assert win._run_button.isEnabled()
-            win._run_button.click()
+            assert win._run_action.isEnabled()
+            win._run_action.trigger()
             # The run started synchronously; whether or not it has
             # already finished, the button stays disabled (a run is
             # in flight, and a finished run matches the current
             # values).
             assert win._run_generation == 2
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
             _wait_until(
                 lambda: win._worker is None and win._run_generation == 2
             )
             assert len(calls) == 2
             assert calls[1][index] == pytest.approx(0.775)
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -1960,12 +2121,12 @@ class TestAutoRunToggle:
             # the checkbox off before it fires must still stop the
             # run (the gate is checked when the timer fires).
             row._spin.setValue(0.775)
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             _wait_until(lambda: not win._debounce_timer.isActive())
             assert len(calls) == 1
             # Re-checking auto-run and editing again starts the run
             # with the latest value as usual.
-            win._auto_run_checkbox.setChecked(True)
+            win._auto_run_action.setChecked(True)
             row._spin.setValue(0.78)
             _wait_until(
                 lambda: win._worker is None and win._run_generation == 2
@@ -2009,10 +2170,10 @@ class TestModeTint:
             assert win.styleSheet() == "background-color: #FBEEDB;"
             # With auto-run off, toggling the mode updates the panel
             # and the tint but starts no re-run.
-            win._auto_run_checkbox.setChecked(False)
-            win._mode_checkbox.setChecked(True)
+            win._auto_run_action.setChecked(False)
+            win._mode_action.setChecked(True)
             assert win.styleSheet() == "background-color: #EAF1F8;"
-            win._mode_checkbox.setChecked(False)
+            win._mode_action.setChecked(False)
             assert win.styleSheet() == "background-color: #FBEEDB;"
             assert len(calls) == 1
         finally:
@@ -2124,7 +2285,7 @@ class TestHistory:
             results: gui_data.GuiRunResults | None = win._results
             assert results is not None
             assert results.rt is not None
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
             assert win._status_label.text() == (
                 f"Restored the previous run {combo.itemText(1)}."
             )
@@ -2159,7 +2320,7 @@ class TestHistory:
             )
             assert len(full_calls) == 1
 
-            win._mode_checkbox.setChecked(True)
+            win._mode_action.setChecked(True)
             _wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
@@ -2172,7 +2333,7 @@ class TestHistory:
             win._on_history_restore()
             win.show()
             _pump()
-            assert not win._mode_checkbox.isChecked()
+            assert not win._mode_action.isChecked()
             assert win._last_run_mode == MODE_FULL
             results: gui_data.GuiRunResults | None = win._results
             assert results is not None
@@ -2188,7 +2349,7 @@ class TestHistory:
             combo.setCurrentIndex(0)
             win._on_history_restore()
             _pump()
-            assert win._mode_checkbox.isChecked()
+            assert win._mode_action.isChecked()
             assert win._last_run_mode == MODE_HYDRO
             results = win._results
             assert results is not None
@@ -2361,7 +2522,7 @@ class TestHistory:
             assert results.rt is not None
             assert results.hydro.saved_dir == str(run_dir)
             assert len(calls) == 3
-            assert not win._run_button.isEnabled()
+            assert not win._run_action.isEnabled()
             assert win._status_label.text() == (
                 f"Restored the previous run {run_dir.name}."
             )
@@ -3702,9 +3863,9 @@ class TestGradients:
 
             assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Gradients (full)"
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -3733,7 +3894,7 @@ class TestGradients:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._mode_checkbox.setChecked(True)
+            win._mode_action.setChecked(True)
             _wait_until(
                 lambda: win._worker is None
                 and win._last_run_mode == MODE_HYDRO
@@ -3784,9 +3945,9 @@ class TestGradients:
 
             assert win._figure_panel.page_count() == 4
             assert win._figure_panel._titles[-1] == "Gradients (hydro)"
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -3886,9 +4047,9 @@ class TestGradients:
             )
             assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Gradients (full)"
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
             _only_csv(tmp_path)
         finally:
             gate.touch()
@@ -3928,7 +4089,7 @@ class TestGradients:
             # bound and coincides with the base, so it is
             # deduplicated out of the pool points and only the
             # base fails.
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             row = win._param_panel._rows[free[0]]
             assert isinstance(row, gui_param_panel._FreeCell)
             row._spin.setValue(win._param_panel.current_bounds()[free[0]][1])
@@ -3967,9 +4128,9 @@ class TestGradients:
             # The base never arrived, so the results stay stale:
             # the save button stays down and the run button stays
             # up.
-            assert not win._save_button.isEnabled()
-            assert win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
+            assert not win._save_action.isEnabled()
+            assert win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
             # The job's points ran in the pool (their `calls`
             # appends never reach this process): only the
             # in-process startup run is recorded, and no matrix
@@ -4015,7 +4176,7 @@ class TestGradients:
             )
             assert win._worker is None
             assert len(calls) == 1
-            assert win._gradients_button.isEnabled()
+            assert win._gradients_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -4197,7 +4358,7 @@ class TestObjectiveSelection:
                 lambda: win._worker is None and win._results is not None
             )
             _pump()
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             win._on_objective_toggled("Streamflow: KGE")
             win._on_objective_toggled("DOC: KGE")
@@ -4205,12 +4366,12 @@ class TestObjectiveSelection:
                 {"Streamflow: KGE", "DOC: KGE"}
             )
 
-            win._mode_checkbox.setChecked(True)
+            win._mode_action.setChecked(True)
             assert win._objective_terms == frozenset({"Streamflow: KGE"})
             assert win._objective_model.is_selected("Streamflow: KGE")
             assert not win._objective_model.is_selected("DOC: KGE")
 
-            win._mode_checkbox.setChecked(False)
+            win._mode_action.setChecked(False)
             assert win._objective_terms == frozenset({"Streamflow: KGE"})
             assert not win._objective_model.is_selected("DOC: KGE")
         finally:
@@ -4405,10 +4566,10 @@ class TestLineSearch:
                 win._param_panel.param_values()[free[0]]
                 == pytest.approx(high)
             )
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
-            assert win._line_search_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
+            assert win._line_search_action.isEnabled()
 
             # The profile is written once and rides along as the
             # figure panel's last page.
@@ -4615,8 +4776,8 @@ class TestLineSearch:
                 win._param_panel.param_values()[free[0]]
                 == pytest.approx(high)
             )
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
 
             # The completion status keeps its exact wording and
             # appends the failed-point count.
@@ -4821,9 +4982,9 @@ class TestLineSearch:
             assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
-            assert win._line_search_button.isEnabled()
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._line_search_action.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
             assert win._status_label.text() == (
                 "Line search finished in 3.0 s: no improvement found "
                 "(the best value equals the base value); the "
@@ -4923,9 +5084,9 @@ class TestLineSearch:
             assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
-            assert win._line_search_button.isEnabled()
-            assert win._save_button.isEnabled()
-            assert not win._run_button.isEnabled()
+            assert win._line_search_action.isEnabled()
+            assert win._save_action.isEnabled()
+            assert not win._run_action.isEnabled()
             assert win._status_label.text() == (
                 f"Line search finished in 3.0 s: best t = 0.5000 "
                 f"(Streamflow: KGE = 0.905); the best point's "
@@ -5204,8 +5365,8 @@ class TestLineSearch:
             # No auto run after the mode switch: the search's
             # points are the only pool work, held on the file
             # gate until the test releases them.
-            win._auto_run_checkbox.setChecked(False)
-            win._mode_checkbox.setChecked(True)
+            win._auto_run_action.setChecked(False)
+            win._mode_action.setChecked(True)
             file_gate = tmp_path / "job_gate"
 
             def marking_hydro_fake(
@@ -5434,7 +5595,7 @@ class TestLineSearch:
             assert win._worker is None
             assert win._line_search_state is None
             assert len(calls) == 1
-            assert win._line_search_button.isEnabled()
+            assert win._line_search_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -5715,7 +5876,7 @@ class TestCalibration:
             _pump()
             # Full mode: the button is disabled and the direct call
             # is refused with a message.
-            assert not win._calibrate_button.isEnabled()
+            assert not win._calibrate_action.isEnabled()
             win._on_calibrate_clicked()
             assert win._status_label.text() == (
                 "Calibration optimizes the hydrology model only; "
@@ -5724,7 +5885,7 @@ class TestCalibration:
             assert win._worker is None
 
             # Hydrology-only mode: the button comes up after its run.
-            win._mode_checkbox.setChecked(True)
+            win._mode_action.setChecked(True)
             _wait_until(
                 lambda: win._current_mode() == MODE_HYDRO
                 and win._worker is None
@@ -5732,7 +5893,7 @@ class TestCalibration:
                 and win._results.rt is None
             )
             _pump()
-            assert win._calibrate_button.isEnabled()
+            assert win._calibrate_action.isEnabled()
 
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
             win._objective_terms = terms
@@ -5795,7 +5956,7 @@ class TestCalibration:
             ]
             assert len(saved) == 1
             assert saved[0].name in win._status_label.text()
-            assert win._calibrate_button.isEnabled()
+            assert win._calibrate_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -5884,7 +6045,7 @@ class TestModelSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
@@ -5969,7 +6130,7 @@ class TestModelSelection:
                 state=_full_state(hbv_input, model_key="hbv"),
             )
 
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
@@ -6020,8 +6181,8 @@ class TestModelSelection:
             win._on_finished_gradient(outcome)
 
             assert win._gradient_state is None
-            assert win._gradients_button.isEnabled()
-            assert win._line_search_button.isEnabled()
+            assert win._gradients_action.isEnabled()
+            assert win._line_search_action.isEnabled()
         finally:
             _close_window(win)
 
@@ -6044,7 +6205,7 @@ class TestModelSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
@@ -6293,7 +6454,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
@@ -6336,7 +6497,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             path: Path = tmp_path / "carbon.yaml"
             pt.NetworkFile.from_network(get_carbon_network()).to_file(
@@ -6387,7 +6548,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: str = gui_data.fingerprint_network(win._network)
 
             path: Path = tmp_path / "broken.yaml"
@@ -6439,7 +6600,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             carbon: pt.ReactionNetwork = get_carbon_network()
             # The carbon preset without its adsorption exchange:
@@ -6503,7 +6664,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: str = gui_data.fingerprint_network(win._network)
 
             def fake_edit(
@@ -6544,7 +6705,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             carbon: pt.ReactionNetwork = get_carbon_network()
             edited: pt.ReactionNetwork = pt.ReactionNetwork(
@@ -6626,7 +6787,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             default_fingerprint: str = gui_data.fingerprint_network(
                 win._network
@@ -6718,7 +6879,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             target: Path = tmp_path / "saved_net.yaml"
 
@@ -6776,7 +6937,7 @@ class TestNetworkSelection:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
@@ -7081,7 +7242,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
 
             path: Path = self._minimal_record(tmp_path)
 
@@ -7157,9 +7318,9 @@ class TestLoadData:
             assert win._results is None
             assert win._figure_panel.page_count() == 0
             assert win._objective_model._table.empty
-            assert win._run_button.isEnabled()
-            assert win._gradients_button.isEnabled()
-            assert win._line_search_button.isEnabled()
+            assert win._run_action.isEnabled()
+            assert win._gradients_action.isEnabled()
+            assert win._line_search_action.isEnabled()
             assert win._status_label.text() == "Loaded record.xlsx."
             assert _FakeMessageBox.critical_calls == []
         finally:
@@ -7186,7 +7347,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: gui_data.GuiInputData = win._input_data
             before_results = win._results
 
@@ -7253,7 +7414,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: gui_data.GuiInputData = win._input_data
 
             path: Path = tmp_path / "no_date.csv"
@@ -7316,7 +7477,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: gui_data.GuiInputData = win._input_data
 
             path: Path = tmp_path / "renamed_text.xlsx"
@@ -7371,7 +7532,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             before: gui_data.GuiInputData = win._input_data
             before_results = win._results
 
@@ -7471,7 +7632,7 @@ class TestLoadData:
             _wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            win._auto_run_checkbox.setChecked(False)
+            win._auto_run_action.setChecked(False)
             win._data_path = str(path)
             win._column_map = expected_map
 
