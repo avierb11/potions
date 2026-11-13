@@ -14,8 +14,8 @@ Covers the tasks of the general-data-loading plan:
   the general case);
 * the None-safe run builders (`arr_to_results` /
   `arr_to_hydro_results` with absent measured series) and the
-  worker-pool plumbing (`model_pool.init_worker` / `map_model_runs`
-  with a column map).
+  worker-pool plumbing (`proc_pool.init_worker` /
+  `map_model_runs` with a column map).
 
 The Qt-layer tests (the column-mapping dialog, the Load Data action,
 the state round trip, the CLI) live in `test_gui_qt.py`.
@@ -32,6 +32,7 @@ import pytest
 from ..gui import data as gui_data
 from ..gui import model_pool
 from ..gui import model_specs
+from ..gui import proc_pool
 from ..gui import state as gui_state
 from ..hydro_model import HydrologicalModel
 from ..model import Model
@@ -765,13 +766,14 @@ class TestWorkerPoolPlumbing:
             "q_meas": "flow",
         }
         try:
-            model_pool.init_worker(
+            proc_pool.init_worker(
+                SimpleNamespace(value=0.0),
                 str(tmp_path / "mapped.xlsx"),
                 model_specs.DEFAULT_MODEL_KEY,
                 column_map=mapping,
             )
-            assert model_pool._INIT_ERROR is None
-            loaded: gui_data.GuiInputData | None = model_pool._INPUT_DATA
+            assert proc_pool._INIT_ERROR is None
+            loaded: gui_data.GuiInputData | None = proc_pool._INPUT_DATA
             assert loaded is not None
             q_meas: pd.Series | None = loaded.q_meas
             assert q_meas is not None
@@ -782,8 +784,8 @@ class TestWorkerPoolPlumbing:
             assert list(q_meas.iloc[5:]) == list(range(10))
         finally:
             # In-process init leaves the module globals set.
-            model_pool._INPUT_DATA = None
-            model_pool._INIT_ERROR = None
+            proc_pool._INPUT_DATA = None
+            proc_pool._INIT_ERROR = None
 
     def test_init_worker_bad_map_reports(self, tmp_path: Path) -> None:
         """A map that points a role at a missing column does not
@@ -797,17 +799,18 @@ class TestWorkerPoolPlumbing:
 
         captured_error: str | None = None
         try:
-            model_pool.init_worker(
+            proc_pool.init_worker(
+                SimpleNamespace(value=0.0),
                 str(path),
                 model_specs.DEFAULT_MODEL_KEY,
                 column_map={"q_meas": "nope"},
             )
-            assert model_pool._INPUT_DATA is None
-            captured_error = model_pool._INIT_ERROR
+            assert proc_pool._INPUT_DATA is None
+            captured_error = proc_pool._INIT_ERROR
         finally:
             # In-process init leaves the module globals set.
-            model_pool._INPUT_DATA = None
-            model_pool._INIT_ERROR = None
+            proc_pool._INPUT_DATA = None
+            proc_pool._INIT_ERROR = None
         assert captured_error is not None
         assert captured_error.startswith(
             "ValueError: The column map points the role 'q_meas' at "

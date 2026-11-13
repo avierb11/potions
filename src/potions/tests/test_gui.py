@@ -17,9 +17,10 @@ Covers the pure-Python layer of the GUI:
 * `potions.gui.gradients` — the finite-difference gradient
   calculator: the free-parameter perturbation, the objective
   vector, the difference matrix, and the timestamped CSV export.
-* `potions.gui.model_pool` — the worker pool the jobs use to run a
-  batch of parameter points: the per-worker initializer and the
-  per-point results / error-string reporting.
+* `potions.gui.model_pool` — the batching of a parameter-point run
+  into a `proc_pool.ModelRunSession`: the constructor arguments the
+  session is built with and the per-point results / error-string
+  reporting.
 * `potions.gui.plots` — the four figure builders and the objective
   table, asserted on the figures' artists (titles, axes, series
   counts, legend entries, colors, linestyles, clipping).
@@ -30,13 +31,12 @@ The Qt-layer tests live in `test_gui_qt.py`.
 import hashlib
 import json
 import math
-import multiprocessing
 import os
 import re
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Iterable
+from typing import Any, Callable, ClassVar, Sequence
 
 import matplotlib
 import numpy as np
@@ -4665,61 +4665,93 @@ def _marker_results(
     return gui_data.GuiRunResults(hydro, rt)
 
 
-class _PoolRecorder:
+class _SessionRecorder:
     """
-    A stand-in for ``multiprocessing.Pool`` for the pool tests.
+    A stand-in for ``proc_pool.ModelRunSession`` for the session tests.
 
-    It records each construction and, like the real pool, runs the
-    initializer once per requested worker before any task runs.
-    Tasks are executed in this process in reverse input order
-    (one of the legitimate out-of-order completions of
-    ``imap_unordered``) so an implementation that collected results
-    in arrival order would come out in the wrong order.
+    Its constructor argument order mirrors ``ModelRunSession`` so a
+    test can inspect what ``map_model_runs`` hands to a session.  Like
+    the real warm session, construction loads the record once (through
+    the monkeypatched loader, in this process), so an initializer
+    failure becomes an error string reported for every point of a
+    later batch.  ``map`` converts each point through the
+    monkeypatched ``gui_data`` conversions and "completes" them in
+    reverse input order (one of the legitimate out-of-order
+    completions of a warm pool) while returning payloads in input
+    order, so an implementation that collected results in arrival
+    order would come out in the wrong order.
     """
 
-    instances: ClassVar["list[_PoolRecorder]"] = []
+    instances: ClassVar["list[_SessionRecorder]"] = []
 
     def __init__(
         self,
-        processes: int | None = None,
-        initializer: Callable[..., object] | None = None,
-        initargs: Iterable[Any] = (),
+        csv_path: str,
+        model_key: str = model_specs.DEFAULT_MODEL_KEY,
+        network: pt.ReactionNetwork | None = None,
+        column_map: dict[str, str | None] | None = None,
+        workers: int | None = None,
+        stall_timeout: float = 600.0,
     ) -> None:
-        self.processes: int = processes if processes is not None else 1
-        self.initializer: Callable[..., object] | None = initializer
-        self.initargs: Iterable[Any] = initargs
+        self.csv_path: str = csv_path
+        self.model_key: str = model_key
+        self.network: pt.ReactionNetwork | None = network
+        self.column_map: dict[str, str | None] | None = column_map
+        self.workers: int | None = workers
         self.closed: bool = False
-        self.joined: bool = False
-        _PoolRecorder.instances.append(self)
-        for _worker in range(self.processes):
-            if initializer is not None:
-                initializer(*initargs)
+        self.map_calls: list[list[np.ndarray]] = []
+        _SessionRecorder.instances.append(self)
+        try:
+            self.data: gui_data.GuiInputData | None = gui_data.load_input_data(
+                Path(csv_path),
+                model_key=model_key,
+                network=network,
+                column_map=column_map,
+            )
+            self.init_error: str | None = None
+        except Exception as err:
+            self.data = None
+            self.init_error = f"{type(err).__name__}: {err}"
 
-    def imap_unordered(
+    def map(
         self,
-        func: Callable[[Any], Any],
-        iterable: Iterable[Any],
-        chunksize: int = 1,
-    ) -> list[Any]:
-        return list(reversed([func(task) for task in iterable]))
+        points: Sequence[np.ndarray],
+        mode: str,
+        on_result: (
+            Callable[[int, gui_data.GuiRunResults | str], None] | None
+        ) = None,
+    ) -> list[gui_data.GuiRunResults | str]:
+        ordered: list[np.ndarray] = [np.asarray(point) for point in points]
+        self.map_calls.append(ordered)
+        payloads: dict[int, gui_data.GuiRunResults | str] = {}
+        for index in range(len(ordered) - 1, -1, -1):
+            point: np.ndarray = ordered[index]
+            payload: gui_data.GuiRunResults | str
+            if self.data is None:
+                payload = self.init_error or "worker was not initialized"
+            else:
+                try:
+                    if mode == MODE_HYDRO:
+                        payload = gui_data.arr_to_hydro_results(point, self.data)
+                    else:
+                        payload = gui_data.arr_to_results(point, self.data)
+                except Exception as err:
+                    payload = f"{type(err).__name__}: {err}"
+            payloads[index] = payload
+            if on_result is not None:
+                on_result(index, payload)
+        return [payloads[index] for index in range(len(ordered))]
 
     def close(self) -> None:
         self.closed = True
 
-    def join(self) -> None:
-        self.joined = True
 
-
-@pytest.mark.skipif(
-    multiprocessing.get_start_method() != "fork",
-    reason="pool tests require the fork start method",
-)
 class TestModelPool:
-    """``model_pool.map_model_runs``: the shared worker pool for the jobs."""
+    """``model_pool.map_model_runs``: batching points through a session."""
 
     @pytest.fixture(autouse=True)
-    def clear_pool_record(self) -> None:
-        _PoolRecorder.instances.clear()
+    def clear_session_record(self) -> None:
+        _SessionRecorder.instances.clear()
 
     def test_map_model_runs_returns_results_in_input_order(
         self,
@@ -4747,7 +4779,7 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_results", fake_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
 
@@ -4761,8 +4793,7 @@ class TestModelPool:
         # The points' sums are 3.0, -0.5, and 4.0: the results must
         # come back in input order, not in completion order.
         assert markers == [3.0, -0.5, 4.0]
-        assert _PoolRecorder.instances[0].closed
-        assert _PoolRecorder.instances[0].joined
+        assert _SessionRecorder.instances[0].closed
 
     def test_map_model_runs_reports_worker_exceptions_as_strings(
         self,
@@ -4792,7 +4823,7 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_results", failing_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
 
@@ -4800,13 +4831,13 @@ class TestModelPool:
         assert not isinstance(results[0], str)
         assert not isinstance(results[2], str)
 
-    def test_map_model_runs_empty_points_returns_empty_without_pool(
+    def test_map_model_runs_empty_points_returns_empty_without_session(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         assert model_pool.map_model_runs([], MODE_FULL, "unused.csv") == []
-        assert _PoolRecorder.instances == []
+        assert _SessionRecorder.instances == []
 
     def test_map_model_runs_initializer_failure_fails_cleanly(
         self, monkeypatch: pytest.MonkeyPatch
@@ -4826,7 +4857,7 @@ class TestModelPool:
             raise RuntimeError("missing csv")
 
         monkeypatch.setattr(gui_data, "load_input_data", failing_load)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         results = model_pool.map_model_runs(points, MODE_FULL, "unused.csv")
 
@@ -4834,16 +4865,15 @@ class TestModelPool:
         for result in results:
             assert isinstance(result, str)
             assert "missing csv" in result
-        assert _PoolRecorder.instances[0].closed
-        assert _PoolRecorder.instances[0].joined
+        assert _SessionRecorder.instances[0].closed
 
-    def test_map_model_runs_initializer_runs_per_worker(
+    def test_map_model_runs_builds_one_session_per_call(
         self,
         input_data: gui_data.GuiInputData,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        log_file: Path = tmp_path / "worker_init.log"
+        log_file: Path = tmp_path / "session_load.log"
         points: list[np.ndarray] = [np.array([1.0]), np.array([2.0])]
 
         def logging_load(
@@ -4863,19 +4893,26 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", logging_load)
         monkeypatch.setattr(gui_data, "arr_to_results", fake_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         results = model_pool.map_model_runs(
             points, MODE_FULL, str(log_file), workers=2
         )
 
         assert len(results) == 2
-        # Two workers means exactly two initializer calls, each
-        # loading the CSV once.
-        assert log_file.read_text(encoding="utf-8").splitlines() == [
-            str(log_file),
-            str(log_file),
-        ]
+        # One call builds exactly one session, and the session loads
+        # the record once at construction (once per worker in the
+        # real pool — covered in test_proc_pool), not once per point.
+        assert len(_SessionRecorder.instances) == 1
+        assert log_file.read_text(encoding="utf-8").splitlines() == [str(log_file)]
+        session: _SessionRecorder = _SessionRecorder.instances[0]
+        assert session.csv_path == str(log_file)
+        assert session.model_key == model_specs.DEFAULT_MODEL_KEY
+        assert session.network is None
+        assert session.column_map is None
+        assert session.workers == 2
+        assert len(session.map_calls) == 1
+        assert len(session.map_calls[0]) == 2
 
     def test_map_model_runs_hydro_mode_dispatches_to_hydro_results(
         self,
@@ -4907,7 +4944,7 @@ class TestModelPool:
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_results", full_run)
         monkeypatch.setattr(gui_data, "arr_to_hydro_results", hydro_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         results = model_pool.map_model_runs(points, MODE_HYDRO, "unused.csv")
 
@@ -4940,7 +4977,7 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         model_pool.map_model_runs(
             [np.array([1.0])],
@@ -4975,7 +5012,7 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         network = network_specs.get_network_spec("carbon").builder()
         model_pool.map_model_runs(
@@ -5014,7 +5051,7 @@ class TestModelPool:
 
         monkeypatch.setattr(gui_data, "load_input_data", fake_load)
         monkeypatch.setattr(gui_data, "arr_to_hydro_results", fake_run)
-        monkeypatch.setattr(model_pool, "Pool", _PoolRecorder)
+        monkeypatch.setattr(model_pool, "ModelRunSession", _SessionRecorder)
 
         model_pool.map_model_runs(
             [np.array([1.0])], MODE_HYDRO, "unused.csv", workers=1
