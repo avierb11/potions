@@ -45,12 +45,15 @@ objectives the current results report a finite value for, among
 the metrics with 1 as their optimal value — from the current
 parameters: the direction comes from the last gradient job's
 matrix when one has run at these parameters, or from the same
-central differences otherwise, and the objective is then
-evaluated at 25 points on the ascent line, all inside the current
-parameter bounds.  The best point's parameters are adopted into
-the panel, and the value profile is written to a
-``line_search_YYYYMMDD_HHMMSS.csv`` file in the results directory
-and drawn as an extra page of the figure panel.
+forward differences otherwise, and the objective is then searched
+along the ascent line by the wave schedule of
+`potions.line_search`: a grid of steps across the interval the
+current parameter bounds allow, then recentered waves around the
+best steps found, each wave's points run in parallel.  The best
+point's parameters are adopted into the panel, and the value
+profile is written to a ``line_search_YYYYMMDD_HHMMSS.csv`` file
+in the results directory and drawn as an extra page of the figure
+panel.
 
 The toolbar's *Calibrate* action (available only in hydrology-only
 mode) optimizes the free hydrology parameters with differential
@@ -90,10 +93,12 @@ objective values) to a ``gui_run_history.jsonl`` file in the
 results directory.
 """
 
+import base64
+import binascii
 import math
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import TextIOBase
@@ -105,12 +110,21 @@ import pandas as pd
 import potions as pt
 from matplotlib.figure import Figure
 from potions.hydro_model import HydrologicalModel
+from potions.line_search import (
+    LineSearchConfig,
+    LineSearchResult,
+    PointKey,
+    forward_gradient,
+    point_key,
+    wave_search,
+)
 from potions.reactive_transport.rt_zone import WaterVolumeError
 from potions.result_saving import save_hydro_run, save_model_run
 from PySide6.QtCore import (
     QAbstractItemModel,
     QAbstractTableModel,
     QCoreApplication,
+    QByteArray,
     QEvent,
     QObject,
     QModelIndex,
@@ -194,7 +208,6 @@ from potions.gui.line_search import (
     expand_direction,
     feasible_t_interval,
     project_direction,
-    search_t_points,
     write_line_search_csv,
 )
 from potions.gui.model_pool import map_model_runs
@@ -227,6 +240,7 @@ from potions.gui.plots import (
     make_storage_figure,
     make_zone_concentrations_figure,
 )
+from potions.gui.proc_pool import ModelRunSession
 from potions.gui.state import (
     MODE_FULL,
     MODE_HYDRO,
@@ -319,10 +333,6 @@ _OBJECTIVE_PANEL_MARGINS: Final[tuple[int, int, int, int]] = (12, 4, 12, 8)
 # heading and its table.
 _OBJECTIVE_PANEL_SPACING: Final[int] = 4
 
-# The number of points the line search evaluates on the ascent
-# line, between the feasible interval's ends.
-_LINE_SEARCH_POINTS: Final[int] = 25
-
 # The metrics the line search can optimize: the metrics with 1 as
 # their optimal value, so the search maximizes them (minimizing
 # ``1 - value`` would find the same best point).
@@ -396,6 +406,33 @@ def _clamped_geometry(requested: QRect, available: QRect) -> QRect:
         available.y() + available.height() - height,
     )
     return QRect(x, y, width, height)
+
+
+def _decode_dock_state(encoded: str | None) -> QByteArray | None:
+    """
+    Decode a saved ``dock_state`` string into a `restoreState` argument.
+
+    The state file stores the main window's ``saveState()`` blob as
+    base64 text (JSON cannot hold raw bytes).  A missing field, a
+    non-decodable encoding, or a decoded blob that Qt will not accept
+    all yield None: the window then lays its figure docks out with
+    the default sizing instead of a restored one.
+
+    Args:
+        encoded: The state file's base64 text, or None.
+
+    Returns:
+        The decoded blob, or None when there is nothing to restore.
+    """
+    if encoded is None:
+        return None
+    try:
+        raw: bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw:
+        return None
+    return QByteArray(raw)
 
 
 def _objective_panel_size(
@@ -1105,46 +1142,56 @@ class _LineSearchWorker(QThread):
     The job follows the steepest ascent of the equal-weighted sum
     of the selected objective terms from the base point: when the
     direction was not handed in, it is computed by the same
-    central differences as the gradient job (summing the selected
-    terms' rows), and the sum is then evaluated at a fixed number
-    of points on the ascent line, all inside the current
-    parameter bounds.  The point with the largest finite value is
-    the best one (the searched metrics all have 1 as their
-    optimal value, so maximizing the sum finds the best point).
+    forward differences as the *Gradients* job (each free
+    parameter raised once, the selected terms' sum scored at each
+    point), and the sum is then searched along the ascent line by
+    the wave schedule of `potions.line_search`: a grid of steps
+    across the interval that keeps every parameter inside the
+    current bounds, then recentered waves around the best steps
+    found, stopped by the schedule's improvement, bracket-width,
+    and point-budget bars.  The point with the largest finite
+    value is the best one (the searched metrics all have 1 as
+    their optimal value, so maximizing the sum finds the best
+    point).
 
-    When the direction is computed, its perturbation points are
-    modelled in a worker pool, then the search's grid is built: a
-    fixed number of points, equally spaced over the interval of
-    steps that keeps every parameter inside the current bounds,
-    with the point nearest the base point snapped onto it.  The
-    base point itself is not run again: its profile row reuses the
-    results already on screen (the handed-in base results, or the
-    job's own base run), and the pool runs only the other points
-    of the grid.
+    Every point the job runs — the base point when its results
+    were not handed in, the direction's perturbation points when
+    the direction is computed, and each wave's new points — runs
+    in one `ModelRunSession`, so the record is parsed once per
+    worker for the whole job and each wave's points run in
+    parallel.  The engine never runs the base point: the job
+    seeds its value into the search's value memo, and the base
+    point's profile row reuses the results already on screen (the
+    handed-in base results, or the job's own base run).
 
     Signals:
         finished_line_search: Emitted with the job's outcome.
         progress_line: Emitted with a progress line (the point
             being run), shown in the window's status line.
         progress_step: Emitted with (done, total) step counts:
-            one per completed point (the base point when it was
+            one per completed run (the base point when it was
             run, then each direction point when the direction is
-            computed, then each of the search's points), for the
-            window's progress bar.
+            computed, then each search point as it completes),
+            for the window's progress bar.  The total is the
+            job's full budget — the base run when needed, one
+            point per direction step when the direction is
+            computed, and every wave's points — so the bar can be
+            filled at the end for the points the search's memo or
+            stop bars kept from running.
 
     Args:
         base_x: The parameter vector to search from.
         steps: The ± perturbation of every free parameter, in the
             parameter vector's key order.
         direction: The ascent direction, or None to compute it by
-            central differences.
+            forward differences.
         terms: The objective terms to search, as
             ``"target: metric"`` labels, in the objective
             table's row order.
         mode: The run mode (`MODE_FULL` or `MODE_HYDRO`) the
             points run in.
-        data_path: The path of the record file each pool worker
-            loads in its initializer.
+        data_path: The path of the record file the job's session
+            hands to each pool worker's initializer.
         bounds: The current parameter bounds, keyed by parameter.
         base_results: The base point's results when they are
             already up to date on screen (None to run the base
@@ -1186,10 +1233,6 @@ class _LineSearchWorker(QThread):
         self._model_key: str = model_key
         self._network: pt.ReactionNetwork | None = network
         self._column_map: dict[str, str | None] | None = column_map
-
-    def _key(self, x: np.ndarray) -> tuple[float, ...]:
-        """The deduplication key of a parameter vector (its values)."""
-        return tuple(float(v) for v in x)
 
     def run(self) -> None:
         """Run the job and emit the outcome, capturing stdout lines."""
@@ -1265,17 +1308,17 @@ class _LineSearchWorker(QThread):
 
     def _compute(self, started: float) -> _LineSearchOutcome:
         """
-        Run the job's points in a worker pool and build its
-        success outcome.
+        Run the job's points in one session and build its success
+        outcome.
 
         The base point is run only when it was not handed in.
-        When the direction was not handed in either, the pool
+        When the direction was not handed in either, the session
         first runs the direction's points — every free parameter
-        perturbed up and down by 1% of its range (clamped to the
-        range's ends), deduplicated against the base point like
-        the gradient job — and the direction is then the sum of
-        the selected objectives' rows of their difference
-        matrix, normalized to unit length and expanded to the
+        raised by 1% of its range (clamped to the range's end),
+        deduplicated against the base point, the perturbation the
+        *Gradients* job's forward side uses — and the direction is
+        then the forward-difference gradient of the selected
+        terms' sum, normalized to unit length and expanded to the
         parameter vector's space (a pinned parameter's component
         stays zero).
 
@@ -1283,37 +1326,37 @@ class _LineSearchWorker(QThread):
         component that points out of a bound the base point sits
         on is dropped, and the surviving vector is renormalized,
         so the search only ever moves along a direction that stays
-        inside the current bounds (a direction whose components are
-        all blocked this way fails the job).  The search then
-        evaluates the sum of the selected objectives at
-        `_LINE_SEARCH_POINTS` points on the ascent line
-        ``x + t * direction``, ``t`` equally spaced across the
-        interval that keeps every parameter inside its bounds, with
-        the point nearest the base point snapped onto it: the base
-        point's row reuses the results the job already has for it
-        (the handed-in base results, or the job's own base run)
-        instead of being re-run, and the pool runs only the other
-        points.  The point with the largest finite value is the
-        best.
+        inside the current bounds (a direction whose components
+        are all blocked this way fails the job).  The sum is then
+        searched along the ascent line ``x + t * direction`` by
+        the engine's wave schedule (see
+        `potions.line_search.wave_search`) over the interval that
+        keeps every parameter inside its bounds: each wave's
+        un-scored points are one session batch, run in parallel,
+        and every point the job has already scored — the base
+        point, whose value seeds the search's value memo so the
+        engine never runs it, and a wave's point landing on a
+        point an earlier phase scored — is handed in and skipped.
+        The step with the largest finite value is the best.
 
-        Each completed point is reported as a (done, total) step
-        count, for the window's progress bar: the base point when
-        it was run, then each direction point when the direction is
-        computed, then the search's pool points as they complete
-        and the base point's row once the pool has finished.
+        Each completed run is reported as a (done, total) step
+        count, for the window's progress bar.  The total is the
+        job's full budget (the base run when needed, one point per
+        direction step when the direction is computed, and every
+        wave's points); because the engine's memo and stop bars
+        can keep it from running every budgeted point, the bar is
+        filled to the total once the search finishes.
 
-        A failed base or direction point — including a failed
-        pool initializer, which fails every point its worker
-        receives — fails the whole job with the first failure's
-        message, in the points' input order.  A failed search
-        point does not fail the job: its entry in the profile is
-        NaN (the missing value) and the failure is counted, so
-        the window can report it in the completion status; the
-        search for the best point skips NaN entries, so a job
-        whose pool points all failed still reports the base
-        row's value, which is the t = 0 row reusing the base
-        results; the error is raised only when no grid row — the
-        base row included — reports a value.
+        A failed base or direction point fails the whole job with
+        the first failure's message.  A failed search point does
+        not fail the job: its value is NaN (the missing value),
+        its profile row shows the terms as missing, and the
+        failure is counted so the window can report it in the
+        completion status; the search for the best point skips NaN
+        values, so a job whose search points all failed still
+        reports the base row's value — the t = 0 row reusing the
+        base results — and the engine itself fails when no
+        searched step carries a finite value.
 
         Args:
             started: The wall-clock time the job started, for the
@@ -1322,305 +1365,285 @@ class _LineSearchWorker(QThread):
         Returns:
             The success outcome: the value profile, the best
             point's vector and results, the counts of the failed
-            and the evaluated points, and the path of the written
+            and the budgeted points, and the path of the written
             CSV; on a failed base or direction point, the error
             outcome instead.
 
         Raises:
             ValueError:
-                Raised when the base point did not report every
-                selected objective, when their summed differences
-                carry no direction, when the ascent direction
+                Raised when the selected objectives' summed
+                forward differences are not all finite or are all
+                zero (no direction), when the ascent direction
                 points out of the current bounds at every free
                 parameter that can move (no feasible direction),
-                or when no point on the ascent line lies inside
-                the current bounds, or when no point of the
-                search grid — the base row included — reports a
-                value.
+                when the ascent line has no feasible step inside
+                the current bounds, or when no searched step
+                carries a finite value.
         """
-        total: int = len(self._steps) * 2
+        config: LineSearchConfig = LineSearchConfig()
+        base_key: PointKey = point_key(self._base_x)
+        # Every point the job runs carries a payload (its results
+        # or its failure string) and a value (the selected terms'
+        # sum, NaN when the point failed), keyed as the engine
+        # keys its batches: the engine hands the evaluator the
+        # very arrays it built as ``base + t * direction``, every
+        # profile lookup below rebuilds the same array from the
+        # same operands, and the engine's own keys come from the
+        # same ``point_key``, so the keys match bit for bit.
+        payload_memo: dict[PointKey, GuiRunResults | str] = {}
+        value_memo: dict[PointKey, float] = {}
+        gradient_failures: list[str] = []
 
-        # The first pool phase: the base point when it was not
-        # handed in, and — when the direction must be computed —
-        # the direction's deduplicated perturbation points, the
-        # same set the gradient job would run.
-        phase1_points: list[np.ndarray] = []
-        phase1_labels: list[str] = []
-        if self._base_results is None:
-            phase1_points.append(self._base_x)
-            phase1_labels.append("base")
-        if self._direction is None:
-            seen: set[tuple[float, ...]] = {self._key(self._base_x)}
-            for step in self._steps:
-                for suffix, point in (
-                    (" +", step.x_plus),
-                    (" -", step.x_minus),
-                ):
-                    key: tuple[float, ...] = self._key(point)
-                    if key not in seen:
-                        seen.add(key)
-                        phase1_points.append(point)
-                        phase1_labels.append(f"{step.key}{suffix}")
-
-        step_total: int = len(phase1_points) + _LINE_SEARCH_POINTS
+        # The direction's points: the forward perturbation of each
+        # free parameter, deduplicated against the base point.
+        gradient_steps: list[_Perturbation] = [
+            step for step in self._steps if point_key(step.x_plus) != base_key
+        ]
+        # The job's full progress budget: the base run when the
+        # base results were not handed in, one forward point per
+        # free parameter when the direction must be computed, and
+        # every wave's points.  Fewer can actually run (the
+        # engine's memo and stop bars skip points), and the bar is
+        # then filled to this total at the end.
+        step_total: int = (
+            (1 if self._base_results is None else 0)
+            + (0 if self._direction is not None else len(gradient_steps))
+            + sum(config.wave_schedule)
+        )
         done: int = 0
 
-        def on_phase1_result(
-            index: int, payload: GuiRunResults | str
-        ) -> None:
+        session: ModelRunSession = ModelRunSession(
+            self._data_path,
+            self._model_key,
+            self._network,
+            self._column_map,
+        )
+
+        def score_batch(
+            new_points: Sequence[np.ndarray],
+            label: Callable[[np.ndarray], str],
+            failures: list[str] | None = None,
+        ) -> list[float]:
+            """
+            Score one engine batch in the job's session: run every
+            point, report each completion as a progress step, and
+            record every point's payload and value in the memos.
+            """
             nonlocal done
-            done += 1
-            self.progress_line.emit(
-                f"Line search run {done}/{total}: {phase1_labels[index]}"
-            )
-            self.progress_step.emit(done, step_total)
 
-        phase1_payloads: list[GuiRunResults | str] = []
-        if phase1_points:
-            phase1_payloads = map_model_runs(
-                phase1_points,
-                self._mode,
-                self._data_path,
-                on_result=on_phase1_result,
-                model_key=self._model_key,
-                network=self._network,
-                column_map=self._column_map,
-            )
-        results: dict[tuple[float, ...], GuiRunResults] = {}
-        if self._base_results is not None:
-            results[self._key(self._base_x)] = self._base_results
-        for point, payload in zip(phase1_points, phase1_payloads):
-            if isinstance(payload, str):
-                return self._failed_outcome(payload, started)
-            results[self._key(point)] = payload
-        base_results: GuiRunResults = results[self._key(self._base_x)]
-
-        if self._direction is not None:
-            direction: np.ndarray = self._direction
-        else:
-            direction = self._difference_direction(base_results, results)
-        # Project the direction onto the feasible cone before the
-        # interval is computed: a component that points out of a
-        # bound the base point sits on would otherwise collapse the
-        # feasible interval onto the base point, so the search
-        # could never move.
-        direction = project_direction(
-            self._base_x, direction, self._steps, self._bounds
-        )
-
-        interval: tuple[float, float] | None = feasible_t_interval(
-            self._base_x, direction, self._steps, self._bounds
-        )
-        if interval is None:
-            raise ValueError(
-                "The line search found no feasible step: every point "
-                "on the ascent line lies outside the current "
-                "parameter bounds."
-            )
-        t_lo, t_hi = interval
-        t_points: np.ndarray = search_t_points(t_lo, t_hi, _LINE_SEARCH_POINTS)
-        search_labels: list[str] = [f"t = {t:.4f}" for t in t_points]
-        # The grid point that lands exactly on the base point (t = 0)
-        # is not re-run in the pool: its profile row reuses the
-        # results the job already has for the base point.
-        zero_positions: set[int] = {
-            index for index, t in enumerate(t_points) if t == 0.0
-        }
-        pool_positions: list[int] = [
-            index
-            for index in range(len(t_points))
-            if index not in zero_positions
-        ]
-        pool_points: list[np.ndarray] = [
-            self._base_x + t_points[index] * direction for index in pool_positions
-        ]
-
-        def on_pool_result(
-            index: int, payload: GuiRunResults | str
-        ) -> None:
-            nonlocal done
-            done += 1
-            position: int = pool_positions[index]
-            self.progress_line.emit(
-                f"Line search run {done}/{total}: {search_labels[position]}"
-            )
-            self.progress_step.emit(done, step_total)
-
-        pool_payloads: list[GuiRunResults | str] = (
-            map_model_runs(
-                pool_points,
-                self._mode,
-                self._data_path,
-                on_result=on_pool_result,
-                model_key=self._model_key,
-                network=self._network,
-                column_map=self._column_map,
-            )
-            if pool_points
-            else []
-        )
-
-        # One entry per grid point, in the grid's order: the base
-        # results' values fill the t = 0 row, the pool's payloads
-        # (in the pool's input order) fill the rest.
-        point_results: list[GuiRunResults | str] = []
-        for _t in t_points:
-            point_results.append(base_results)
-        # The loop variable differs from the profile loop's
-        # position: mypy's no-redef rule bars one function scope
-        # defining a local name twice, loop variable included.
-        for pool_index, grid_position in enumerate(pool_positions):
-            point_results[grid_position] = pool_payloads[pool_index]
-        # The base point's row was not run in the pool, so its
-        # progress step is reported once the pool has finished.
-        # The loop variable differs from the splice loop's: mypy's
-        # no-redef rule bars one function scope defining a local
-        # name twice, loop variable included.
-        for zero_position in sorted(zero_positions):
-            done += 1
-            self.progress_line.emit(
-                f"Line search run {done}/{total}: "
-                f"{search_labels[zero_position]}"
-            )
-            self.progress_step.emit(done, step_total)
-
-        failed_points: int = 0
-        term_values: list[list[float]] = []
-        for payload in point_results:
-            if isinstance(payload, str):
-                failed_points += 1
-                term_values.append([float("nan")] * len(self._terms))
-            else:
-                term_values.append(
-                    [float(value) for value in self._point_values(payload)]
+            def report(index: int, payload: GuiRunResults | str) -> None:
+                nonlocal done
+                done += 1
+                self.progress_line.emit(
+                    f"Line search run {done}/{step_total}: "
+                    f"{label(new_points[index])}"
                 )
-        all_term_values: np.ndarray = np.array(term_values, dtype=np.float64)
-        # A point's value is the sum of the selected objectives'
-        # values: a point whose run failed or that missed a term
-        # carries a missing value (its missing term keeps the sum
-        # missing).
-        values_array: np.ndarray = np.where(
-            np.isfinite(all_term_values).all(axis=1),
-            np.sum(all_term_values, axis=1),
-            float("nan"),
-        )
-        if not np.isfinite(values_array).any():
-            raise ValueError(
-                f"Every point on the ascent line failed to report a "
-                f"value for {', '.join(self._terms)}."
-            )
-        best_index: int = int(np.nanargmax(values_array))
-        x_best: np.ndarray = self._base_x + t_points[best_index] * direction
-        best_payload: GuiRunResults | str = point_results[best_index]
-        if not isinstance(best_payload, GuiRunResults):
-            raise ValueError(
-                f"The best search point's run failed ({best_payload}), "
-                "but the search should have skipped it: a NaN value "
-                "can never be the largest finite value."
-            )
-        best_results: GuiRunResults = best_payload
+                self.progress_step.emit(done, step_total)
+                if isinstance(payload, str) and failures is not None:
+                    failures.append(payload)
 
-        columns: dict[str, np.ndarray] = {"value": values_array}
-        # One column per selected term, in the terms' order (the
-        # objective table's row order).
-        for column_index, term in enumerate(self._terms):
-            columns[term] = all_term_values[:, column_index]
-        for step in self._steps:
-            position: int = list(self._bounds).index(step.key)
-            columns[step.key] = self._base_x[position] + t_points * direction[
-                position
+            payloads: list[GuiRunResults | str] = session.map(
+                new_points, self._mode, on_result=report
+            )
+            values: list[float] = []
+            for point, payload in zip(new_points, payloads):
+                key: PointKey = point_key(point)
+                payload_memo[key] = payload
+                value: float = (
+                    float("nan")
+                    if isinstance(payload, str)
+                    else float(np.sum(self._point_values(payload)))
+                )
+                value_memo[key] = value
+                values.append(value)
+            return values
+
+        try:
+            # The base point's value seeds the engine's memo, so
+            # the engine never runs it; it runs here only when its
+            # results were not handed in.
+            if self._base_results is not None:
+                payload_memo[base_key] = self._base_results
+                value_memo[base_key] = float(
+                    np.sum(self._point_values(self._base_results))
+                )
+            else:
+                base_failures: list[str] = []
+                score_batch([self._base_x], lambda _point: "base", base_failures)
+                if base_failures:
+                    return self._failed_outcome(base_failures[0], started)
+
+            if self._direction is not None:
+                direction: np.ndarray = self._direction
+            else:
+                # The forward offsets, one per gradient step.  The
+                # engine rebuilds each perturbed point as
+                # ``base + offset``, so the labels below are keyed
+                # with the engine's own point keys.
+                offsets: list[np.ndarray] = [
+                    step.x_plus - self._base_x for step in gradient_steps
+                ]
+                positions: list[int] = [
+                    list(self._bounds).index(step.key)
+                    for step in gradient_steps
+                ]
+                gradient_labels: dict[PointKey, str] = {
+                    point_key(self._base_x + offset): f"{step.key} +"
+                    for step, offset in zip(gradient_steps, offsets)
+                }
+
+                def score_gradient(
+                    points: Sequence[np.ndarray],
+                ) -> list[float]:
+                    return score_batch(
+                        points,
+                        lambda point: gradient_labels[point_key(point)],
+                        gradient_failures,
+                    )
+
+                summed: np.ndarray = forward_gradient(
+                    score_gradient,
+                    self._base_x,
+                    offsets,
+                    positions,
+                    value_memo,
+                )
+                if gradient_failures:
+                    return self._failed_outcome(
+                        gradient_failures[0], started
+                    )
+                if not np.isfinite(summed).all():
+                    raise ValueError(
+                        "The selected objectives have a missing difference "
+                        f"at the base point, so the direction cannot be "
+                        f"computed: {', '.join(self._terms)}."
+                    )
+                norm: float = float(np.linalg.norm(summed))
+                if norm == 0.0:
+                    raise ValueError(
+                        "The selected objectives are flat at the base "
+                        "point: their summed differences are all zero, "
+                        "so the line search has no direction: "
+                        f"{', '.join(self._terms)}."
+                    )
+                direction = expand_direction(
+                    summed / norm, self._steps, self._bounds
+                )
+
+            # Project the direction onto the feasible cone before
+            # the interval is computed: a component that points
+            # out of a bound the base point sits on would
+            # otherwise collapse the feasible interval onto the
+            # base point, so the search could never move.
+            direction = project_direction(
+                self._base_x, direction, self._steps, self._bounds
+            )
+            interval: tuple[float, float] | None = feasible_t_interval(
+                self._base_x, direction, self._steps, self._bounds
+            )
+            if interval is None:
+                raise ValueError(
+                    "The line search found no feasible step: every point "
+                    "on the ascent line lies outside the current "
+                    "parameter bounds."
+                )
+            t_lo, t_hi = interval
+
+            def score_line(points: Sequence[np.ndarray]) -> list[float]:
+                return score_batch(
+                    points,
+                    lambda point: (
+                        f"t = "
+                        f"{np.dot(point - self._base_x, direction):.4f}"
+                    ),
+                )
+
+            result: LineSearchResult = wave_search(
+                score_line,
+                self._base_x,
+                direction,
+                t_lo,
+                t_hi,
+                config,
+                value_memo,
+            )
+
+            # One row per searched step, ascending in t: each
+            # step's payload, looked up by the same array the
+            # engine built for it.
+            row_payloads: list[GuiRunResults | str] = [
+                payload_memo[point_key(self._base_x + float(raw_t) * direction)]
+                for raw_t in result.t_points
             ]
-        profile: pd.DataFrame = pd.DataFrame(columns, index=t_points)
-        csv_path: Path = write_line_search_csv(profile)
-        return _LineSearchOutcome(
-            error=None,
-            profile=profile,
-            x_best=x_best,
-            best_results=best_results,
-            csv_path=csv_path,
-            terms=list(self._terms),
-            mode=self._mode,
-            elapsed_seconds=time.perf_counter() - started,
-            model_key=self._model_key,
-            failed_points=failed_points,
-            total_points=step_total,
-        )
-
-    def _difference_direction(
-        self,
-        base_results: GuiRunResults,
-        results: dict[tuple[float, ...], GuiRunResults],
-    ) -> np.ndarray:
-        """
-        The normalized steepest-ascent direction of the job's
-        selected objectives' equal-weighted sum, from its
-        direction points' central differences.
-
-        The direction's points — every free parameter perturbed
-        up and down by 1% of its range (clamped to the range's
-        ends), deduplicated against the base point, like the
-        gradient job — were already run in the job's first pool
-        phase; their results, together with the base point's,
-        are `results`.  This method reads them only, so it runs
-        no points and reports no progress of its own.  The
-        direction is the sum of the selected objectives' rows of
-        the difference matrix, normalized to unit length and
-        expanded to the parameter vector's space (a pinned
-        parameter's component stays zero).
-
-        Args:
-            base_results: The base point's results (its objective
-                vector carries the selected terms' labels).
-            results: The first phase's results, keyed by each
-                point's value tuple (the base point's included).
-
-        Returns:
-            The unit-length direction vector, in the parameter
-            vector's order.
-
-        Raises:
-            ValueError:
-                Raised when the base point did not report every
-                selected objective, when the selected objectives'
-                summed differences are not all finite, or when
-                they are all zero (no direction).
-        """
-        base_labels, _ = objective_vector(base_results)
-        missing: list[str] = [
-            term for term in self._terms if term not in base_labels
-        ]
-        if missing:
-            raise ValueError(
-                "The base point did not report every selected "
-                f"objective: {', '.join(self._terms)}."
+            term_rows: list[list[float]] = []
+            for row_payload in row_payloads:
+                if isinstance(row_payload, str):
+                    term_rows.append([float("nan")] * len(self._terms))
+                else:
+                    term_rows.append(
+                        [float(value) for value in self._point_values(row_payload)]
+                    )
+            all_term_values: np.ndarray = np.array(term_rows, dtype=np.float64)
+            # A point's value is the sum of the selected
+            # objectives' values: a point whose run failed or that
+            # missed a term carries a missing value (its missing
+            # term keeps the sum missing).
+            values_array: np.ndarray = np.where(
+                np.isfinite(all_term_values).all(axis=1),
+                np.sum(all_term_values, axis=1),
+                float("nan"),
             )
-        f_plus: list[np.ndarray] = []
-        f_minus: list[np.ndarray] = []
-        for step in self._steps:
-            _, up_vector = objective_vector(results[self._key(step.x_plus)])
-            _, down_vector = objective_vector(
-                results[self._key(step.x_minus)]
+            failed_points: int = sum(
+                1 for row_payload in row_payloads if isinstance(row_payload, str)
             )
-            f_plus.append(up_vector)
-            f_minus.append(down_vector)
+            best_index: int = int(
+                np.flatnonzero(result.t_points == result.t_best)[0]
+            )
+            best_payload: GuiRunResults | str = row_payloads[best_index]
+            if not isinstance(best_payload, GuiRunResults):
+                raise ValueError(
+                    f"The best search point's run failed ({best_payload}), "
+                    "but the search should have skipped it: a NaN value "
+                    "can never be the largest finite value."
+                )
+            best_results: GuiRunResults = best_payload
+            x_best: np.ndarray = (
+                self._base_x + result.t_points[best_index] * direction
+            )
 
-        matrix: np.ndarray = gradient_matrix(f_plus, f_minus, self._steps)
-        rows: list[int] = [base_labels.index(term) for term in self._terms]
-        summed: np.ndarray = np.sum(matrix[rows], axis=0)
-        if not np.isfinite(summed).all():
-            raise ValueError(
-                "The selected objectives have a missing difference at "
-                f"the base point, so the direction cannot be computed: "
-                f"{', '.join(self._terms)}."
+            columns: dict[str, np.ndarray] = {"value": values_array}
+            # One column per selected term, in the terms' order
+            # (the objective table's row order).
+            for column_index, term in enumerate(self._terms):
+                columns[term] = all_term_values[:, column_index]
+            for step in self._steps:
+                position: int = list(self._bounds).index(step.key)
+                columns[step.key] = (
+                    self._base_x[position]
+                    + result.t_points * direction[position]
+                )
+            profile: pd.DataFrame = pd.DataFrame(columns, index=result.t_points)
+            csv_path: Path = write_line_search_csv(profile)
+            # The engine's memo and stop bars can keep the search
+            # from running every budgeted point; the progress bar
+            # finishes full either way.
+            if done < step_total:
+                self.progress_step.emit(step_total, step_total)
+            return _LineSearchOutcome(
+                error=None,
+                profile=profile,
+                x_best=x_best,
+                best_results=best_results,
+                csv_path=csv_path,
+                terms=list(self._terms),
+                mode=self._mode,
+                elapsed_seconds=time.perf_counter() - started,
+                model_key=self._model_key,
+                failed_points=failed_points,
+                total_points=step_total,
             )
-        norm: float = float(np.linalg.norm(summed))
-        if norm == 0.0:
-            raise ValueError(
-                "The selected objectives are flat at the base point: "
-                "their summed differences are all zero, so the line "
-                f"search has no direction: {', '.join(self._terms)}."
-            )
-        return expand_direction(summed / norm, self._steps, self._bounds)
+        finally:
+            session.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2358,6 +2381,14 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(_ELAPSED_MS)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
 
+        # The dock-layout persistence state: `_apply_saved_run` stores
+        # the restored run's decoded `saveState` blob here, and
+        # `_on_figure_docks_rebuilt` applies it (or, without one,
+        # sizes the default figure strip) exactly once, on the first
+        # build of non-empty figure docks.
+        self._pending_dock_state: QByteArray | None = None
+        self._dock_layout_applied: bool = False
+
     def _build_menus(self) -> None:
         """
         Build the menu bar's menus: fixed chrome at the window's top.
@@ -2566,18 +2597,22 @@ class MainWindow(QMainWindow):
             "functions' equal-weighted sum from the current "
             "parameters: check the cells of the objective table to "
             "select any combination of its KGE, LogKGE, NSE, or "
-            "LogNSE values, and the job evaluates the sum at 25 "
-            "points on the ascent line, all inside the current "
-            "parameter bounds, and adopts the point with the best "
-            "value (the searchable metrics have 1 as their optimal "
-            "value, so the search maximizes the sum; if no cell "
-            "has ever been checked, every selectable term is "
-            "searched, but unchecking every checked cell refuses "
-            "the search).  "
+            "LogNSE values, and the job searches the sum along the "
+            "ascent line inside the current parameter bounds: a "
+            "first grid of steps across the interval the bounds "
+            "allow, then recentered waves around the best steps "
+            "found, each wave's points run in parallel, stopped by "
+            "improvement, bracket-width, and point-budget bars "
+            "(see the potions.line_search module), and the job "
+            "adopts the point with the best value (the searchable "
+            "metrics have 1 as their optimal value, so the search "
+            "maximizes the sum; if no cell has ever been checked, "
+            "every selectable term is searched, but unchecking "
+            "every checked cell refuses the search).  "
             "When a gradient job has already run at these "
             "parameters its matrix supplies the direction; "
             "otherwise the direction is computed by the same "
-            "central differences.  The value profile is written to "
+            "forward differences.  The value profile is written to "
             "a CSV in the results directory and drawn as an extra "
             "page of the figure panel."
         )
@@ -2991,6 +3026,14 @@ class MainWindow(QMainWindow):
             if saved.objective_terms is not None
             else None
         )
+        # The dock layout must be pending before the shared apply:
+        # that apply refreshes the results, and the refresh builds the
+        # figure docks — the hook that applies the layout runs there.
+        # The splitter sizes are retired with the splitter: a v8
+        # state may still carry them, and `state.py` still parses
+        # them, but the dock layout (its successor) arrives with the
+        # v9 `dock_state`.
+        self._pending_dock_state = _decode_dock_state(saved.dock_state)
         self._apply_history_entry(
             saved.param_values,
             saved.param_bounds,
@@ -3022,10 +3065,6 @@ class MainWindow(QMainWindow):
         # (see `showEvent`), not through the clamped geometry above:
         # the saved geometry is the run's *normal* geometry.
         self._restore_maximized = saved.window_maximized
-        # The splitter sizes are retired with the splitter: a v8
-        # state may still carry them, and `state.py` still parses
-        # them, but the dock layout (its successor) arrives with the
-        # v9 `dock_state` handling.
         # The checkbox state is part of the saved state; a state
         # saved before the toggle existed restores it off.
         self._save_history_action.setChecked(saved.save_history)
@@ -3554,15 +3593,18 @@ class MainWindow(QMainWindow):
         the same mode, with the same free parameters) and its table
         reports every selected term, its matrix supplies the
         direction (the summed rows, un-normalized) for free;
-        otherwise the direction is computed by the same central
-        differences as the gradient job, summing the selected
-        terms' rows.  The direction is then projected onto the
-        feasible cone (a component that points out of a bound the
-        base point sits on is dropped), and the sum is evaluated at
-        25 points on the ascent line, all inside the current
-        parameter bounds, with the grid's point nearest the base
-        point snapped onto it (its row reuses the base results
-        rather than re-running the point).  The point with the
+        otherwise the direction is computed by the same forward
+        differences as the gradient job, on the selected terms'
+        sum.  The direction is then projected onto the feasible
+        cone (a component that points out of a bound the base
+        point sits on is dropped), and the sum is searched along
+        the ascent line by the wave schedule of the
+        `potions.line_search` module: a grid of steps across the
+        interval that keeps every parameter inside the current
+        bounds, then recentered waves around the best steps found,
+        each wave's points run in parallel.  The base point is
+        never re-run: its value seeds the search and its profile
+        row reuses the base results.  The point with the
         best (largest) value is adopted when it strictly beats the
         base point's value, or when the base value is missing
         (possible only when the direction was handed in); when the
@@ -5083,6 +5125,13 @@ class MainWindow(QMainWindow):
             network_fingerprint=fingerprint_network(self._network),
             column_map=self._column_map,
             window_maximized=maximized,
+            # The dock layout travels as the base64 of `saveState()`;
+            # it is restorable because every figure dock carries a
+            # stable objectName that `restoreState()` matches the
+            # blob's entries against.
+            dock_state=base64.b64encode(bytes(self.saveState())).decode(
+                "ascii"
+            ),
         )
         write_gui_state(run_dir, state)
         figure_paths: list[Path] = self._figure_panel.save_pages(
@@ -5261,7 +5310,7 @@ class MainWindow(QMainWindow):
             if len(search.terms) == 1:
                 note = (
                     f"Steepest ascent of {search.terms[0]}, "
-                    f"{_LINE_SEARCH_POINTS} points within the current "
+                    f"{len(search.profile)} points within the current "
                     f"bounds; saved to {search.csv_path}."
                 )
             else:
@@ -5269,7 +5318,7 @@ class MainWindow(QMainWindow):
                     f"Steepest ascent of {len(search.terms)} "
                     f"equal-weighted objectives "
                     f"({', '.join(search.terms)}), "
-                    f"{_LINE_SEARCH_POINTS} points within the current "
+                    f"{len(search.profile)} points within the current "
                     f"bounds; saved to {search.csv_path}."
                 )
             mode_label = "hydro" if search.mode == MODE_HYDRO else "full"
@@ -5281,6 +5330,10 @@ class MainWindow(QMainWindow):
             )
 
         self._figure_panel.set_figures(figures)
+        # A non-empty set of fresh docks is the moment the window's
+        # dock layout (restored or default) is applied; see
+        # `_on_figure_docks_rebuilt`.
+        self._on_figure_docks_rebuilt()
         self._objective_model.set_table(table)
         # The new table's selectable cells define what the line
         # search can search: keep the checked terms a subset of
@@ -5290,6 +5343,44 @@ class MainWindow(QMainWindow):
         # The objective panel is fixed in size; re-fit it after the
         # table's contents (and thus its size hint) changed.
         self._fit_objective_panel()
+
+    def _on_figure_docks_rebuilt(self) -> None:
+        """
+        Apply the window's dock layout once, when fresh docks exist.
+
+        A freshly built set of figure docks starts at Qt's own
+        default split; this hook replaces that split once per session
+        with the restored run's saved layout (a decoded
+        ``dock_state`` blob, applied through `restoreState`), or —
+        with no blob (a first session, a pre-v9 saved run, or an
+        unreadable blob) — with the default figure-strip height from
+        `_INITIAL_DOCK_HEIGHT`.  After the first application the hook
+        is inert: a later rebuild from a parameter or selection
+        change must not stomp on a layout the user has since dragged
+        around.
+
+        `restoreState` merges into the layout the panel just built
+        (Qt matches the blob's dock entries to the docks'
+        objectNames — decision 3 of the dock-panels design is what
+        makes them findable), reproducing the saved relative sizes;
+        a failed restore falls through to the default sizing.  The
+        `resizeDocks` request sizes the dock *area* (dock plus tab
+        bar), and a request below the docks' minimum height is
+        clamped up to it.
+        """
+        if self._dock_layout_applied or not self._figure_panel.docks():
+            return
+        if self._pending_dock_state is not None:
+            if self.restoreState(self._pending_dock_state):
+                self._dock_layout_applied = True
+            self._pending_dock_state = None
+        if not self._dock_layout_applied:
+            self.resizeDocks(
+                [self._figure_panel.docks()[0]],
+                [_INITIAL_DOCK_HEIGHT],
+                Qt.Orientation.Vertical,
+            )
+            self._dock_layout_applied = True
 
     def _reset_dock_layout(self) -> None:
         """
@@ -5378,6 +5469,11 @@ class MainWindow(QMainWindow):
         if self._restore_maximized:
             self._restore_maximized = False
             QTimer.singleShot(0, self.showMaximized)
+        # A run restored during `__init__` built its docks before the
+        # window was ever shown, so this is the hook's chance for
+        # that path when the `set_figures` site did not take it; the
+        # guard flag keeps the whole thing single-shot.
+        self._on_figure_docks_rebuilt()
         super().showEvent(event)
 
     def _toggle_maximized(self) -> None:

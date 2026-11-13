@@ -27,15 +27,16 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import base64
 import dataclasses
 import json
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -93,6 +94,7 @@ from ..gui import data as gui_data
 from ..gui import data_dialog as gui_data_dialog
 from ..gui import calibration as gui_calibration
 from ..gui import figure_panel as gui_figure_panel
+from ..gui import model_pool
 from ..gui import model_specs
 from ..gui import network_editor as gui_network_editor
 from ..gui import network_specs
@@ -114,8 +116,13 @@ from ..gui.gradients import (
     gradient_matrix,
     objective_vector,
 )
-from ..gui.line_search import expand_direction, feasible_t_interval
+from ..gui.line_search import (
+    expand_direction,
+    feasible_t_interval,
+    search_t_points,
+)
 from ..gui.state import (
+    GuiState,
     MODE_FULL,
     MODE_HYDRO,
     RUN_HISTORY_FILENAME,
@@ -195,7 +202,7 @@ def _key_release(widget: QWidget, key: Qt.Key) -> None:
 
 
 def _fake_results_factory(
-    calls: list[np.ndarray],
+    calls: list[np.ndarray] | None,
     input_data: gui_data.GuiInputData,
     hydro_only: bool = False,
 ) -> Callable[
@@ -206,13 +213,16 @@ def _fake_results_factory(
     that records each parameter vector it is called with and
     returns the synthetic results wrapped in a `GuiRunResults`.
     With `hydro_only` the reactive-transport result is None, as in
-    a hydrology-only run.
+    a hydrology-only run.  With `calls=None` nothing is recorded,
+    as when a fake session scores its batches in-process and the
+    test only watches the startup run's calls.
     """
 
     def fake(
         x: np.ndarray, _input_data: gui_data.GuiInputData
     ) -> gui_data.GuiRunResults:
-        calls.append(np.array(x))
+        if calls is not None:
+            calls.append(np.array(x))
         hydro, rt = _synthetic_results(_input_data)
         if hydro_only:
             return gui_data.GuiRunResults(hydro, None)
@@ -1377,12 +1387,19 @@ def _figure_tab_texts(win: gui_window.MainWindow) -> list[str]:
     """
     The figure strip's tab texts.
 
-    The figure docks share one tab bar, so the window exposes exactly
-    one visible one (Qt keeps no other tab bar, and a retired or
-    stray bar stays hidden).
+    The figure docks share one laid-out tab bar, so exactly one
+    visible bar sits inside the window's own rect.  A restored dock
+    layout (a ``restoreState`` application) can leave the pre-restore
+    area's bar orphaned: never laid out, parked at its default
+    geometry far outside the window, so the window clips it and it is
+    invisible to the user — the geometry filter drops it here for the
+    same reason.
     """
+    window_rect: QRect = QRect(0, 0, win.width(), win.height())
     tab_bars: list[QTabBar] = [
-        bar for bar in win.findChildren(QTabBar) if bar.isVisible()
+        bar
+        for bar in win.findChildren(QTabBar)
+        if bar.isVisible() and bar.geometry().intersects(window_rect)
     ]
     assert len(tab_bars) == 1, "Expected exactly one visible tab bar."
     return [
@@ -3971,7 +3988,7 @@ def _free_keys(input_data: gui_data.GuiInputData) -> list[str]:
 
 
 def _gradient_fake_factory(
-    calls: list[np.ndarray],
+    calls: list[np.ndarray] | None,
     input_data: gui_data.GuiInputData,
     hydro_term_key: str,
     rt_term_key: str,
@@ -3988,7 +4005,8 @@ def _gradient_fake_factory(
     gradient job's central differences then come out exactly: the
     derivative with respect to the two chosen parameters is 2.0
     (in the blocks each shift touches) and 0.0 for every other
-    free parameter.
+    free parameter.  With `calls=None` nothing is recorded, as when
+    a fake session scores its batches in-process.
     """
     keys: list[str] = list(input_data.bounds)
     hydro_index: int = keys.index(hydro_term_key)
@@ -3999,7 +4017,8 @@ def _gradient_fake_factory(
         _input_data: gui_data.GuiInputData,
         hydro_only: bool,
     ) -> gui_data.GuiRunResults:
-        calls.append(np.array(x))
+        if calls is not None:
+            calls.append(np.array(x))
         hydro, rt = _synthetic_results(_input_data)
         hydro.objective_functions = (
             hydro.objective_functions
@@ -4027,31 +4046,146 @@ def _gradient_fake_factory(
     return full_fake, hydro_fake
 
 
-def _file_gated_fake(
-    real_fake: Callable[
+def _mode_evaluate(
+    full_fake: Callable[
         [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
     ],
-    gate_path: Path,
-) -> Callable[[np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults]:
+    hydro_fake: Callable[
+        [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
+    ],
+    input_data: gui_data.GuiInputData,
+) -> Callable[[np.ndarray, str], gui_data.GuiRunResults]:
     """
-    Wrap `real_fake` in a gate the test releases by touching
-    `gate_path`: each call blocks (polling briefly, with a
-    generous timeout) until the file exists, then delegates.
-
-    Unlike a `threading.Event`, a file is visible to the forked
-    pool worker processes the jobs use, so the test can hold a
-    job's points until it has connected to the worker's signals.
+    Combine the two conversion stand-ins into one session
+    evaluator: the run-mode string selects which fake scores the
+    point, exactly as a warm session picks its conversion.
     """
 
-    def gated_fake(
-        x: np.ndarray, _input_data: gui_data.GuiInputData
-    ) -> gui_data.GuiRunResults:
-        deadline: float = time.monotonic() + 60.0
-        while not gate_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        return real_fake(x, _input_data)
+    def evaluate(x: np.ndarray, mode: str) -> gui_data.GuiRunResults:
+        if mode == MODE_HYDRO:
+            return hydro_fake(x, input_data)
+        return full_fake(x, input_data)
 
-    return gated_fake
+    return evaluate
+
+
+class _FakeRunSession:
+    """
+    A stand-in for ``proc_pool.ModelRunSession`` that scores each
+    batch in this process.
+
+    A real session's forkserver children re-import the ``data``
+    module fresh, so a parent-side patch of the ``arr_to_*``
+    conversions is invisible to them; the job tests replace the
+    session class instead, and this fake maps each point through
+    `evaluate`.  When `gate_path` is given each batch blocks
+    (polling briefly, with a generous timeout) until the file
+    exists, so the test can connect to the worker's signals before
+    any point completes.  Each batch's points are recorded on
+    `batches`, a point whose evaluation raises becomes the
+    ``"Type: message"`` error string a real session reports, and
+    `on_result` fires in input order as each point "completes".
+    """
+
+    def __init__(
+        self,
+        csv_path: str,
+        *,
+        evaluate: Callable[[np.ndarray, str], gui_data.GuiRunResults],
+        gate_path: Path | None = None,
+    ) -> None:
+        self.csv_path: str = csv_path
+        self.batches: list[list[np.ndarray]] = []
+        self.closed: bool = False
+        self._evaluate: Callable[
+            [np.ndarray, str], gui_data.GuiRunResults
+        ] = evaluate
+        self._gate_path: Path | None = gate_path
+
+    def map(
+        self,
+        points: Sequence[np.ndarray],
+        mode: str,
+        on_result: (
+            Callable[[int, gui_data.GuiRunResults | str], None] | None
+        ) = None,
+    ) -> list[gui_data.GuiRunResults | str]:
+        """
+        "Run" one batch: gate, evaluate every point in-process,
+        report each through `on_result`, and return the payloads in
+        input order.
+        """
+        batch: list[np.ndarray] = [np.array(point) for point in points]
+        self.batches.append(batch)
+        if self._gate_path is not None:
+            deadline: float = time.monotonic() + 60.0
+            while (
+                not self._gate_path.exists() and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+        payloads: list[gui_data.GuiRunResults | str] = []
+        for index, point in enumerate(batch):
+            try:
+                payload: gui_data.GuiRunResults | str = self._evaluate(
+                    point, mode
+                )
+            except Exception as err:
+                payload = f"{type(err).__name__}: {err}"
+            payloads.append(payload)
+            if on_result is not None:
+                on_result(index, payload)
+        return payloads
+
+    def close(self) -> None:
+        """Mark the session closed, as closing a real session does."""
+        self.closed = True
+
+
+def _patch_pool_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    evaluate: Callable[[np.ndarray, str], gui_data.GuiRunResults],
+    sessions: list[_FakeRunSession],
+    gate_path: Path | None = None,
+) -> None:
+    """
+    Replace `module`'s ``ModelRunSession`` name with a factory of
+    `_FakeRunSession` s.
+
+    The factory mirrors ``ModelRunSession``'s constructor
+    parameters so the patched call sites construct it exactly as
+    they would the real class; each constructed session scores its
+    points through `evaluate`, gated on `gate_path` when one is
+    given, and is appended to `sessions`.
+
+    Args:
+        monkeypatch: The pytest fixture doing the patching.
+        module: The module whose ``ModelRunSession`` name to replace.
+        evaluate: The (point, mode) evaluator each session maps.
+        sessions: Collects every constructed session for inspection.
+        gate_path: A file each batch waits for, or None to run freely.
+
+    Raises:
+        AttributeError:
+            Raised when `module` has no ``ModelRunSession`` name to
+            patch (the module does not construct sessions).
+    """
+
+    def make_session(
+        csv_path: str,
+        model_key: str = "",
+        network: object = None,
+        column_map: dict[str, str | None] | None = None,
+        workers: int | None = None,
+        stall_timeout: float = 0.0,
+    ) -> _FakeRunSession:
+        session: _FakeRunSession = _FakeRunSession(
+            csv_path, evaluate=evaluate, gate_path=gate_path
+        )
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(module, "ModelRunSession", make_session)
 
 
 def _gradient_window(
@@ -4064,34 +4198,18 @@ def _gradient_window(
     hydro_fake: Callable[
         [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
     ],
-    gate_path: Path | None = None,
 ) -> gui_window.MainWindow:
     """
     Build a main window in an empty `tmp_path` with `full_fake` and
     `hydro_fake` patched in for `arr_to_results` and
-    `arr_to_hydro_results`, both on the `window` module (the
-    in-process startup run) and on the `data` module (the forked
-    pool workers that run the jobs' points).  When `gate_path` is
-    given, the `data` copies block until the file is touched, so a
-    job's test can connect to its worker's signals first.
+    `arr_to_hydro_results` on the `window` module, which covers the
+    in-process runs: the startup run and any rerun.  A job's pooled
+    points are the tests' own patch: each test swaps in the session
+    class the job constructs (see `_patch_pool_sessions`).
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
     monkeypatch.setattr(gui_window, "arr_to_hydro_results", hydro_fake)
-    if gate_path is None:
-        monkeypatch.setattr(gui_data, "arr_to_results", full_fake)
-        monkeypatch.setattr(gui_data, "arr_to_hydro_results", hydro_fake)
-    else:
-        monkeypatch.setattr(
-            gui_data,
-            "arr_to_results",
-            _file_gated_fake(full_fake, gate_path),
-        )
-        monkeypatch.setattr(
-            gui_data,
-            "arr_to_hydro_results",
-            _file_gated_fake(hydro_fake, gate_path),
-        )
     return gui_window.MainWindow(input_data)
 
 
@@ -4164,13 +4282,15 @@ class TestGradients:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -4179,6 +4299,13 @@ class TestGradients:
             _pump()
             assert len(calls) == 1
 
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
+            )
             win._on_gradients_clicked()
             worker = win._worker
             assert isinstance(worker, gui_window._GradientWorker)
@@ -4196,10 +4323,10 @@ class TestGradients:
                 and win._worker is None
             )
             _pump()
-            # The job's points ran in the pool (their `calls`
-            # appends never reach this process): only the
-            # in-process startup run is recorded, and the last
-            # step completes the bar.
+            # The job's points ran in the fake session (which
+            # scores them without recording): only the in-process
+            # startup run is recorded, and the last step completes
+            # the bar.
             assert len(calls) == 1
             assert steps
             assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
@@ -4248,13 +4375,15 @@ class TestGradients:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -4269,6 +4398,13 @@ class TestGradients:
             _pump()
             assert len(calls) == 2
 
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
+            )
             win._on_gradients_clicked()
             worker = win._worker
             assert isinstance(worker, gui_window._GradientWorker)
@@ -4286,8 +4422,8 @@ class TestGradients:
                 and win._worker is None
             )
             _pump()
-            # The job's points ran in the pool (their `calls`
-            # appends never reach this process): the two in-process
+            # The job's points ran in the fake session (which
+            # scores them without recording): the two in-process
             # runs (the startup and the mode change) are the only
             # calls recorded, and the last step completes the bar.
             assert len(calls) == 2
@@ -4325,13 +4461,14 @@ class TestGradients:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
-        A pool point that fails does not fail the job: its column
+        A job point that fails does not fail the job: its column
         of the difference matrix is all NaN (the missing value),
         and the completion status counts the failure.
         """
         free = _free_keys(input_data)
         calls: list[np.ndarray] = []
         plain_fake = _fake_results_factory(calls, input_data)
+        pool_fake = _fake_results_factory(None, input_data)
         failing_index: int = list(input_data.bounds).index(free[0])
 
         monkeypatch.chdir(tmp_path)
@@ -4350,19 +4487,20 @@ class TestGradients:
             # equal the base there, so they run clean.
             base_value: float = win._param_panel.param_values()[free[0]]
 
-            def flaky(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
+            def pool_evaluate(
+                x: np.ndarray, mode: str
             ) -> gui_data.GuiRunResults:
                 if float(x[failing_index]) > base_value:
                     raise ValueError("point failed")
-                return plain_fake(x, _input_data)
+                return pool_fake(x, input_data)
 
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(flaky, gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                pool_evaluate,
+                [],
+                gate_path=gate,
             )
-
             win._on_gradients_clicked()
             worker = win._worker
             assert isinstance(worker, gui_window._GradientWorker)
@@ -4380,10 +4518,10 @@ class TestGradients:
                 and win._worker is None
             )
             _pump()
-            # The job's points ran in the pool (their `calls`
-            # appends never reach this process): only the
-            # in-process startup run is recorded, and the last
-            # step completes the bar.
+            # The job's points ran in the fake session (which
+            # scores them without recording): only the in-process
+            # startup run is recorded, and the last step completes
+            # the bar.
             assert len(calls) == 1
             assert steps
             assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
@@ -4436,6 +4574,7 @@ class TestGradients:
         free = _free_keys(input_data)
         calls: list[np.ndarray] = []
         plain_fake = _fake_results_factory(calls, input_data)
+        pool_fake = _fake_results_factory(None, input_data)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", plain_fake)
@@ -4462,19 +4601,20 @@ class TestGradients:
             assert not win._results_are_up_to_date()
             base_x: np.ndarray = win._current_x()
 
-            def flaky(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
+            def pool_evaluate(
+                x: np.ndarray, mode: str
             ) -> gui_data.GuiRunResults:
                 if np.array_equal(x, base_x):
                     raise ValueError("point failed")
-                return plain_fake(x, _input_data)
+                return pool_fake(x, input_data)
 
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(flaky, gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                pool_evaluate,
+                [],
+                gate_path=gate,
             )
-
             win._on_gradients_clicked()
             worker = win._worker
             assert isinstance(worker, gui_window._GradientWorker)
@@ -4497,10 +4637,9 @@ class TestGradients:
             assert not win._save_action.isEnabled()
             assert win._run_action.isEnabled()
             assert win._gradients_action.isEnabled()
-            # The job's points ran in the pool (their `calls`
-            # appends never reach this process): only the
-            # in-process startup run is recorded, and no matrix
-            # was written.
+            # The job's points ran in the fake session (which
+            # scores them without recording): only the in-process
+            # startup run is recorded, and no matrix was written.
             assert len(calls) == 1
             assert list((tmp_path / "results").glob("gradients_*.csv")) == []
         finally:
@@ -4577,21 +4716,21 @@ class TestGradients:
             _pump()
             assert win._results_are_up_to_date()
 
-            # The job's pool points block on a file gate (visible
-            # to the forked workers) until the test has connected
-            # to the worker's progress_step signal: the worker is
-            # created by the click, so it cannot be connected in
-            # advance, and the gate keeps it from completing (and
-            # emitting a step for) a point before the connection.
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(full_fake, gate),
+            # The job's session batches block on a file gate until
+            # the test has connected to the worker's progress_step
+            # signal: the worker is created by the click, so it
+            # cannot be connected in advance, and the gate keeps
+            # the session from completing (and emitting a step
+            # for) a point before the connection.
+            pool_full, pool_hydro = _gradient_fake_factory(
+                None, input_data, free[0], free[1]
             )
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_hydro_results",
-                _file_gated_fake(hydro_fake, gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
             )
 
             win._on_gradients_clicked()
@@ -4860,13 +4999,15 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -4882,6 +5023,13 @@ class TestLineSearch:
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
+            )
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
@@ -4903,10 +5051,11 @@ class TestLineSearch:
             )
             _pump()
             # The base point's results were handed in, the
-            # direction came from its own central differences
-            # (the first pool phase), then the 25 search points
-            # were run (the second): all the job's points ran in
-            # the pool, so only the in-process startup run is
+            # direction came from forward differences over the
+            # base point's own perturbations (one session batch),
+            # and the wave schedule then scored the line in
+            # further batches: all the job's points ran in the
+            # fake session, so only the in-process startup run is
             # recorded, and the last step completes the bar.
             assert len(calls) == 1
             assert steps
@@ -4914,11 +5063,11 @@ class TestLineSearch:
             assert len({total for _done, total in steps}) == 1
             total: int = steps[0][1]
             assert steps[-1] == (total, total)
-            assert len(free) + 25 <= total <= 2 * len(free) + 25
+            assert len(free) + 8 <= total <= len(free) + 16
 
             assert win._line_search_state is not None
             profile: pd.DataFrame = win._line_search_state.profile
-            assert len(profile) == 25
+            assert 8 <= len(profile) <= 16
             assert profile.index.is_monotonic_increasing
             # The direction is unit length, so the farthest step is
             # the whole remaining distance to the upper bound.
@@ -4956,6 +5105,7 @@ class TestLineSearch:
                 win._status_label.text(),
             ) is not None
         finally:
+            gate.touch()
             _close_window(win)
 
     def test_line_search_job_failed_point_is_nan_in_profile(
@@ -4977,13 +5127,15 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -4999,92 +5151,38 @@ class TestLineSearch:
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
-            # The window has no gradient job yet, so the worker
-            # computes its own direction: replay the same central
-            # differences with a separate fake (the precomputed
-            # points' calls must not land in `calls`) to
-            # precompute the 25 search points bit for bit.
-            pre_calls: list[np.ndarray] = []
-            pre_full, _pre_hydro = _gradient_fake_factory(
-                pre_calls, input_data, free[0], free[1]
-            )
-            base_x: np.ndarray = win._current_x()
-            bounds: dict[str, tuple[float, float]] = (
-                win._param_panel.current_bounds()
-            )
-            search_steps: list[_Perturbation] = free_parameter_steps(
-                base_x, bounds
-            )
-            f_plus: list[np.ndarray] = [
-                objective_vector(pre_full(step.x_plus, input_data))[1]
-                for step in search_steps
-            ]
-            f_minus: list[np.ndarray] = [
-                objective_vector(pre_full(step.x_minus, input_data))[1]
-                for step in search_steps
-            ]
-            assert win._results is not None
-            base_labels, _ = objective_vector(win._results)
-            row_index: int = base_labels.index("Streamflow: KGE")
-            matrix: np.ndarray = gradient_matrix(
-                f_plus, f_minus, search_steps
-            )
-            direction: np.ndarray = expand_direction(
-                matrix[row_index]
-                / float(np.linalg.norm(matrix[row_index])),
-                search_steps,
-                bounds,
-            )
-            interval = feasible_t_interval(
-                base_x, direction, search_steps, bounds
-            )
-            assert interval is not None
-            t_lo, t_hi = interval
-            from ..gui.line_search import search_t_points
+            # The feasible interval from the midpoint base is
+            # symmetric, so the wave-1 grid of the engine schedule
+            # is predictable even though the direction carries
+            # forward-difference noise: flag the sixth grid step's
+            # parameter value (tolerantly, since the fake objective
+            # depends only on this coordinate) as the point that
+            # fails, and delegate every other point to the startup
+            # fakes' non-recording twins.
+            low: float = win._param_panel.current_bounds()[free[0]][0]
+            keys: list[str] = list(win._param_panel.current_bounds())
+            failing_position: int = keys.index(free[0])
+            wave_grid: np.ndarray = search_t_points(low - mid, high - mid, 7)
+            failing_value: float = mid + float(wave_grid[5])
 
-            # The same grid the worker builds: a linspace over the
-            # feasible interval with the point nearest the base
-            # snapped onto it (a no-op for this symmetric interval).
-            t_points: np.ndarray = search_t_points(
-                t_lo, t_hi, gui_window._LINE_SEARCH_POINTS
-            )
-            search_points: list[np.ndarray] = [
-                base_x + t * direction for t in t_points
-            ]
-            # The point that fails is a non-base grid point: the
-            # base point (t = 0) is no longer run in the pool, so it
-            # cannot be the one that fails.
-            failed_index: int = 5
-
-            # The search's own pool phase is gated on its own file,
-            # re-patched for the search's workers: the fake raises
-            # for the one flagged search point and delegates to the
-            # startup fake otherwise.
-            def flaky_full(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
+            def pool_evaluate(
+                x: np.ndarray, mode: str
             ) -> gui_data.GuiRunResults:
-                if np.array_equal(x, search_points[failed_index]):
+                if abs(float(x[failing_position]) - failing_value) <= (
+                    1e-9 * (high - low)
+                ):
                     raise ValueError("point failed")
-                return full_fake(x, _input_data)
+                if mode == MODE_HYDRO:
+                    return pool_hydro(x, input_data)
+                return pool_full(x, input_data)
 
-            def flaky_hydro(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
-            ) -> gui_data.GuiRunResults:
-                if np.array_equal(x, search_points[failed_index]):
-                    raise ValueError("point failed")
-                return hydro_fake(x, _input_data)
-
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(flaky_full, gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                pool_evaluate,
+                [],
+                gate_path=gate,
             )
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_hydro_results",
-                _file_gated_fake(flaky_hydro, gate),
-            )
-
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
@@ -5106,10 +5204,11 @@ class TestLineSearch:
             )
             _pump()
             # The base point's results were handed in, the
-            # direction came from its own central differences
-            # (the first pool phase), then the 25 search points
-            # were run (the second): all the job's points ran in
-            # the pool, so only the in-process startup run is
+            # direction came from forward differences over the
+            # base point's own perturbations (one session batch),
+            # and the wave schedule then scored the line in
+            # further batches: all the job's points ran in the
+            # fake session, so only the in-process startup run is
             # recorded, and the last step completes the bar.
             assert len(calls) == 1
             assert steps
@@ -5117,16 +5216,20 @@ class TestLineSearch:
             assert len({total for _done, total in steps}) == 1
             total: int = steps[0][1]
             assert steps[-1] == (total, total)
-            assert len(free) + 25 <= total <= 2 * len(free) + 25
+            assert len(free) + 8 <= total <= len(free) + 16
 
             assert win._line_search_state is not None
             state: gui_window._LineSearchSnapshot = win._line_search_state
             profile: pd.DataFrame = state.profile
-            assert len(profile) == 25
+            assert 8 <= len(profile) <= 16
             values: np.ndarray = profile["value"].to_numpy(dtype=np.float64)
-            # The failed search point is NaN (the missing value),
-            # and every other point reports a finite value.
-            assert np.isnan(values[failed_index])
+            # The failed grid point is the profile's only NaN row,
+            # at its grid step; every other row is finite.
+            nan_rows: np.ndarray = np.flatnonzero(np.isnan(values))
+            assert len(nan_rows) == 1
+            assert float(profile.index[nan_rows[0]]) == pytest.approx(
+                float(wave_grid[5])
+            )
             assert np.isfinite(values).sum() == len(profile) - 1
 
             # The best point is chosen among the finite values:
@@ -5181,10 +5284,10 @@ class TestLineSearch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
-        The grid point at ``t = 0`` is the base point itself: the
-        worker reuses the handed-in base results for that profile
-        row instead of running the point in the pool, and every
-        other grid point is pooled exactly once.
+        The wave grid's point at ``t = 0`` is the base point itself:
+        the worker reuses the handed-in base results for that
+        profile row instead of scoring the point through the
+        session, and every other grid point is pooled exactly once.
         """
         monkeypatch.chdir(tmp_path)
         bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
@@ -5200,36 +5303,17 @@ class TestLineSearch:
             hydro, rt
         )
 
-        received: list[np.ndarray] = []
+        def flat_evaluate(
+            _x: np.ndarray, _mode: str
+        ) -> gui_data.GuiRunResults:
+            point_hydro, point_rt = _synthetic_results(input_data)
+            point_hydro.objective_functions = (
+                point_hydro.objective_functions + 0.1
+            )
+            return gui_data.GuiRunResults(point_hydro, point_rt)
 
-        def pool_fake(
-            points: list[np.ndarray],
-            _mode: str,
-            _csv_path: str,
-            workers: int | None = None,
-            on_result: (
-                Callable[[int, gui_data.GuiRunResults | str], None] | None
-            ) = None,
-            model_key: str = "lateral_three_layer",
-            network: pt.ReactionNetwork | None = None,
-            column_map: dict[str, str | None] | None = None,
-        ) -> list[gui_data.GuiRunResults | str]:
-            payloads: list[gui_data.GuiRunResults | str] = []
-            for index, point in enumerate(points):
-                received.append(np.array(point))
-                point_hydro, point_rt = _synthetic_results(input_data)
-                point_hydro.objective_functions = (
-                    point_hydro.objective_functions + 0.1
-                )
-                payload: gui_data.GuiRunResults = gui_data.GuiRunResults(
-                    point_hydro, point_rt
-                )
-                payloads.append(payload)
-                if on_result is not None:
-                    on_result(index, payload)
-            return payloads
-
-        monkeypatch.setattr(gui_window, "map_model_runs", pool_fake)
+        sessions: list[_FakeRunSession] = []
+        _patch_pool_sessions(monkeypatch, gui_window, flat_evaluate, sessions)
         worker: gui_window._LineSearchWorker = gui_window._LineSearchWorker(
             base_x,
             steps,
@@ -5246,7 +5330,7 @@ class TestLineSearch:
             assert outcome.error is None
             assert outcome.profile is not None
             profile: pd.DataFrame = outcome.profile
-            assert len(profile) == 25
+            assert 8 <= len(profile) <= 16
             t_values: np.ndarray = profile.index.to_numpy(
                 dtype=np.float64
             )
@@ -5262,10 +5346,16 @@ class TestLineSearch:
             for row in range(len(t_values)):
                 if row != zero_row:
                     assert values[row] == pytest.approx(1.0)
-            # The pool saw exactly the non-base points, once each.
-            assert len(received) == 24
-            for point in received:
-                assert not np.array_equal(point, base_x)
+            # One session served the whole search: it saw exactly
+            # the grid points other than the base, once each, and
+            # closed when the search finished.
+            assert len(sessions) == 1
+            pooled: int = sum(len(batch) for batch in sessions[0].batches)
+            assert pooled == len(profile) - 1
+            for batch in sessions[0].batches:
+                for point in batch:
+                    assert not np.array_equal(point, base_x)
+            assert sessions[0].closed
         finally:
             worker.deleteLater()
             _pump()
@@ -5476,13 +5566,15 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gradient_gate = tmp_path / "gradient_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gradient_gate,
         )
         try:
             _wait_until(
@@ -5491,6 +5583,13 @@ class TestLineSearch:
             _pump()
             assert len(calls) == 1
 
+            _patch_pool_sessions(
+                monkeypatch,
+                model_pool,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gradient_gate,
+            )
             win._on_gradients_clicked()
             worker = win._worker
             assert isinstance(worker, gui_window._GradientWorker)
@@ -5507,10 +5606,10 @@ class TestLineSearch:
                 and win._worker is None
             )
             _pump()
-            # The job's points ran in the pool (their `calls`
-            # appends never reach this process): only the
-            # in-process startup run is recorded, and the last
-            # step completes the bar.
+            # The job's points ran in the fake session (which
+            # scores them without recording): only the in-process
+            # startup run is recorded, and the last step completes
+            # the bar.
             calls_after_gradient: int = len(calls)
             assert calls_after_gradient == 1
             assert gradient_steps
@@ -5526,18 +5625,16 @@ class TestLineSearch:
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
-            # The search's own pool phase is gated on its own file,
-            # re-patched for the search's workers.
+            # The search runs in a session of its own, gated on its
+            # own file so the test can connect to the worker's
+            # progress before any point completes.
             search_gate = tmp_path / "search_gate"
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(full_fake, search_gate),
-            )
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_hydro_results",
-                _file_gated_fake(hydro_fake, search_gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=search_gate,
             )
 
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
@@ -5561,20 +5658,23 @@ class TestLineSearch:
             _pump()
             # No direction differences and no base re-run: the
             # snapshot's row supplies the direction and the base
-            # point's results are handed in, so the only pool
-            # points are the 25 search points — and none of them
-            # run in-process, so the recorded calls stay put.
+            # point's results are handed in, so the progress total
+            # is exactly the wave schedule's 15-point budget — and
+            # none of the points run in-process, so the recorded
+            # calls stay put.
             assert len(calls) == 1
             assert search_steps
             assert all(
                 a[0] < b[0] for a, b in zip(search_steps, search_steps[1:])
             )
             assert len({total for _done, total in search_steps}) == 1
-            assert search_steps[-1] == (25, 25)
+            search_total: int = search_steps[0][1]
+            assert search_steps[-1] == (search_total, search_total)
+            assert search_total == 15
 
             assert win._line_search_state is not None
             profile: pd.DataFrame = win._line_search_state.profile
-            assert len(profile) == 25
+            assert 8 <= len(profile) <= 16
             # The snapshot's row is the raw difference, 2.0 along
             # free[0]'s axis; the search renormalizes it to a unit
             # direction, so the farthest step spans the whole
@@ -5614,13 +5714,15 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "search_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -5634,6 +5736,13 @@ class TestLineSearch:
             )
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
+            )
             win._start_line_search(terms)
             worker = win._worker
             assert isinstance(worker, gui_window._LineSearchWorker)
@@ -5657,14 +5766,14 @@ class TestLineSearch:
             assert len({total for _done, total in steps}) == 1
             total: int = steps[0][1]
             assert steps[-1] == (total, total)
-            assert len(free) + 25 <= total <= 2 * len(free) + 25
+            assert len(free) + 8 <= total <= len(free) + 16
 
             state = win._line_search_state
             assert state is not None
             assert state.mode == MODE_FULL
             assert state.terms == ["Streamflow: KGE", "Streamflow: NSE"]
             profile: pd.DataFrame = state.profile
-            assert len(profile) == 25
+            assert 8 <= len(profile) <= 16
             assert profile.columns.tolist()[:3] == [
                 "value",
                 "Streamflow: KGE",
@@ -5712,12 +5821,12 @@ class TestLineSearch:
     ) -> None:
         """
         The same checkbox selection searches in hydro mode: the
-        pool runs the hydro objectives and the page and the
+        session runs the hydro objectives and the page and the
         status report the hydro search.
         """
         free = _free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, _ = _gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         win = _make_window(input_data, tmp_path, monkeypatch, full_fake)
@@ -5729,27 +5838,31 @@ class TestLineSearch:
             assert len(calls) == 1
 
             # No auto run after the mode switch: the search's
-            # points are the only pool work, held on the file
-            # gate until the test releases them.
+            # session batches are the only pooled work, held on
+            # the file gate until the test releases them.  The
+            # session's evaluator touches a marker file per point
+            # so the test can see the points ran through it.
             win._auto_run_action.setChecked(False)
             win._mode_action.setChecked(True)
             file_gate = tmp_path / "job_gate"
+            pool_full, pool_hydro = _gradient_fake_factory(
+                None, input_data, free[0], free[1]
+            )
 
-            def marking_hydro_fake(
-                x: np.ndarray, _input_data: gui_data.GuiInputData
+            def marking_evaluate(
+                x: np.ndarray, mode: str
             ) -> gui_data.GuiRunResults:
                 (tmp_path / f"hydro_{float(x.sum()):.6f}").touch()
-                return hydro_fake(x, _input_data)
+                if mode == MODE_HYDRO:
+                    return pool_hydro(x, input_data)
+                return pool_full(x, input_data)
 
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_hydro_results",
-                _file_gated_fake(marking_hydro_fake, file_gate),
-            )
-            monkeypatch.setattr(
-                gui_data,
-                "arr_to_results",
-                _file_gated_fake(full_fake, file_gate),
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                marking_evaluate,
+                [],
+                gate_path=file_gate,
             )
 
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
@@ -5809,13 +5922,15 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "search_gate"
+        pool_full, pool_hydro = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
+        )
         win = _gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
             full_fake,
             hydro_fake,
-            gate_path=gate,
         )
         try:
             _wait_until(
@@ -5846,6 +5961,13 @@ class TestLineSearch:
             terms: frozenset[str] = frozenset({"DOC: KGE"})
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
+            _patch_pool_sessions(
+                monkeypatch,
+                gui_window,
+                _mode_evaluate(pool_full, pool_hydro, input_data),
+                [],
+                gate_path=gate,
+            )
             win._start_line_search(terms)
             worker = win._worker
             assert isinstance(worker, gui_window._LineSearchWorker)
@@ -5870,10 +5992,11 @@ class TestLineSearch:
             total: int = steps[0][1]
             assert steps[-1] == (total, total)
             # The base point's results were handed in and the
-            # midpoint base dedups against nothing, so the
-            # direction's central differences run for every free
-            # parameter, then the 25 search points follow.
-            assert total == 2 * len(free) + 25
+            # forward differences run for every free parameter
+            # (nothing dedups at the midpoint base), so the total
+            # is the difference batch plus the wave schedule's
+            # 15-point budget.
+            assert total == len(free) + 15
 
             state = win._line_search_state
             assert state is not None
@@ -5984,7 +6107,6 @@ class TestLineSearch:
             calls, input_data, free[0], free[1]
         )
         gate = threading.Event()
-        file_gate = tmp_path / "job_gate"
 
         def gated_fake(
             x: np.ndarray, _input_data: gui_data.GuiInputData
@@ -5998,18 +6120,17 @@ class TestLineSearch:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
         monkeypatch.setattr(gui_window, "arr_to_hydro_results", gated_fake)
-        # The search job's points run in a forked pool, whose
-        # workers resolve the fakes from the `data` module. The
-        # file gate holds them until the test releases it.
-        monkeypatch.setattr(
-            gui_data,
-            "arr_to_results",
-            _file_gated_fake(full_fake, file_gate),
+        # The search job's points run in the session it builds:
+        # the fake session scores them in-process, so the test's
+        # second half does not fork real workers.
+        pool_full, _ = _gradient_fake_factory(
+            None, input_data, free[0], free[1]
         )
-        monkeypatch.setattr(
-            gui_data,
-            "arr_to_hydro_results",
-            _file_gated_fake(full_fake, file_gate),
+        _patch_pool_sessions(
+            monkeypatch,
+            gui_window,
+            _mode_evaluate(pool_full, pool_full, input_data),
+            [],
         )
         win = gui_window.MainWindow(input_data)
         try:
@@ -6061,9 +6182,8 @@ class TestLineSearch:
 
             # With no job in flight, the same call starts the
             # search: the base point's results are handed in, and
-            # the worker computes the direction and the search
-            # points itself in the pool.
-            file_gate.touch()
+            # the worker computes the direction and waves the
+            # search through its session.
             terms = frozenset({"Streamflow: KGE"})
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
@@ -6074,13 +6194,12 @@ class TestLineSearch:
                 and win._worker is None
             )
             _pump()
-            # Only the in-process startup run is recorded: the
-            # job's points ran in forked workers, whose calls
-            # never reach this process's list.
+            # The job's points ran in the fake session (which
+            # scores them without recording): only the in-process
+            # startup run is recorded.
             assert len(calls) == 1
         finally:
             gate.set()
-            file_gate.touch()
             _close_window(win)
 
 

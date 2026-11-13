@@ -222,6 +222,7 @@ def project_direction(
     direction: np.ndarray,
     positions: Sequence[int],
     bound_pairs: Sequence[tuple[float, float]],
+    names: Sequence[str] | None = None,
 ) -> np.ndarray:
     """
     The ascent direction with every out-of-bounds component dropped.
@@ -248,6 +249,9 @@ def project_direction(
             components may need dropping.
         bound_pairs: The (low, high) bound of each of those
             parameters, in `positions`' order.
+        names: Optional human-readable names for the parameters, in
+            `positions`' order.  When given, a failure from blocked
+            parameters names them instead of their positions.
 
     Returns:
         The projected direction as a unit-length vector.
@@ -256,12 +260,17 @@ def project_direction(
         ValueError:
             Raised when no component survives the projection: every
             moving parameter sits on the bound its component points
-            out of (the message names the blocked positions), or the
-            direction carries no component along any of them.
+            out of (the message names the blocked parameters, by
+            `names` when they were supplied and by position
+            otherwise), or the direction carries no component along
+            any of them.
     """
     blocked: list[int] = []
+    blocked_names: list[str] = []
     projected: np.ndarray = np.array(direction, dtype=np.float64, copy=True)
-    for position, (low, high) in zip(positions, bound_pairs):
+    for entry, (position, (low, high)) in enumerate(
+        zip(positions, bound_pairs)
+    ):
         component: float = float(projected[position])
         if component == 0.0:
             continue
@@ -270,17 +279,26 @@ def project_direction(
         if component < 0.0 and base - low <= tolerance:
             projected[position] = 0.0
             blocked.append(position)
+            if names is not None:
+                blocked_names.append(names[entry])
         elif component > 0.0 and high - base <= tolerance:
             projected[position] = 0.0
             blocked.append(position)
+            if names is not None:
+                blocked_names.append(names[entry])
     norm: float = float(np.linalg.norm(projected))
     if norm == 0.0:
         if blocked:
+            if names is not None:
+                blocked_labels: str = ", ".join(blocked_names)
+            else:
+                blocked_labels = "positions " + ", ".join(
+                    str(position) for position in blocked
+                )
             raise ValueError(
                 "The line search has no feasible direction: the ascent "
                 "direction points out of the current bounds at every "
-                "free parameter that can move (positions "
-                f"{', '.join(str(position) for position in blocked)})."
+                f"free parameter that can move ({blocked_labels})."
             )
         raise ValueError(
             "The line search has no feasible direction: the ascent "
