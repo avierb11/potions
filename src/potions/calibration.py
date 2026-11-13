@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
-from multiprocessing import Pool
+from multiprocessing import Pool, get_context
 import numpy as np
 from numpy import float64 as f64
 from numpy.typing import NDArray
 from pandas import Series
-from scipy.optimize import differential_evolution, minimize, OptimizeResult
+from scipy.optimize import differential_evolution, OptimizeResult
 
 from .common_types import (
     CalibrationOptions,
@@ -20,6 +22,15 @@ from .common_types import (
     RtZoneConfiguration,
 )
 from .core import SubsurfaceZone, SubsurfaceZoneB
+from .line_search import (
+    LineSearchConfig,
+    LineSearchResult,
+    PointKey,
+    feasible_t_interval,
+    forward_gradient,
+    point_key,
+    wave_search,
+)
 from .objective_functions import DEFAULT_RT_OBJECTIVE_SPEC, evaluate_components
 
 if TYPE_CHECKING:
@@ -282,34 +293,44 @@ def arr_to_results(arr: NDArray, data: RtCalibrationData) -> ModelResults:
     )
 
 
-def make_objective(
-    data: RtCalibrationData,
-    spec: Optional[ObjectiveSpec] = None,
-) -> Callable[[NDArray], float]:
-    """Return a callable ``arr -> float`` suitable for
-    :func:`scipy.optimize.differential_evolution`.
+@dataclass(slots=True)
+class RtObjective:
+    """Picklable scalar objective: the composite fit score at one parameter vector.
 
-    Args:
-        data: The calibration data object.
-        spec: The objective specification (defaults to the nine-term preset).
+    Picklable because a forkserver pool pickles its initargs into the
+    worker processes; a closure over local state is unpicklable across
+    a spawn-style boundary, so the objective's captured data lives in
+    plain fields instead.
 
-    Returns:
-        Callable[[NDArray], float]: The scalar objective used by the optimizer.
+    Attributes:
+        data: The calibration data object the model runs use.
+        spec: The composite objective specification.
     """
-    if spec is None:
-        spec = DEFAULT_RT_OBJECTIVE_SPEC
 
-    def _objective(arr: NDArray) -> float:
+    data: RtCalibrationData
+    spec: ObjectiveSpec
+
+    def __call__(self, arr: NDArray) -> float:
+        """Score one flat parameter array against the calibration data.
+
+        Args:
+            arr: The flat parameter array, in :func:`build_rt_bounds` order.
+
+        Returns:
+            float: The composite objective (lower is better); ``inf``
+            when the model run or scoring fails, so a bad point is
+            never better than a good one.
+        """
         try:
-            res: ModelResults = arr_to_results(arr, data)
+            res: ModelResults = arr_to_results(arr, self.data)
 
             hydro_sim: Series = res.hydro.simulation["streamflow_sim"]
             if "meas_streamflow_mmd" in res.hydro.simulation.columns:
                 q_meas: Series = res.hydro.simulation["meas_streamflow_mmd"]
             else:
-                q_meas = data.q_meas
+                q_meas = self.data.q_meas
 
-            target_col: str = f"{data.target_species}_riv"
+            target_col: str = f"{self.data.target_species}_riv"
             rt_sim: Optional[Series] = None
             if (
                 res.reactive_transport is not None
@@ -317,24 +338,46 @@ def make_objective(
             ):
                 rt_sim = res.reactive_transport.simulation[target_col]
 
-            doc_meas: Optional[Series] = data.conc_df[data.target_species]
+            doc_meas: Optional[Series] = self.data.conc_df[self.data.target_species]
             doc_sim: Optional[Series] = rt_sim
 
             return float(
                 evaluate_components(
-                    spec,
+                    self.spec,
                     q_meas=q_meas,
                     q_sim=hydro_sim,
                     doc_meas=doc_meas,
                     doc_sim=doc_sim,
-                    target_species=data.target_species,
+                    target_species=self.data.target_species,
                 )
             )
         except Exception as e:
             print(f"Calibration run failed (params[:5]={arr[:5]}): {e}")
             return float("inf")
 
-    return _objective
+    def __repr__(self) -> str:
+        """Return a concise representation naming the target species."""
+        return f"RtObjective(target_species={self.data.target_species!r})"
+
+
+def make_objective(
+    data: RtCalibrationData,
+    spec: Optional[ObjectiveSpec] = None,
+) -> RtObjective:
+    """Return a picklable ``arr -> float`` objective suitable for
+    :func:`scipy.optimize.differential_evolution` and for
+    :func:`_map_objectives`' forkserver pool.
+
+    Args:
+        data: The calibration data object.
+        spec: The objective specification (defaults to the nine-term preset).
+
+    Returns:
+        RtObjective: The scalar objective used by the optimizers.
+    """
+    if spec is None:
+        spec = DEFAULT_RT_OBJECTIVE_SPEC
+    return RtObjective(data=data, spec=spec)
 
 
 def calibrate(
@@ -397,6 +440,114 @@ def calibrate(
     )
 
 
+#: The objective one forkserver worker initialized itself with, set by
+#: :func:`_init_objective` in each worker process.
+_OBJECTIVE: Optional[RtObjective] = None
+
+
+def _init_objective(objective: RtObjective) -> None:
+    """Store ``objective`` in the worker process's module globals.
+
+    Args:
+        objective: The objective every batch point is scored against.
+    """
+    global _OBJECTIVE
+    _OBJECTIVE = objective
+
+
+def _evaluate_objective(arr: NDArray) -> float:
+    """Score one parameter array against the worker's initialized objective.
+
+    Args:
+        arr: The flat parameter array.
+
+    Returns:
+        float: The objective value; NaN when the objective raises, so
+        one bad point can never take down the pool.
+
+    Raises:
+        RuntimeError: Raised when the worker was never initialized
+            with an objective.
+    """
+    if _OBJECTIVE is None:
+        raise RuntimeError(
+            "_evaluate_objective ran in a worker that _init_objective "
+            "never initialized with an objective."
+        )
+    try:
+        return float(_OBJECTIVE(np.asarray(arr, dtype=np.float64)))
+    except Exception:
+        return float("nan")
+
+
+def _map_objectives(
+    objective: RtObjective,
+    points: Sequence[NDArray],
+    workers: Optional[int] = None,
+) -> list[float]:
+    """Evaluate a batch of parameter arrays concurrently in a forkserver pool.
+
+    The forkserver context starts workers from a clean server process
+    rather than forking a caller that may hold GUI state, and the warm
+    workers score the whole batch with the objective installed once as
+    the pool's initarg.
+
+    Args:
+        objective: The objective the workers score against.
+        points: The parameter arrays to score, in result order.
+        workers: Worker count; ``None`` uses ``os.cpu_count()``.
+
+    Returns:
+        list[float]: One objective value per point, aligned; a value is
+        NaN when that point's evaluation raised.
+    """
+    context = get_context("forkserver")
+    with context.Pool(
+        processes=workers or os.cpu_count() or 1,
+        initializer=_init_objective,
+        initargs=(objective,),
+    ) as pool:
+        return pool.map(_evaluate_objective, [np.asarray(p, dtype=np.float64) for p in points])
+
+
+def _polish_unchanged(
+    start: CalibrationResults,
+    x0: NDArray,
+    evaluations: int,
+    message: str,
+) -> CalibrationResults:
+    """Return ``start`` unchanged with an :class:`OptimizeResult` carrying ``message``.
+
+    Used when the gradient phase finds no usable descent direction, so
+    no line-phase point is run and the start's results are adopted as
+    they are.
+
+    Args:
+        start: The result being polished.
+        x0: The start's parameter vector.
+        evaluations: The number of objective evaluations already spent.
+        message: Why the polish stopped before searching.
+
+    Returns:
+        CalibrationResults: A copy of ``start`` with the explanatory
+        ``optimize_result``.
+    """
+    return CalibrationResults(
+        param_names=list(start.param_names),
+        best_params=np.array(x0, dtype=f64),
+        best_results=start.best_results,
+        objective=float(start.objective),
+        optimize_result=OptimizeResult(
+            x=x0,
+            fun=float(start.objective),
+            nit=0,
+            nfev=evaluations,
+            status=0,
+            message=message,
+        ),
+    )
+
+
 def polish(
     data: RtCalibrationData,
     start: CalibrationResults,
@@ -404,42 +555,124 @@ def polish(
     method: str = "L-BFGS-B",
     bounds: Optional[list[tuple[float, float]]] = None,
 ) -> CalibrationResults:
-    """Locally polish a differential-evolution result with
-    :func:`scipy.optimize.minimize`.
+    """Locally polish a differential-evolution result with the parallel
+    wave-search line search of :mod:`potions.line_search`.
+
+    The forward-difference gradient of the objective at the start
+    point gives the descent direction; the objective is then searched
+    along that direction by the wave schedule -- a grid of steps
+    across the interval the bounds allow, then recentered waves around
+    the best steps found.  Each batch of points runs concurrently in a
+    forkserver pool, and the search stops on the engine's improvement,
+    bracket-width, and point-budget bars rather than on strict
+    tolerances.  When the gradient phase yields no usable direction,
+    ``start`` is returned unchanged with the reason in its
+    ``optimize_result.message``.
 
     Args:
         data: The same calibration-data object used for :func:`calibrate`.
         start: The DE result to refine.
         spec: The objective spec.
-        method: One of "L-BFGS-B", "Powell", "Nelder-Mead".
-        bounds: Optional per-parameter bounds.
+        method: Kept for call compatibility and ignored: the search is
+            always the wave line search.
+        bounds: Optional per-parameter ``(lo, hi)`` pairs; when
+            ``None``, :func:`build_rt_bounds` values in parameter order.
 
     Returns:
-        CalibrationResults: A new result with the polished parameters.
+        CalibrationResults: A new result with the polished parameters,
+        the best point's fresh model results, and an
+        :class:`OptimizeResult` whose ``message`` names the engine's
+        stop reason.
+
+    Raises:
+        ValueError:
+            Raised when the bounds do not supply exactly one ``(lo,
+            hi)`` pair per parameter, or (from the engine) when no
+            searched point produced a finite value.
     """
     if spec is None:
         spec = DEFAULT_RT_OBJECTIVE_SPEC
-
-    obj_fn: Callable[[NDArray], float] = make_objective(data, spec)
+    objective: RtObjective = make_objective(data, spec)
     x0: NDArray = np.array(start.best_params, dtype=f64)
+    bound_pairs: list[tuple[float, float]] = (
+        list(bounds)
+        if bounds is not None
+        else list(build_rt_bounds(data.model_type, data.network, data.zone_configs).values())
+    )
+    if len(bound_pairs) != x0.size:
+        raise ValueError(
+            f"Expected one (lo, hi) bound per parameter: got {len(bound_pairs)} "
+            f"bounds for {x0.size} parameters."
+        )
 
-    kwargs: dict = {"fun": obj_fn, "x0": x0, "method": method}
-    if bounds is not None:
-        kwargs["bounds"] = bounds
-    kwargs["options"] = {"maxiter": 100, "ftol": 1e-8}
+    evaluation_count: int = 0
 
-    opt_res: OptimizeResult = minimize(**kwargs)
+    def evaluate(points: Sequence[np.ndarray]) -> list[float]:
+        nonlocal evaluation_count
+        evaluation_count += len(points)
+        return _map_objectives(objective, points)
 
-    new_arr: NDArray = opt_res.x
-    new_res: ModelResults = arr_to_results(new_arr, data)
-    objective_value: float = obj_fn(new_arr)
+    # The start point's finished DE evaluation seeds both phases'
+    # memos, so it is never re-run.
+    initial_values: dict[PointKey, float] = {point_key(x0): float(start.objective)}
+
+    positions: list[int] = list(range(x0.size))
+    offsets: list[np.ndarray] = []
+    for position, (lo, hi) in zip(positions, bound_pairs):
+        # 1% of the parameter's range, clamped so the perturbed point
+        # stays inside the bound (a parameter at its bound gets a zero
+        # step, which the gradient phase scores as 0 without a run).
+        target: float = min(float(x0[position]) + 0.01 * (hi - lo), float(hi))
+        offset: np.ndarray = np.zeros(x0.size, dtype=np.float64)
+        offset[position] = target - float(x0[position])
+        offsets.append(offset)
+
+    gradient: np.ndarray = forward_gradient(evaluate, x0, offsets, positions, initial_values)
+    norm: float = float(np.linalg.norm(gradient))
+    if norm == 0.0 or not np.isfinite(norm):
+        return _polish_unchanged(
+            start, x0, evaluation_count, "no descent direction: flat objective"
+        )
+    direction: np.ndarray = -gradient / norm
+
+    interval: tuple[float, float] | None = feasible_t_interval(
+        x0, direction, positions, bound_pairs
+    )
+    if interval is None:
+        return _polish_unchanged(start, x0, evaluation_count, "no feasible descent step")
+    t_lo, t_hi = interval
+
+    result: LineSearchResult = wave_search(
+        evaluate,
+        x0,
+        direction,
+        t_lo,
+        t_hi,
+        LineSearchConfig(minimize=True),
+        initial_values,
+    )
+
+    best_arr: NDArray = x0 + result.t_best * direction
+    # The engine only reports finite best values; the re-evaluation
+    # guards against a future engine that would not.
+    objective_value: float = float(result.best_value)
+    if not np.isfinite(objective_value):
+        objective_value = float(objective(best_arr))
+    best_res: ModelResults = arr_to_results(best_arr, data)
 
     return CalibrationResults(
         param_names=list(start.param_names),
-        best_params=np.array(new_arr, dtype=f64),
-        best_results=new_res,
+        best_params=np.array(best_arr, dtype=f64),
+        best_results=best_res,
         objective=objective_value,
-        optimize_result=opt_res,
+        optimize_result=OptimizeResult(
+            x=best_arr,
+            fun=objective_value,
+            nit=len(result.t_points),
+            nfev=result.evaluations,
+            status=0,
+            message=result.stopped_by,
+        ),
     )
 
 
