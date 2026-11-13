@@ -1220,6 +1220,10 @@ class SavedRun:
             run was saved; restoring the run reopens it maximized.
             False for a run saved before the flag existed or without
             a state file.
+        dock_state: The saved run's encoded dock-layout blob (the
+            base64 of the main window's ``saveState()``, restored via
+            ``restoreState()``); None when the state predates the
+            field or the run was saved without a state file.
     """
 
     results: GuiRunResults
@@ -1237,6 +1241,7 @@ class SavedRun:
     csv_path: str | None
     column_map: dict[str, str | None] | None
     window_maximized: bool
+    dock_state: str | None
 # =============== #
 
 
@@ -1304,6 +1309,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             csv_path=state.csv_path,
             column_map=state.column_map,
             window_maximized=state.window_maximized,
+            dock_state=state.dock_state,
         )
 
     parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
@@ -1337,6 +1343,8 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         column_map=None,
         # A stateless run never recorded a maximized state.
         window_maximized=False,
+        # A stateless run never recorded a dock layout.
+        dock_state=None,
     )
 
 

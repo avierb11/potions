@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from networkx import DiGraph
+from types import SimpleNamespace
 
 from ..core import SnowZone, SubsurfaceZoneB, SurfaceZone
 from ..hydro_model import HydrologicalModel
@@ -212,3 +213,111 @@ def test_zones_override() -> None:
 def test_len_is_num_layers(column: ColumnModel) -> None:
     # Number of layers (rows in structure).
     assert len(column) == 3
+
+
+def test_simple_calibration_freezes_base_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A partial range searches only the free parameters; the objective
+    receives the pinned values through ``base_params`` and the best
+    point is expanded back into the full vector.
+    """
+    all_names: tuple[str, ...] = tuple(
+        ColumnModel.default_parameter_ranges()
+    )
+    free_name: str = all_names[0]
+    base_params: dict[str, float] = {
+        name: 0.1 + 0.01 * index
+        for index, name in enumerate(all_names)
+    }
+    free_high: float = 0.42
+    seen: list[np.ndarray] = []
+    de_records: list[dict[str, object]] = []
+    sentinel: object = object()
+
+    class StubModel:
+        def run_hydro_model(self, **_kwargs: object) -> object:
+            return sentinel
+
+    def fake_from_array(x: np.ndarray) -> StubModel:
+        seen.append(np.array(x))
+        return StubModel()
+
+    def fake_de(func: object, bounds: object, **kwargs: object) -> object:
+        de_records.append({"func": func, "bounds": bounds, **kwargs})
+        return SimpleNamespace(x=np.array([free_high]), fun=-0.9, nfev=11)
+
+    monkeypatch.setattr(
+        ColumnModel, "hydro_from_array", staticmethod(fake_from_array)
+    )
+    monkeypatch.setattr(
+        "potions.hydro_model.opt.differential_evolution", fake_de
+    )
+    callback_calls: list[tuple[np.ndarray, float]] = []
+
+    params, results, opt_res = ColumnModel.simple_calibration(
+        forc=object(),  # type: ignore[arg-type]
+        meas_streamflow=object(),
+        metric="kge",
+        maxiter=4,
+        popsize=17,
+        param_ranges={free_name: (0.0, 1.0)},
+        base_params=base_params,
+        callback=lambda x, convergence: callback_calls.append(
+            (np.array(x), convergence)
+        ),
+    )
+
+    assert params == {free_name: free_high}
+    assert results is sentinel
+    assert opt_res.nfev == 11
+    assert len(seen) == 1
+    expected: np.ndarray = np.array(
+        [free_high if name == free_name else base_params[name] for name in all_names],
+        dtype=np.float64,
+    )
+    assert np.array_equal(seen[0], expected)
+    assert len(de_records) == 1
+    record = de_records[0]
+    assert record["bounds"] == [(0.0, 1.0)]
+    assert record["maxiter"] == 4
+    assert record["popsize"] == 17
+    assert record["callback"] is not None
+    args = record["args"]
+    assert isinstance(args, tuple)
+    assert args[0] is ColumnModel
+    assert args[5] == base_params
+    assert args[6] == (free_name,)
+    assert args[7] == all_names
+
+
+def test_simple_calibration_rejects_partial_range_without_base() -> None:
+    """A partial range must name the pinned values, or it is refused."""
+    all_names: tuple[str, ...] = tuple(
+        ColumnModel.default_parameter_ranges()
+    )
+    with pytest.raises(ValueError) as excinfo:
+        ColumnModel.simple_calibration(
+            forc=object(),  # type: ignore[arg-type]
+            meas_streamflow=object(),
+            metric="kge",
+            param_ranges={all_names[0]: (0.0, 1.0)},
+        )
+    assert "base_params" in str(excinfo.value)
+
+
+def test_simple_calibration_rejects_unknown_names() -> None:
+    """The free and fixed names must be the model's hydrology parameters."""
+    all_names: tuple[str, ...] = tuple(
+        ColumnModel.default_parameter_ranges()
+    )
+    with pytest.raises(ValueError) as excinfo:
+        ColumnModel.simple_calibration(
+            forc=object(),  # type: ignore[arg-type]
+            meas_streamflow=object(),
+            metric="kge",
+            param_ranges={"bogus": (0.0, 1.0)},
+            base_params={name: 0.2 for name in all_names},
+        )
+    assert "unknown=['bogus']" in str(excinfo.value)

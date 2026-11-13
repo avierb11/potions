@@ -125,7 +125,56 @@ def objective_function(
     meas_streamflow: Series,
     metric: Literal["kge", "nse", "combined"] | Callable[[HydroModelResults], float],
     print_value: bool,
+    base_params: Optional[dict[str, float]] = None,
+    free_names: Optional[tuple[str, ...]] = None,
+    all_names: Optional[tuple[str, ...]] = None,
 ) -> float:
+    """
+    Score one parameter vector with the hydrology model.
+
+    When ``base_params``, ``free_names``, and ``all_names`` are all
+    given, ``x`` holds only the free parameters' values, in
+    ``free_names`` order; the full parameter vector is rebuilt by
+    taking each free value and every other parameter's fixed value
+    from ``base_params``.  The expansion is done here, at module
+    level, so the objective stays picklable for the optimizer's
+    worker pool.
+
+    Args:
+        x: The parameter vector to score: the full vector, or the
+            free parameters' values when the expansion arguments are
+            given.
+        cls: The hydrology model class.
+        forc: The forcing data.
+        meas_streamflow: The measured streamflow series.
+        metric: The metric to optimize: a supported name or a
+            callable on the run's results.
+        print_value: Whether to print the metric value.
+        base_params: The fixed values of every hydrology parameter;
+            None disables the free-parameter expansion.
+        free_names: The names of the free parameters, in ``x``'s
+            order; None disables the free-parameter expansion.
+        all_names: The names of every hydrology parameter, in the
+            full vector's order; None disables the expansion.
+
+    Returns:
+        The objective value (the metric, negated for the named
+        metrics the optimizer minimizes), or infinity when the run
+        failed.
+    """
+    if (
+        base_params is not None
+        and free_names is not None
+        and all_names is not None
+    ):
+        free_values: dict[str, float] = dict(
+            zip(free_names, x, strict=True)
+        )
+        x = np.array(
+            [free_values.get(name, base_params[name]) for name in all_names],
+            dtype=np.float64,
+        )
+
     model = cls.hydro_from_array(x)
 
     try:

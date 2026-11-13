@@ -43,6 +43,35 @@ SIM_Q_NAME: Final[str] = "streamflow_sim"
 # ============================= #
 
 
+def _expand_free_parameters(
+    x: NDArray[f64],
+    free_names: tuple[str, ...],
+    base_params: Optional[dict[str, float]],
+    all_names: tuple[str, ...],
+) -> NDArray[f64]:
+    """
+    Expand a free-parameter vector into the full hydrology vector.
+
+    Args:
+        x: The free parameters' values, in ``free_names`` order.
+        free_names: The names of the free parameters.
+        base_params: The fixed value of every hydrology parameter;
+            None means ``x`` already is the full vector.
+        all_names: The names of every hydrology parameter, in the
+            full vector's order.
+
+    Returns:
+        The full parameter vector as a float64 array.
+    """
+    if base_params is None:
+        return np.asarray(x, dtype=np.float64)
+    free_values: dict[str, float] = dict(zip(free_names, x, strict=True))
+    return np.array(
+        [free_values.get(name, base_params[name]) for name in all_names],
+        dtype=np.float64,
+    )
+
+
 class HydrologicalModel:
     structure: list[list[HydrologicZone]]
 
@@ -1772,59 +1801,121 @@ class HydrologicalModel:
         ),
         num_threads: int = -1,
         polish: bool = False,
-        maxiter=10,
+        maxiter: int = 10,
         print_values: bool = False,
         param_ranges: Optional[dict[str, tuple[float, float]]] = None,
+        popsize: int = 15,
+        base_params: Optional[dict[str, float]] = None,
+        callback: Optional[Callable[[NDArray[f64], float], None]] = None,
     ) -> tuple[dict[str, float], HydroModelResults, opt.OptimizeResult]:
         """Performs a simple calibration using differential evolution.
 
+        The optimizer searches only the parameters in ``param_ranges``.
+        When ``base_params`` is given, the remaining parameters keep
+        their fixed values from it and the objective expands each free
+        point into the full hydrology vector before running the model.
+        Without ``base_params``, ``param_ranges`` must name every
+        hydrology parameter, in the model's parameter order.
+
         Args:
-            forc (ForcingData | Iterable[ForcingData]): The forcing data.
-            meas_streamflow (Series): The observed streamflow for optimization.
-            metric (Literal["nse", "kge", "combined"]): The objective function to optimize
-                ("nse", "kge", "metric").
-            use_lapse_rates (bool): Whether to include lapse rates in the
-                calibration. Defaults to False.
-            num_threads (int): Number of parallel workers for the optimizer.
+            forc: The forcing data.
+            meas_streamflow: The observed streamflow for optimization.
+            metric: The objective function to optimize: a supported
+                metric name or a callable on the run's results.
+            num_threads: Number of parallel workers for the optimizer.
                 Defaults to -1 (all cores).
-            polish (bool): If True, refines the result with a local optimizer.
+            polish: If True, refines the result with a local optimizer.
                 Defaults to False.
-            maxiter (int): Maximum number of generations for the optimizer.
+            maxiter: Maximum number of generations for the optimizer.
                 Defaults to 10.
-            print_values (bool): If True, prints metric values during
+            print_values: If True, prints metric values during
                 optimization. Defaults to False.
+            param_ranges: The bounds of the free parameters, in the
+                full parameter vector's order. Defaults to every
+                hydrology parameter's default range.
+            popsize: The differential-evolution population size
+                multiplier. Defaults to 15.
+            base_params: The value of every hydrology parameter. The
+                parameters absent from ``param_ranges`` are frozen at
+                these values. Defaults to None (every parameter is
+                free).
+            callback: Called by the optimizer after each generation
+                with the current best vector and its convergence.
+                Defaults to None.
 
         Returns:
-            tuple[dict, dict, OptimizeResult]: A tuple containing:
-                - The dictionary of the best-fit parameters.
-                - The results dictionary from the best-fit model run.
+            tuple[dict, HydroModelResults, OptimizeResult]: A tuple
+                containing:
+                - The dictionary of the best-fit free parameters.
+                - The results of the best-fit model run.
                 - The full `OptimizeResult` object from SciPy.
-        """
 
+        Raises:
+            ValueError: Raised when a partial ``param_ranges`` is
+                given without ``base_params``, or when the names do
+                not match the model's hydrology parameters.
+        """
+        all_names: tuple[str, ...] = tuple(cls.default_parameter_ranges())
         bounds: dict[str, tuple[float, float]]
         if param_ranges is None:
             bounds = cls.default_parameter_ranges()
         else:
-            bounds = param_ranges
+            bounds = dict(param_ranges)
 
+        if base_params is None:
+            if tuple(bounds) != all_names:
+                raise ValueError(
+                    "A partial parameter range needs the fixed values of "
+                    "the other hydrology parameters; pass base_params."
+                )
+            frozen: Optional[dict[str, float]] = None
+        else:
+            missing: list[str] = [
+                name for name in all_names if name not in base_params
+            ]
+            unknown: list[str] = [
+                name for name in bounds if name not in all_names
+            ]
+            if missing or unknown:
+                raise ValueError(
+                    "base_params and param_ranges must name hydrology "
+                    f"parameters; missing={missing}, unknown={unknown}."
+                )
+            frozen = {name: float(base_params[name]) for name in all_names}
+
+        free_names: tuple[str, ...] = tuple(bounds)
         bounds_list: list[tuple[float, float]] = list(bounds.values())
 
-        args = (cls, forc, meas_streamflow, metric, print_values)
+        args = (
+            cls,
+            forc,
+            meas_streamflow,
+            metric,
+            print_values,
+            frozen,
+            free_names,
+            all_names,
+        )
 
         opt_res = opt.differential_evolution(
             func=objective_function,
             bounds=bounds_list,  # type: ignore
             maxiter=maxiter,
+            popsize=popsize,
             tol=0.01,
             rng=0,
             polish=polish,
             workers=num_threads,
             args=args,
             updating="deferred",
+            callback=callback,
         )
 
         # Now, run the model and return the optimum results
-        best_results = cls.hydro_from_array(opt_res.x).run_hydro_model(
+        best_x: NDArray[f64] = _expand_free_parameters(
+            opt_res.x, free_names, frozen, all_names
+        )
+        best_results = cls.hydro_from_array(best_x).run_hydro_model(
             forc=forc,  # type: ignore
             init_state=cls.default_hydro_init_state(),
             meas_streamflow=meas_streamflow,
