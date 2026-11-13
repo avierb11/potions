@@ -111,7 +111,7 @@ def test_spearman_perfectly_monotone(obs) -> None:
     assert spearman_rho(obs, obs) == pytest.approx(1.0)
 
 
-def _mean_abs_of_selected(fn, pctl, meas) -> float:
+def mean_abs_of_selected(fn, pctl, meas) -> float:
     """Run fn over the selected timesteps and return the mean absolute value of
     the selected observations, which is unaffected by ties."""
 
@@ -128,18 +128,18 @@ def _mean_abs_of_selected(fn, pctl, meas) -> float:
 def test_low_flow_selects_lowest_values() -> None:
     obs = Series(np.arange(1.0, 11.0), dtype="float64")
     # At the 50th percentile, the bottom half (values 1-5) are selected.
-    assert _mean_abs_of_selected(objective_low_flow, 0.5, obs) == pytest.approx(3.0)
+    assert mean_abs_of_selected(objective_low_flow, 0.5, obs) == pytest.approx(3.0)
 
 
 def test_low_flow_full_percentile_keeps_all() -> None:
     obs = Series(np.arange(1.0, 11.0), dtype="float64")
-    assert _mean_abs_of_selected(objective_low_flow, 1.0, obs) == pytest.approx(5.5)
+    assert mean_abs_of_selected(objective_low_flow, 1.0, obs) == pytest.approx(5.5)
 
 
 def test_high_flow_selects_highest_values() -> None:
     obs = Series(np.arange(1.0, 11.0), dtype="float64")
     # At the 50th percentile, the top half (values 6-10) are selected.
-    assert _mean_abs_of_selected(objective_high_flow, 0.5, obs) == pytest.approx(8.0)
+    assert mean_abs_of_selected(objective_high_flow, 0.5, obs) == pytest.approx(8.0)
 
 
 def test_low_flow_invalid_percentile_raises() -> None:

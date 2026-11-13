@@ -120,14 +120,14 @@ class DraftMonod:
 
 # ==== Draft machinery ==== #
 
-_Entry = TypeVar("_Entry")
+Entry = TypeVar("Entry")
 
 
-def _upsert(
-    entries: tuple[_Entry, ...],
-    entry: _Entry,
-    key: Callable[[_Entry], str],
-) -> tuple[_Entry, ...]:
+def upsert(
+    entries: tuple[Entry, ...],
+    entry: Entry,
+    key: Callable[[Entry], str],
+) -> tuple[Entry, ...]:
     """
     Replace the entry keyed the same as `entry`, or append it.
 
@@ -141,7 +141,7 @@ def _upsert(
         The section with the replacement (or append) applied.
     """
     target: str = key(entry)
-    updated: list[_Entry] = []
+    updated: list[Entry] = []
     replaced: bool = False
     for existing in entries:
         if key(existing) == target:
@@ -154,11 +154,11 @@ def _upsert(
     return tuple(updated)
 
 
-def _remove(
-    entries: tuple[_Entry, ...],
+def remove(
+    entries: tuple[Entry, ...],
     name: str,
-    key: Callable[[_Entry], str],
-) -> tuple[_Entry, ...]:
+    key: Callable[[Entry], str],
+) -> tuple[Entry, ...]:
     """Drop the entry keyed by `name` (a no-op when absent)."""
     return tuple(existing for existing in entries if key(existing) != name)
 
@@ -185,22 +185,22 @@ class NetworkDraft:
 
     def upsert_primary(self, entry: DraftPrimary) -> "NetworkDraft":
         """Replace or append the primary entry; return the new draft."""
-        return replace(self, primary=_upsert(self.primary, entry,
+        return replace(self, primary=upsert(self.primary, entry,
                                              lambda e: e.name))
 
     def upsert_secondary(self, entry: DraftSecondary) -> "NetworkDraft":
         """Replace or append the secondary entry; return the new draft."""
-        return replace(self, secondary=_upsert(self.secondary, entry,
+        return replace(self, secondary=upsert(self.secondary, entry,
                                                lambda e: e.name))
 
     def upsert_mineral(self, entry: DraftMineral) -> "NetworkDraft":
         """Replace or append the mineral entry; return the new draft."""
-        return replace(self, mineral=_upsert(self.mineral, entry,
+        return replace(self, mineral=upsert(self.mineral, entry,
                                              lambda e: e.name))
 
     def upsert_exchange(self, entry: DraftExchange) -> "NetworkDraft":
         """Replace or append the exchange entry; return the new draft."""
-        return replace(self, exchange=_upsert(self.exchange, entry,
+        return replace(self, exchange=upsert(self.exchange, entry,
                                               lambda e: e.name))
 
     def upsert_tst(self, entry: DraftTst) -> "NetworkDraft":
@@ -211,8 +211,8 @@ class NetworkDraft:
         """
         return replace(
             self,
-            tst=_upsert(self.tst, entry, lambda e: e.mineral_name),
-            monod=_remove(self.monod, entry.mineral_name,
+            tst=upsert(self.tst, entry, lambda e: e.mineral_name),
+            monod=remove(self.monod, entry.mineral_name,
                           lambda e: e.mineral_name),
         )
 
@@ -224,24 +224,24 @@ class NetworkDraft:
         """
         return replace(
             self,
-            monod=_upsert(self.monod, entry, lambda e: e.mineral_name),
-            tst=_remove(self.tst, entry.mineral_name,
+            monod=upsert(self.monod, entry, lambda e: e.mineral_name),
+            tst=remove(self.tst, entry.mineral_name,
                         lambda e: e.mineral_name),
         )
 
     def remove_primary(self, name: str) -> "NetworkDraft":
         """Drop the primary entry named `name`; return the new draft."""
-        return replace(self, primary=_remove(self.primary, name,
+        return replace(self, primary=remove(self.primary, name,
                                              lambda e: e.name))
 
     def remove_secondary(self, name: str) -> "NetworkDraft":
         """Drop the secondary entry named `name`; return the new draft."""
-        return replace(self, secondary=_remove(self.secondary, name,
+        return replace(self, secondary=remove(self.secondary, name,
                                                lambda e: e.name))
 
     def remove_exchange(self, name: str) -> "NetworkDraft":
         """Drop the exchange entry named `name`; return the new draft."""
-        return replace(self, exchange=_remove(self.exchange, name,
+        return replace(self, exchange=remove(self.exchange, name,
                                               lambda e: e.name))
 
     def remove_mineral(self, name: str) -> "NetworkDraft":
@@ -251,15 +251,15 @@ class NetworkDraft:
         """
         return replace(
             self.remove_mineral_kinetics(name),
-            mineral=_remove(self.mineral, name, lambda e: e.name),
+            mineral=remove(self.mineral, name, lambda e: e.name),
         )
 
     def remove_mineral_kinetics(self, name: str) -> "NetworkDraft":
         """Drop both kinetics entries of the mineral `name`."""
         return replace(
             self,
-            tst=_remove(self.tst, name, lambda e: e.mineral_name),
-            monod=_remove(self.monod, name, lambda e: e.mineral_name),
+            tst=remove(self.tst, name, lambda e: e.mineral_name),
+            monod=remove(self.monod, name, lambda e: e.mineral_name),
         )
 
     @classmethod
@@ -289,7 +289,7 @@ class NetworkDraft:
         if network.has_exchange:
             carried.add("X-")
 
-        def _terms(terms: dict[str, float]) -> tuple[tuple[str, float], ...]:
+        def terms(terms: dict[str, float]) -> tuple[tuple[str, float], ...]:
             return tuple(
                 (key, value)
                 for key, value in sorted(terms.items())
@@ -310,7 +310,7 @@ class NetworkDraft:
             secondary=tuple(
                 DraftSecondary(
                     name=s.name,
-                    stoichiometry=_terms(s.stoichiometry),
+                    stoichiometry=terms(s.stoichiometry),
                     eq_consts=tuple(s.eq_consts),
                     molar_mass=s.molar_mass,
                     charge=s.charge,
@@ -322,7 +322,7 @@ class NetworkDraft:
                 DraftMineral(
                     name=s.name,
                     molar_mass=s.molar_mass,
-                    stoichiometry=_terms(s.stoichiometry),
+                    stoichiometry=terms(s.stoichiometry),
                     eq_consts=tuple(s.eq_consts),
                     molar_volume=s.molar_volume,
                 )
@@ -331,7 +331,7 @@ class NetworkDraft:
             exchange=tuple(
                 DraftExchange(
                     name=s.name,
-                    stoichiometry=_terms(s.stoichiometry),
+                    stoichiometry=terms(s.stoichiometry),
                     log10_k_eq=s.log10_k_eq,
                     charge=s.charge,
                 )
@@ -431,7 +431,7 @@ class NetworkDraft:
         )
 
 
-def _dangling_reference_issues(draft: NetworkDraft) -> list[str]:
+def dangling_reference_issues(draft: NetworkDraft) -> list[str]:
     """
     V3/V7-style findings on the draft's un-normalized entries.
 
@@ -527,7 +527,7 @@ def draft_validation(
         draft may be applied; the second never blocks.
     """
     issues: list[pt.NetworkValidationIssue] = draft.to_network().validate()
-    errors: list[str] = _dangling_reference_issues(draft)
+    errors: list[str] = dangling_reference_issues(draft)
     warnings: list[str] = []
     for issue in issues:
         text: str = f"{issue.code}: {issue.message}"
@@ -541,20 +541,20 @@ def draft_validation(
 # ==== The dialog ==== #
 
 # The four species sections the dialog edits, in display order.
-_SECTIONS: tuple[str, ...] = ("primary", "secondary", "mineral",
+SECTIONS: tuple[str, ...] = ("primary", "secondary", "mineral",
                               "exchange")
 
-_SECTION_TITLES: dict[str, str] = {
+SECTION_TITLES: dict[str, str] = {
     "primary": "Primary aqueous",
     "secondary": "Secondary (speciation)",
     "mineral": "Mineral",
     "exchange": "Exchange",
 }
 
-_PRESET_FINGERPRINT_MAP: dict[str, str] | None = None
+PRESET_FINGERPRINT_MAP: dict[str, str] | None = None
 
 
-def _preset_fingerprint_map() -> dict[str, str]:
+def preset_fingerprint_map() -> dict[str, str]:
     """
     The fingerprint-to-key map of the preset networks.
 
@@ -566,16 +566,16 @@ def _preset_fingerprint_map() -> dict[str, str]:
     Returns:
         The map of preset fingerprint to preset key.
     """
-    global _PRESET_FINGERPRINT_MAP
-    if _PRESET_FINGERPRINT_MAP is None:
-        _PRESET_FINGERPRINT_MAP = {
+    global PRESET_FINGERPRINT_MAP
+    if PRESET_FINGERPRINT_MAP is None:
+        PRESET_FINGERPRINT_MAP = {
             fingerprint_network(spec.builder()): spec.key
             for spec in NETWORK_SPECS.values()
         }
-    return _PRESET_FINGERPRINT_MAP
+    return PRESET_FINGERPRINT_MAP
 
 
-def _make_spin(low: float, high: float, decimals: int) -> QDoubleSpinBox:
+def make_spin(low: float, high: float, decimals: int) -> QDoubleSpinBox:
     """
     A double spin box over a generous range.
 
@@ -596,7 +596,7 @@ def _make_spin(low: float, high: float, decimals: int) -> QDoubleSpinBox:
     return spin
 
 
-def _draft_carried(draft: NetworkDraft) -> set[str]:
+def draft_carried(draft: NetworkDraft) -> set[str]:
     """
     The species a draft's stoichiometry may reference.
 
@@ -623,7 +623,7 @@ def _draft_carried(draft: NetworkDraft) -> set[str]:
 # The detail form's rows, in the order `_build_detail_editor`
 # adds them (form rows 0..8); `_fill_detail` shows the subset
 # each entry type has.
-_DETAIL_ROW_KEYS: tuple[str, ...] = (
+DETAIL_ROW_KEYS: tuple[str, ...] = (
     "name",
     "molar_mass",
     "charge",
@@ -636,7 +636,7 @@ _DETAIL_ROW_KEYS: tuple[str, ...] = (
 )
 
 # The rows each entry type shows; the rest stay hidden.
-_ROWS_VISIBLE_BY_SECTION: dict[str, tuple[str, ...]] = {
+ROWS_VISIBLE_BY_SECTION: dict[str, tuple[str, ...]] = {
     "primary": ("name", "molar_mass", "charge", "dh_size"),
     "secondary": (
         "name",
@@ -667,16 +667,16 @@ _ROWS_VISIBLE_BY_SECTION: dict[str, tuple[str, ...]] = {
 # The entry shapes the detail pane can edit: all four draft
 # types, and the subset that carries a stoichiometry table
 # (the primary types have none).
-_SpeciesEntry: TypeAlias = (
+SpeciesEntry: TypeAlias = (
     DraftPrimary | DraftSecondary | DraftMineral | DraftExchange
 )
-_StoichEntry: TypeAlias = DraftSecondary | DraftMineral | DraftExchange
+StoichEntry: TypeAlias = DraftSecondary | DraftMineral | DraftExchange
 
 
 # (log10 k, TST dependence, Monod terms, inhib terms) seeded from
 # the database's reaction of the same mineral/kind/label; the
 # list not matching the kind is empty.
-_SeededKinetic: TypeAlias = tuple[
+SeededKinetic: TypeAlias = tuple[
     float,
     list[tuple[str, float]],
     list[tuple[str, float]],
@@ -684,7 +684,7 @@ _SeededKinetic: TypeAlias = tuple[
 ]
 
 
-def _kinetics_term_keys(
+def kinetics_term_keys(
     entry: DraftTst | DraftMonod | None,
 ) -> set[str]:
     """
@@ -703,7 +703,7 @@ def _kinetics_term_keys(
     }
 
 
-class _FocusOutFilter(QObject):  # type: ignore[misc]
+class FocusOutFilter(QObject):  # type: ignore[misc]
     """
     Invokes a commit callback when the watched widget loses
     keyboard focus.
@@ -823,7 +823,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         self._preset_combo: QComboBox = QComboBox()
         for key, spec in NETWORK_SPECS.items():
             self._preset_combo.addItem(spec.display_name, key)
-        initial: str | None = _preset_fingerprint_map().get(
+        initial: str | None = preset_fingerprint_map().get(
             fingerprint_network(self._seed_network)
         )
         self._preset_index: int = -1
@@ -862,8 +862,8 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         column.setContentsMargins(0, 0, 0, 0)
         self._browser_search: dict[str, QLineEdit] = {}
         self._browser_list: dict[str, QListWidget] = {}
-        for section in _SECTIONS:
-            box: QGroupBox = QGroupBox(_SECTION_TITLES[section])
+        for section in SECTIONS:
+            box: QGroupBox = QGroupBox(SECTION_TITLES[section])
             inner: QVBoxLayout = QVBoxLayout(box)
             search: QLineEdit = QLineEdit()
             search.setPlaceholderText("Search…")
@@ -916,15 +916,15 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         self._name_edit: QLineEdit = QLineEdit()
         self._name_edit.returnPressed.connect(self._commit_name)
         self._name_edit.installEventFilter(
-            _FocusOutFilter(self._name_edit, self._commit_name)
+            FocusOutFilter(self._name_edit, self._commit_name)
         )
         form.addRow("Name", self._name_edit)
 
-        self._molar_mass_spin: QDoubleSpinBox = _make_spin(0.0, 1e6, 6)
-        self._charge_spin: QDoubleSpinBox = _make_spin(-10.0, 10.0, 4)
-        self._dh_size_spin: QDoubleSpinBox = _make_spin(0.0, 100.0, 6)
-        self._molar_volume_spin: QDoubleSpinBox = _make_spin(0.0, 100.0, 6)
-        self._log10_k_spin: QDoubleSpinBox = _make_spin(-30.0, 30.0, 6)
+        self._molar_mass_spin: QDoubleSpinBox = make_spin(0.0, 1e6, 6)
+        self._charge_spin: QDoubleSpinBox = make_spin(-10.0, 10.0, 4)
+        self._dh_size_spin: QDoubleSpinBox = make_spin(0.0, 100.0, 6)
+        self._molar_volume_spin: QDoubleSpinBox = make_spin(0.0, 100.0, 6)
+        self._log10_k_spin: QDoubleSpinBox = make_spin(-30.0, 30.0, 6)
         for spin in (
             self._molar_mass_spin,
             self._charge_spin,
@@ -941,7 +941,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
 
         eq_grid: QGridLayout = QGridLayout()
         self._eq_spins: list[QDoubleSpinBox] = [
-            _make_spin(-100.0, 100.0, 6) for _ in range(8)
+            make_spin(-100.0, 100.0, 6) for _ in range(8)
         ]
         for index, spin in enumerate(self._eq_spins):
             spin.valueChanged.connect(self._commit_detail_fields)
@@ -1170,7 +1170,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         """
         self._rebuilding = True
         try:
-            for section in _SECTIONS:
+            for section in SECTIONS:
                 list_widget: QListWidget = self._browser_list[section]
                 list_widget.blockSignals(True)
                 list_widget.clear()
@@ -1238,7 +1238,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
     def _select_first_entry(self) -> None:
         """Select the first draft entry (display order) and show it."""
         self._selected = None
-        for section in _SECTIONS:
+        for section in SECTIONS:
             names: list[str] = self._section_in_order(section)
             if names:
                 self._selected = (section, names[0])
@@ -1305,7 +1305,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         kind (TST over Monod); V6 (empty label) keeps it flagged
         until the user names the reaction (step 5's label picker).
         """
-        carried: set[str] = _draft_carried(self._draft)
+        carried: set[str] = draft_carried(self._draft)
         carried.add(name)
         if section == "exchange":
             carried.add("X-")
@@ -1441,7 +1441,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
 
     def _selected_entry(
         self, section: str, name: str
-    ) -> _SpeciesEntry | None:
+    ) -> SpeciesEntry | None:
         """
         The draft's entry for (section, name).
 
@@ -1449,7 +1449,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         removed or renamed after the selection was made); the
         caller then clears or repairs the pane.
         """
-        section_entries: tuple[_SpeciesEntry, ...]
+        section_entries: tuple[SpeciesEntry, ...]
         if section == "primary":
             section_entries = self._draft.primary
         elif section == "secondary":
@@ -1474,7 +1474,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         self._rebuilding = True
         try:
             selection: tuple[str, str] | None = self._selected
-            entry: _SpeciesEntry | None = None
+            entry: SpeciesEntry | None = None
             if selection is not None:
                 entry = self._selected_entry(*selection)
             if selection is None or entry is None:
@@ -1505,7 +1505,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
             spin.setValue(0.0)
         self._stoich_table.setRowCount(0)
 
-    def _fill_detail(self, section: str, entry: _SpeciesEntry) -> None:
+    def _fill_detail(self, section: str, entry: SpeciesEntry) -> None:
         """
         Fill the detail pane for `entry` of `section`.
 
@@ -1516,12 +1516,12 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         stoichiometry table are then filled from the entry.
         """
         self._detail_title.setText(
-            f"{_SECTION_TITLES[section]} — {entry.name}"
+            f"{SECTION_TITLES[section]} — {entry.name}"
         )
         self._name_edit.setText(entry.name)
         self._name_edit.setReadOnly(entry.name in self._db_names(section))
-        visible: tuple[str, ...] = _ROWS_VISIBLE_BY_SECTION[section]
-        for index, key in enumerate(_DETAIL_ROW_KEYS):
+        visible: tuple[str, ...] = ROWS_VISIBLE_BY_SECTION[section]
+        for index, key in enumerate(DETAIL_ROW_KEYS):
             self._detail_form.setRowVisible(index, key in visible)
         self._set_detail_fields(entry)
         if isinstance(entry, (DraftSecondary, DraftMineral, DraftExchange)):
@@ -1529,7 +1529,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         else:
             self._stoich_table.setRowCount(0)
 
-    def _set_detail_fields(self, entry: _SpeciesEntry) -> None:
+    def _set_detail_fields(self, entry: SpeciesEntry) -> None:
         """
         Fill the scalar field widgets from `entry`.
 
@@ -1566,11 +1566,11 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         for index, spin in enumerate(self._eq_spins):
             spin.setValue(values[index] if index < len(values) else 0.0)
 
-    def _stoich_options(self, entry: _StoichEntry) -> list[str]:
+    def _stoich_options(self, entry: StoichEntry) -> list[str]:
         """
         The species an entry's stoichiometry rows may reference.
 
-        The draft's carried set (`_draft_carried` — V3's set) plus
+        The draft's carried set (`draft_carried` — V3's set) plus
         the entry's own current keys. A dangling key (its species
         unchecked) stays selectable, so the row remains editable
         and the V3 finding stays visible: the UI never silently
@@ -1578,9 +1578,9 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         (re-check the species, or point the row at a carried one).
         """
         own: set[str] = {key for key, _ in entry.stoichiometry}
-        return sorted(_draft_carried(self._draft) | own)
+        return sorted(draft_carried(self._draft) | own)
 
-    def _rebuild_stoich_rows(self, entry: _StoichEntry) -> None:
+    def _rebuild_stoich_rows(self, entry: StoichEntry) -> None:
         """
         Rebuild the stoichiometry table from `entry`'s rows.
 
@@ -1601,7 +1601,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
             combo.currentIndexChanged.connect(
                 lambda _index, row=index: self._commit_stoich_row(row)
             )
-            spin: QDoubleSpinBox = _make_spin(-1000.0, 1000.0, 6)
+            spin: QDoubleSpinBox = make_spin(-1000.0, 1000.0, 6)
             spin.setValue(value)
             spin.valueChanged.connect(
                 lambda _value, row=index: self._commit_stoich_row(row)
@@ -1637,7 +1637,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         selection: tuple[str, str] | None = self._selected
         if selection is None:
             return
-        entry: _SpeciesEntry | None = self._selected_entry(*selection)
+        entry: SpeciesEntry | None = self._selected_entry(*selection)
         if not isinstance(
             entry, (DraftSecondary, DraftMineral, DraftExchange)
         ):
@@ -1656,7 +1656,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         selection: tuple[str, str] | None = self._selected
         if selection is None:
             return
-        entry: _SpeciesEntry | None = self._selected_entry(*selection)
+        entry: SpeciesEntry | None = self._selected_entry(*selection)
         if not isinstance(
             entry, (DraftSecondary, DraftMineral, DraftExchange)
         ):
@@ -1668,7 +1668,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         self._apply_stoich_rows(entry, rows)
 
     def _apply_stoich_rows(
-        self, entry: _StoichEntry, rows: list[tuple[str, float]]
+        self, entry: StoichEntry, rows: list[tuple[str, float]]
     ) -> None:
         """
         Commit the table's rows into `entry` and refresh.
@@ -1681,7 +1681,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         stoich: tuple[tuple[str, float], ...] = tuple(rows)
         if isinstance(entry, DraftSecondary):
             secondary: DraftSecondary = replace(entry, stoichiometry=stoich)
-            updated: _StoichEntry = secondary
+            updated: StoichEntry = secondary
             self._draft = self._draft.upsert_secondary(secondary)
         elif isinstance(entry, DraftMineral):
             mineral: DraftMineral = replace(entry, stoichiometry=stoich)
@@ -1713,7 +1713,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         selection: tuple[str, str] | None = self._selected
         if selection is None:
             return
-        entry: _SpeciesEntry | None = self._selected_entry(*selection)
+        entry: SpeciesEntry | None = self._selected_entry(*selection)
         if not isinstance(
             entry, (DraftSecondary, DraftMineral, DraftExchange)
         ):
@@ -1738,7 +1738,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         selection: tuple[str, str] | None = self._selected
         if selection is None:
             return
-        entry: _SpeciesEntry | None = self._selected_entry(*selection)
+        entry: SpeciesEntry | None = self._selected_entry(*selection)
         if entry is None:
             return
         if isinstance(entry, DraftPrimary):
@@ -1807,7 +1807,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         if selection is None:
             return
         section, old_name = selection
-        entry: _SpeciesEntry | None = self._selected_entry(
+        entry: SpeciesEntry | None = self._selected_entry(
             section, old_name
         )
         if entry is None:
@@ -1979,14 +1979,14 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         )
         grid.addWidget(label_field, 1, 2)
         grid.addWidget(QLabel("log10 k:"), 2, 1)
-        k_spin: QDoubleSpinBox = _make_spin(-30.0, 30.0, 6)
+        k_spin: QDoubleSpinBox = make_spin(-30.0, 30.0, 6)
         k_spin.setValue(entry.log10_k if entry is not None else 0.0)
         grid.addWidget(k_spin, 2, 2)
         table: QTableWidget = QTableWidget(0, 3)
         table.setHorizontalHeaderLabels(["Kind", "Species", "Coeff."])
         table.setColumnWidth(1, 160)
         offered: list[str] = sorted(
-            _draft_carried(self._draft) | _kinetics_term_keys(entry)
+            draft_carried(self._draft) | kinetics_term_keys(entry)
         )
         self._fill_terms_table(
             table, mineral.name, kind, entry, offered
@@ -2051,10 +2051,10 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
                 n, field
             )
         )
-        def _commit_label(n: str = name, field: QWidget = edit) -> None:
+        def commit_label(n: str = name, field: QWidget = edit) -> None:
             self._on_kinetics_label_changed(n, field)
 
-        edit.installEventFilter(_FocusOutFilter(edit, _commit_label))
+        edit.installEventFilter(FocusOutFilter(edit, commit_label))
         return edit
 
     def _fill_terms_table(
@@ -2111,7 +2111,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
                     self._on_kinetics_term_changed(n, t)
                 )
             )
-            spin: QDoubleSpinBox = _make_spin(-1000.0, 1000.0, 6)
+            spin: QDoubleSpinBox = make_spin(-1000.0, 1000.0, 6)
             spin.setValue(value)
             spin.valueChanged.connect(
                 lambda _value, n=name, t=table: (
@@ -2176,7 +2176,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
 
     def _seeded_kinetic(
         self, name: str, kind: str, label: str
-    ) -> _SeededKinetic | None:
+    ) -> SeededKinetic | None:
         """
         The database's kinetics reaction for (mineral, kind,
         label), or None.
@@ -2240,7 +2240,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         entry: DraftTst | DraftMonod | None = self._kinetics_entry(name)
         label: str = entry.label if entry is not None else ""
         log10_k: float = entry.log10_k if entry is not None else 0.0
-        seeded: _SeededKinetic | None = self._seeded_kinetic(
+        seeded: SeededKinetic | None = self._seeded_kinetic(
             name, kind, label
         )
         if seeded is not None:
@@ -2284,7 +2284,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         entry: DraftTst | DraftMonod | None = self._kinetics_entry(name)
         if entry is not None and entry.label == label:
             return
-        seeded: _SeededKinetic | None = self._seeded_kinetic(
+        seeded: SeededKinetic | None = self._seeded_kinetic(
             name, kind, label
         )
         if seeded is not None:
@@ -2424,7 +2424,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         afterwards (`_upsert_db_entry` ends in
         `_after_draft_change`, which keeps a valid selection).
         """
-        titles: list[str] = [_SECTION_TITLES[s] for s in _SECTIONS]
+        titles: list[str] = [SECTION_TITLES[s] for s in SECTIONS]
         if self._selected is not None:
             section: str = self._selected[0]
         else:
@@ -2438,7 +2438,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
             )
             if not picked:
                 return
-            section = _SECTIONS[titles.index(title)]
+            section = SECTIONS[titles.index(title)]
         candidates: list[str] = sorted(
             name
             for name in self._db_names(section)
@@ -2454,7 +2454,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         name, picked = QInputDialog.getItem(
             self,
             "Add from database",
-            f"{_SECTION_TITLES[section]} entry:",
+            f"{SECTION_TITLES[section]} entry:",
             candidates,
             0,
             False,
@@ -2477,7 +2477,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
         exchange.  A blank name, or a name the section already
         carries, is refused.
         """
-        titles: list[str] = [_SECTION_TITLES[s] for s in _SECTIONS]
+        titles: list[str] = [SECTION_TITLES[s] for s in SECTIONS]
         if self._selected is not None:
             section: str = self._selected[0]
         else:
@@ -2491,11 +2491,11 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
             )
             if not picked:
                 return
-            section = _SECTIONS[titles.index(title)]
+            section = SECTIONS[titles.index(title)]
         name, picked = QInputDialog.getText(
             self,
             "New entry",
-            f"{_SECTION_TITLES[section]} name:",
+            f"{SECTION_TITLES[section]} name:",
         )
         name = name.strip()
         if not picked or not name:
@@ -2505,7 +2505,7 @@ class NetworkEditorDialog(QDialog):  # type: ignore[misc]
                 self,
                 "New entry",
                 f"{name} is already in the "
-                f"{_SECTION_TITLES[section].lower()} section.",
+                f"{SECTION_TITLES[section].lower()} section.",
             )
             return
         if section == "primary":

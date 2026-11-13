@@ -388,7 +388,7 @@ def forward_gradient(
     points_to_score: list[np.ndarray] = (
         [base] if base_key not in memo else []
     ) + batch
-    _evaluate_new_points(evaluate, memo, points_to_score)
+    evaluate_new_points(evaluate, memo, points_to_score)
 
     base_value: float = memo[base_key]
     components: list[float] = []
@@ -404,7 +404,7 @@ def forward_gradient(
     return np.asarray(components, dtype=np.float64)
 
 
-def _evaluate_new_points(
+def evaluate_new_points(
     evaluate: BatchEvaluator,
     memo: dict[PointKey, float],
     points: Sequence[np.ndarray],
@@ -434,7 +434,7 @@ def _evaluate_new_points(
     return len(new_points)
 
 
-def _finite_objectives(
+def finite_objectives(
     steps_by_key: Mapping[PointKey, float],
     memo: Mapping[PointKey, float],
     sign: float,
@@ -460,7 +460,7 @@ def _finite_objectives(
     return sorted(records)
 
 
-def _best_objective(
+def best_objective(
     steps_by_key: Mapping[PointKey, float],
     memo: Mapping[PointKey, float],
     sign: float,
@@ -486,7 +486,7 @@ def _best_objective(
     return max(objectives)
 
 
-def _vertex_step(
+def vertex_step(
     steps: Sequence[float],
     objectives: Sequence[float],
     best_step: float,
@@ -519,7 +519,7 @@ def _vertex_step(
     return vertex
 
 
-def _bracket_interval(
+def bracket_interval(
     steps: Sequence[float],
     vertex: float,
     best_step: float,
@@ -627,7 +627,7 @@ def wave_search(
     memo: dict[PointKey, float] = dict(initial_values)
     base_key: PointKey = point_key(base)
     steps_by_key: dict[PointKey, float] = {base_key: 0.0}
-    evaluations: int = _evaluate_new_points(evaluate, memo, [base])
+    evaluations: int = evaluate_new_points(evaluate, memo, [base])
     bests: list[float] = [sign * memo[base_key]]
 
     grid: list[tuple[float, np.ndarray]] = [
@@ -635,14 +635,14 @@ def wave_search(
         for t in search_t_points(t_lo, t_hi, config.wave_schedule[0])
     ]
     steps_by_key.update({point_key(point): step for step, point in grid})
-    evaluations += _evaluate_new_points(
+    evaluations += evaluate_new_points(
         evaluate, memo, [point for _, point in grid]
     )
-    bests.append(_best_objective(steps_by_key, memo, sign))
+    bests.append(best_objective(steps_by_key, memo, sign))
 
     stopped_by: str = "schedule"
     for wave_index in range(1, len(config.wave_schedule)):
-        records: list[tuple[float, float]] = _finite_objectives(
+        records: list[tuple[float, float]] = finite_objectives(
             steps_by_key, memo, sign
         )
         if len(records) < 3:
@@ -653,12 +653,12 @@ def wave_search(
         )
         best_three: list[tuple[float, float]] = ranked[:3]
         best_step: float = best_three[0][0]
-        vertex: float = _vertex_step(
+        vertex: float = vertex_step(
             [step for step, _ in best_three],
             [objective for _, objective in best_three],
             best_step,
         )
-        bracket_lo, bracket_hi = _bracket_interval(
+        bracket_lo, bracket_hi = bracket_interval(
             [step for step, _ in best_three], vertex, best_step, t_lo, t_hi
         )
         if bests[-1] - bests[-2] < config.min_relative_improvement * abs(
@@ -693,9 +693,9 @@ def wave_search(
             if not batch:
                 stopped_by = "budget"
                 break
-        evaluations += _evaluate_new_points(evaluate, memo, batch)
+        evaluations += evaluate_new_points(evaluate, memo, batch)
         steps_by_key.update({key: step for key, step in candidates})
-        bests.append(_best_objective(steps_by_key, memo, sign))
+        bests.append(best_objective(steps_by_key, memo, sign))
 
     ordered: list[tuple[float, PointKey]] = sorted(
         (step, key) for key, step in steps_by_key.items()

@@ -3,7 +3,7 @@
 When the internal Newton / LM speciation solve (the free-variable system
 that restores chemical equilibrium after a zone's kinetic step) fails,
 the Python driver re-solves the same residual with
-``scipy.optimize.fsolve`` (``_fsolve_backup_speciation``) and finalizes
+``scipy.optimize.fsolve`` (``fsolve_backup_speciation``) and finalizes
 the step through ``RtZone.step`` with ``x_free_override``, mirroring the
 existing kinetic-step backup. This module covers, without running a full
 model:
@@ -51,7 +51,7 @@ from ..reactive_transport.common_networks import get_carbon_network
 from ..reactive_transport_model import (
     SPECIATION_ACCEPT_RESIDUAL_MAX,
     SolverBackupWarning,
-    _fsolve_backup_speciation,
+    fsolve_backup_speciation,
 )
 
 # One entry per network species, in network order:
@@ -68,7 +68,7 @@ RT_STEP_FIELDS: tuple[str, ...] = (
 )
 
 
-def _forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
+def forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
     """A minimal forcing: no precipitation / inflow, optional surface
     forcing flux (which also opens the water denominator for mass
     coupling)."""
@@ -93,7 +93,7 @@ def _forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
     )
 
 
-def _make_zone() -> RtZone:
+def make_zone() -> RtZone:
     """A fresh zone with the default speciation cache (a zeros warm
     start), as a zone is in a newly built model."""
     mp = MineralParameters(
@@ -109,7 +109,7 @@ def _make_zone() -> RtZone:
     )
 
 
-def _fake_optimization_error(best_x: list[float]) -> OptimizationError:
+def fake_optimization_error(best_x: list[float]) -> OptimizationError:
     """A synthetic, fully-populated ``OptimizationError`` standing in for a
     failed speciation solve.
 
@@ -138,7 +138,7 @@ def _fake_optimization_error(best_x: list[float]) -> OptimizationError:
     )
 
 
-def _x_root_for(
+def x_root_for(
     zone: RtZone, d: RtForcing
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The deterministic kinetic re-solve of a fresh zone and the
@@ -153,14 +153,14 @@ def _x_root_for(
     return c_after_rt, x_root
 
 
-def _near_miss_x(zone: RtZone, d: RtForcing) -> NDArray[np.float64]:
+def near_miss_x(zone: RtZone, d: RtForcing) -> NDArray[np.float64]:
     """A free-variable vector whose residual sits strictly between the
     internal solver's 1e-6 target bar and the acceptance bar: the true
     root perturbed along a fixed direction until the residual norm lands
     in that window. Such an iterate is what the 90 real-world failing
     speciation cases end on (a stalled solve a little above the target
     bar), so this stands in for their failed-solve best iterate."""
-    c_after_rt, x_root = _x_root_for(zone, d)
+    c_after_rt, x_root = x_root_for(zone, d)
     direction: NDArray[np.float64] = np.ones(len(x_root))
     for scale in (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11):
         x_try: NDArray[np.float64] = x_root + scale * direction
@@ -183,7 +183,7 @@ def test_speciation_failure_is_tagged_speciation() -> None:
     budget and fails with a typed ``OptimizationError`` tagged
     ``subsystem="speciation"`` — the discriminator the driver uses to
     route the failure to the speciation backup."""
-    zone = _make_zone()
+    zone = make_zone()
     n_free: int = zone.eq.get_stoich_null_space().shape[1]
     chms: NDArray[np.float64] = np.full(len(C0), 1e300)
     with pytest.raises(OptimizationError) as excinfo:
@@ -202,12 +202,12 @@ def test_kinetic_failure_is_tagged_kinetic() -> None:
     (n_free == num_aqueous_species == 5), which is exactly why the tag
     exists: without it, this error would be mis-routed to the aqueous-
     block backup."""
-    zone = _make_zone()
+    zone = make_zone()
     n_aq: int = zone.network.num_aqueous_species
     c_0: NDArray[np.float64] = C0.copy()
     c_0[0] = np.nan
     with pytest.raises(OptimizationError) as excinfo:
-        zone.solve_rt_step(c_0, _forcing(np.zeros(len(C0))), DT_DAYS)
+        zone.solve_rt_step(c_0, forcing(np.zeros(len(C0))), DT_DAYS)
     err = excinfo.value
     assert isinstance(err, OptimizationError)
     assert err.subsystem == "kinetic"
@@ -222,10 +222,10 @@ def test_override_step_matches_internal_solve_bit_for_bit() -> None:
     bookkeeping. Both fresh zones warm-start their speciation solve from
     zeros, so the explicit ``speciation_x_free_solve`` from zeros
     reproduces the reference zone's internal solve exactly."""
-    zone_a = _make_zone()
-    zone_b = _make_zone()
+    zone_a = make_zone()
+    zone_b = make_zone()
     n_free: int = zone_a.eq.get_stoich_null_space().shape[1]
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
 
     c_after_rt: NDArray[np.float64] = np.asarray(zone_a.solve_rt_step(C0, d, DT_DAYS))
     x_ref: NDArray[np.float64] = np.asarray(
@@ -248,9 +248,9 @@ def test_explicit_none_override_matches_normal_step() -> None:
     normal path: the step is bit-identical to a call that does not pass
     the keyword at all (the change is strictly additive on the default
     path)."""
-    zone_a = _make_zone()
-    zone_b = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
+    zone_a = make_zone()
+    zone_b = make_zone()
+    d = forcing(np.zeros(len(C0)))
 
     step_a = zone_a.step(C0, d, DT_DAYS, x_free_override=None)
     step_b = zone_b.step(C0, d, DT_DAYS)
@@ -263,7 +263,7 @@ def test_explicit_none_override_matches_normal_step() -> None:
         )
 
 
-# ===================== _fsolve_backup_speciation ===================== #
+# ===================== fsolve_backup_speciation ===================== #
 def test_backup_preaccepts_candidate_root_without_fsolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,20 +273,20 @@ def test_backup_preaccepts_candidate_root_without_fsolve(
     directly: fsolve is never spent on it (a raising stand-in proves
     this), and the finalized step matches a fresh zone's internal
     solve."""
-    zone = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
-    _c_after_rt, x_root = _x_root_for(zone, d)
-    err = _fake_optimization_error(best_x=list(x_root))
+    zone = make_zone()
+    d = forcing(np.zeros(len(C0)))
+    _c_after_rt, x_root = x_root_for(zone, d)
+    err = fake_optimization_error(best_x=list(x_root))
 
-    def _fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
+    def fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("fsolve must not be called for a pre-accepted candidate")
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _fsolve_must_not_run)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", fsolve_must_not_run)
 
-    rescued = _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
+    rescued = fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
 
     assert rescued is not None
-    reference = _make_zone().step(C0, d, DT_DAYS)
+    reference = make_zone().step(C0, d, DT_DAYS)
     for field in RT_STEP_FIELDS:
         np.testing.assert_allclose(
             np.asarray(getattr(rescued, field)),
@@ -309,23 +309,23 @@ def test_backup_preaccepts_near_miss_without_fsolve(
     that turns a stalled-but-close speciation into an accepted model step
     instead of a run failure; under the former 1e-6 bar this exact
     iterate would have been rejected and the run stopped."""
-    zone = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
-    x_near = _near_miss_x(zone, d)
+    zone = make_zone()
+    d = forcing(np.zeros(len(C0)))
+    x_near = near_miss_x(zone, d)
 
-    def _fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
+    def fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("fsolve must not be called for a pre-accepted candidate")
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _fsolve_must_not_run)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", fsolve_must_not_run)
 
-    err = _fake_optimization_error(best_x=list(x_near))
-    rescued = _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
+    err = fake_optimization_error(best_x=list(x_near))
+    rescued = fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
 
     assert rescued is not None
     # The adopted state is the near-miss iterate itself, not a re-solved
     # root: its residual sits strictly above the 1e-6 target bar (and at
     # or under the acceptance bar).
-    c_after_rt, _x_root = _x_root_for(zone, d)
+    c_after_rt, _x_root = x_root_for(zone, d)
     f_max: float = float(
         np.max(np.abs(zone.eq.speciation_residual(c_after_rt, x_near)))
     )
@@ -333,7 +333,7 @@ def test_backup_preaccepts_near_miss_without_fsolve(
     # The step's bookkeeping is the normal post-solve path applied to the
     # adopted vector: the outgoing masses computed from the rescued state
     # match those of a reference step run with the same override.
-    reference = _make_zone().step(C0, d, DT_DAYS, x_free_override=x_near)
+    reference = make_zone().step(C0, d, DT_DAYS, x_free_override=x_near)
     resc_lat: NDArray[np.float64]
     resc_vert: NDArray[np.float64]
     resc_lat, resc_vert = zone.outgoing_mass(np.asarray(rescued.state), d)
@@ -364,20 +364,20 @@ def test_backup_rejects_failed_fsolve(
     stops the run with the original failure. The candidate (7.0 per free
     variable) is finite and well-dimensioned but far from a root, so both
     mocks below are actually reached."""
-    zone = _make_zone()
+    zone = make_zone()
     n_free: int = zone.eq.get_stoich_null_space().shape[1]
-    d = _forcing(np.zeros(len(C0)))
-    err = _fake_optimization_error(best_x=[7.0] * n_free)
+    d = forcing(np.zeros(len(C0)))
+    err = fake_optimization_error(best_x=[7.0] * n_free)
 
-    def _nan_solution(
+    def nan_solution(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return np.full(n_free, np.nan), {"fvec": np.zeros(n_free)}, 1, "converged"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _nan_solution)
-    assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+    monkeypatch.setattr(reactive_transport_model, "fsolve", nan_solution)
+    assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
 
-    def _above_bar(
+    def above_bar(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         stalled: NDArray[np.float64] = (
@@ -385,8 +385,8 @@ def test_backup_rejects_failed_fsolve(
         )
         return np.full(n_free, 7.0), {"fvec": stalled}, 1, "stalled above the bar"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _above_bar)
-    assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+    monkeypatch.setattr(reactive_transport_model, "fsolve", above_bar)
+    assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
 
 
 def test_backup_accepts_under_bar_root_regardless_of_ier(
@@ -399,27 +399,27 @@ def test_backup_accepts_under_bar_root_regardless_of_ier(
     stationary point) for an iterate already at or under the bar. The
     root returned here is the zone's true free-variable root, so the
     finalized step matches a fresh zone's internal solve."""
-    zone = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
-    _c_after_rt, x_root = _x_root_for(zone, d)
+    zone = make_zone()
+    d = forcing(np.zeros(len(C0)))
+    _c_after_rt, x_root = x_root_for(zone, d)
     n_free: int = len(x_root)
-    err = _fake_optimization_error(best_x=[7.0] * n_free)
+    err = fake_optimization_error(best_x=[7.0] * n_free)
 
     rescued: RtStep | None = None
     for ier in (0, 5):
 
-        def _stalled_at_bar(
+        def stalled_at_bar(
             _func: object,
             x0: NDArray[np.float64],
             **_kwargs: object,
         ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
             return x_root.copy(), {"fvec": np.zeros(n_free)}, ier, "at the bar"
 
-        monkeypatch.setattr(reactive_transport_model, "fsolve", _stalled_at_bar)
-        rescued = _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
+        monkeypatch.setattr(reactive_transport_model, "fsolve", stalled_at_bar)
+        rescued = fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False)
         assert rescued is not None
 
-    reference = _make_zone().step(C0, d, DT_DAYS)
+    reference = make_zone().step(C0, d, DT_DAYS)
     for field in RT_STEP_FIELDS:
         np.testing.assert_allclose(
             np.asarray(getattr(rescued, field)),
@@ -438,29 +438,29 @@ def test_backup_rejects_converged_but_invalid_candidate(
     non-positive concentrations are rejected (the backup returns
     ``None``) no matter how cleanly fsolve converges — the same gate the
     internal solve and the ``x_free_override`` finalization apply."""
-    zone = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
-    _c_after_rt, x_root = _x_root_for(zone, d)
+    zone = make_zone()
+    d = forcing(np.zeros(len(C0)))
+    _c_after_rt, x_root = x_root_for(zone, d)
     n_free: int = len(x_root)
-    err = _fake_optimization_error(best_x=list(x_root))
+    err = fake_optimization_error(best_x=list(x_root))
 
-    def _conc_always_invalid(
+    def conc_always_invalid(
         _eq: EquilibriumParameters, _x: NDArray[np.float64]
     ) -> bool:
         return False
 
     monkeypatch.setattr(
-        reactive_transport_model, "_speciation_conc_valid", _conc_always_invalid
+        reactive_transport_model, "speciation_conc_valid", conc_always_invalid
     )
 
-    def _converged(
+    def converged(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return x0.copy(), {"fvec": np.zeros(n_free)}, 1, "converged"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _converged)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", converged)
 
-    assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+    assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
 
 
 def test_backup_rejects_misdimensioned_error_payload(
@@ -470,17 +470,17 @@ def test_backup_rejects_misdimensioned_error_payload(
     speciation system (``n_free + 2`` here) cannot be re-solved: the
     backup returns ``None`` before it spends any work on the zone
     (fsolve never called)."""
-    zone = _make_zone()
+    zone = make_zone()
     n_free: int = zone.eq.get_stoich_null_space().shape[1]
-    d = _forcing(np.zeros(len(C0)))
-    err = _fake_optimization_error(best_x=[7.0] * (n_free + 2))
+    d = forcing(np.zeros(len(C0)))
+    err = fake_optimization_error(best_x=[7.0] * (n_free + 2))
 
-    def _fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
+    def fsolve_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("fsolve must not be called for a mis-dimensioned payload")
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _fsolve_must_not_run)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", fsolve_must_not_run)
 
-    assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+    assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
 
 
 # ===================== warning emission ===================== #
@@ -494,20 +494,20 @@ def test_rejection_emits_solver_backup_warning(
     calibration scripts can silence it with
     ``warnings.filterwarnings("ignore",
     category=potions.SolverBackupWarning)``."""
-    zone = _make_zone()
+    zone = make_zone()
     n_free: int = zone.eq.get_stoich_null_space().shape[1]
-    d = _forcing(np.zeros(len(C0)))
-    err = _fake_optimization_error(best_x=[7.0] * n_free)
+    d = forcing(np.zeros(len(C0)))
+    err = fake_optimization_error(best_x=[7.0] * n_free)
 
-    def _nan_solution(
+    def nan_solution(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return np.full(n_free, np.nan), {"fvec": np.zeros(n_free)}, 1, "converged"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _nan_solution)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", nan_solution)
 
     with pytest.warns(SolverBackupWarning) as record:
-        assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 37, False) is None
+        assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 37, False) is None
     assert len(record) == 1
     message: str = str(record[0].message)
     assert "zone 'speciation_backup_zone'" in message
@@ -522,30 +522,30 @@ def test_rejection_warning_carries_rejection_reason(
     fsolve reaches a point at or under the residual bar, so the deciding
     check is the physical-validity gate, and the reason in the message
     names that gate (with the residual the candidate reached)."""
-    zone = _make_zone()
-    d = _forcing(np.zeros(len(C0)))
-    _c_after_rt, x_root = _x_root_for(zone, d)
+    zone = make_zone()
+    d = forcing(np.zeros(len(C0)))
+    _c_after_rt, x_root = x_root_for(zone, d)
     n_free: int = len(x_root)
-    err = _fake_optimization_error(best_x=list(x_root))
+    err = fake_optimization_error(best_x=list(x_root))
 
-    def _conc_always_invalid(
+    def conc_always_invalid(
         _eq: EquilibriumParameters, _x: NDArray[np.float64]
     ) -> bool:
         return False
 
     monkeypatch.setattr(
-        reactive_transport_model, "_speciation_conc_valid", _conc_always_invalid
+        reactive_transport_model, "speciation_conc_valid", conc_always_invalid
     )
 
-    def _converged(
+    def converged(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return x0.copy(), {"fvec": np.zeros(n_free)}, 1, "converged"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _converged)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", converged)
 
     with pytest.warns(SolverBackupWarning) as record:
-        assert _fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
+        assert fsolve_backup_speciation(zone, C0, d, DT_DAYS, err, 0, False) is None
     assert len(record) == 1
     message: str = str(record[0].message)
     assert "no acceptable solution" in message

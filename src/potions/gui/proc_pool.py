@@ -50,18 +50,18 @@ from potions.gui.state import MODE_HYDRO
 # Seconds a batch may run without a single result or heartbeat before
 # the watchdog calls the pool stalled, and how often the parent polls.
 DEFAULT_STALL_TIMEOUT: Final[float] = 600.0
-_POLL_INTERVAL: Final[float] = 0.05
+POLL_INTERVAL: Final[float] = 0.05
 
 # This process's shared heartbeat proxy, set in every worker by the
 # guarded initializer before any task runs.  (``multiprocessing``'s
 # shared-value proxy is untyped, hence ``Any``.)
-_HEARTBEAT: Any = None
+HEARTBEAT: Any = None
 
 # The input data loaded by this process's initializer, and the
 # initializer's failure message when the load did not succeed.  Both
 # are set once per worker process, before any of its tasks runs.
-_INPUT_DATA: gui_data.GuiInputData | None = None
-_INIT_ERROR: str | None = None
+INPUT_DATA: gui_data.GuiInputData | None = None
+INIT_ERROR: str | None = None
 
 
 class ModelRunStalledError(RuntimeError):
@@ -136,7 +136,7 @@ class HeartbeatPool:
         self.heartbeat: Any = context.Value("d", time.monotonic())
         self._pool = context.Pool(
             processes=workers if workers is not None else (os.cpu_count() or 1),
-            initializer=_guarded_initializer,
+            initializer=guarded_initializer,
             initargs=(self.heartbeat, initializer, *initargs),
         )
 
@@ -187,7 +187,7 @@ class HeartbeatPool:
             return []
 
         pending: dict[int, Any] = {
-            index: self._pool.apply_async(_guarded_task, (self._task, (index, arg)))
+            index: self._pool.apply_async(guarded_task, (self._task, (index, arg)))
             for index, arg in enumerate(args)
         }
         results: dict[int, Any] = {}
@@ -217,7 +217,7 @@ class HeartbeatPool:
                         "was terminated. The most likely cause is a worker "
                         "stalling before its initializer finished."
                     )
-                time.sleep(_POLL_INTERVAL)
+                time.sleep(POLL_INTERVAL)
         return [results[index] for index in range(len(args))]
 
     def close(self) -> None:
@@ -233,32 +233,32 @@ class HeartbeatPool:
         self._pool.join()
 
 
-def _guarded_initializer(
+def guarded_initializer(
     heartbeat: Any, initializer: Callable[..., None], *initargs: Any
 ) -> None:
     """
     The pool's own initializer: bind this worker's heartbeat global,
     then run the job's initializer with the heartbeat as its first
     argument.  Every worker therefore reaches its task loop with
-    ``_HEARTBEAT`` bound.
+    ``HEARTBEAT`` bound.
     """
-    global _HEARTBEAT
-    _HEARTBEAT = heartbeat
+    global HEARTBEAT
+    HEARTBEAT = heartbeat
     initializer(heartbeat, *initargs)
 
 
-def _guarded_task(task: Callable[[tuple[Any, ...]], Any], index_and_args: tuple[Any, ...]) -> Any:
+def guarded_task(task: Callable[[tuple[Any, ...]], Any], index_and_args: tuple[Any, ...]) -> Any:
     """
     The pool's own task wrapper: heartbeat at the start of every task
     (a worker that starts a new task proves the pool is alive even
     while long tasks run), then run the job's task function.
     """
-    if _HEARTBEAT is None:
+    if HEARTBEAT is None:
         raise RuntimeError(
             "A pool worker received a task before its guarded initializer "
             "bound the heartbeat."
         )
-    _HEARTBEAT.value = time.monotonic()
+    HEARTBEAT.value = time.monotonic()
     return task(index_and_args)
 
 
@@ -280,7 +280,7 @@ def init_worker(
     can pass through the parent's Python-level capturing stream and
     emit a Qt signal from a foreign process.
 
-    Failures are caught and stored in ``_INIT_ERROR`` rather than
+    Failures are caught and stored in ``INIT_ERROR`` rather than
     re-raised: a worker that raised here would be respawned forever by
     the pool and its tasks would never complete, hanging the parent's
     result iterator.
@@ -303,23 +303,23 @@ def init_worker(
             with; the roles are auto-detected when None (the shipped
             record always is).
     """
-    global _INPUT_DATA, _INIT_ERROR
+    global INPUT_DATA, INIT_ERROR
     heartbeat.value = time.monotonic()
     try:
         sys.stdout = os.fdopen(1, "w", closefd=False)
-        _INPUT_DATA = gui_data.load_input_data(
+        INPUT_DATA = gui_data.load_input_data(
             Path(csv_path),
             model_key=model_key,
             network=network,
             column_map=column_map,
         )
-        _INIT_ERROR = None
+        INIT_ERROR = None
     except Exception as err:
-        _INPUT_DATA = None
-        _INIT_ERROR = f"{type(err).__name__}: {err}"
+        INPUT_DATA = None
+        INIT_ERROR = f"{type(err).__name__}: {err}"
 
 
-def _run_one_task(
+def run_one_task(
     index_and_arg: tuple[int, tuple[np.ndarray, str]]
 ) -> tuple[int, gui_data.GuiRunResults | str]:
     """
@@ -343,13 +343,13 @@ def _run_one_task(
         reported for every point the worker receives).
     """
     index, (point, mode) = index_and_arg
-    if _INPUT_DATA is None:
-        return index, _INIT_ERROR or "worker was not initialized"
+    if INPUT_DATA is None:
+        return index, INIT_ERROR or "worker was not initialized"
     try:
         if mode == MODE_HYDRO:
-            results = gui_data.arr_to_hydro_results(point, _INPUT_DATA)
+            results = gui_data.arr_to_hydro_results(point, INPUT_DATA)
         else:
-            results = gui_data.arr_to_results(point, _INPUT_DATA)
+            results = gui_data.arr_to_results(point, INPUT_DATA)
     except Exception as err:
         return index, f"{type(err).__name__}: {err}"
     return index, results
@@ -398,7 +398,7 @@ class ModelRunSession:
                 The watchdog's stall timeout for every batch.
         """
         self._pool: HeartbeatPool = HeartbeatPool(
-            _run_one_task,
+            run_one_task,
             init_worker,
             (csv_path, model_key, network, column_map),
             workers,

@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(
 
 # A heartbeat value no monotonic clock reading can reach naturally, so
 # a child's write of it is unmistakable when read back in the parent.
-_SENTINEL_HEARTBEAT: float = 777_777.0
+SENTINEL_HEARTBEAT: float = 777_777.0
 
 
 # ------------------------------------------------------------------ #
@@ -52,26 +52,26 @@ _SENTINEL_HEARTBEAT: float = 777_777.0
 # ------------------------------------------------------------------ #
 
 
-def _log_initializer(heartbeat: Any, log_path: str) -> None:
+def log_initializer(heartbeat: Any, log_path: str) -> None:
     """Append one line per worker process and heartbeat the start."""
     with open(log_path, "a", encoding="utf-8") as handle:
         handle.write(f"init {multiprocessing.current_process().pid}\n")
     heartbeat.value = time.monotonic()
 
 
-def _noop_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
+def noop_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
     """Return the point's input index and its argument doubled."""
     index, arg = index_and_arg
     return index, float(arg) * 2.0
 
 
-def _sleeping_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
+def sleeping_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
     """Never return: models a worker whose model run stalls forever."""
     time.sleep(60.0)
     return index_and_arg[0], 0.0
 
 
-def _stuck_initializer(heartbeat: Any, _log_path: str) -> None:
+def stuck_initializer(heartbeat: Any, _log_path: str) -> None:
     """
     Never finish: models a worker parked before its initializer
     returns — the deadlock shape the watchdog bounds.  It heartbeats
@@ -80,16 +80,16 @@ def _stuck_initializer(heartbeat: Any, _log_path: str) -> None:
     time.sleep(60.0)
 
 
-def _echo_initializer(heartbeat: Any, _payload: Any) -> None:
+def echo_initializer(heartbeat: Any, _payload: Any) -> None:
     """Accept any picklable initarg and heartbeat the completed start."""
     heartbeat.value = time.monotonic()
 
 
-def _sentinel_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
+def sentinel_task(index_and_arg: tuple[int, Any]) -> tuple[int, float]:
     """Write the sentinel into the shared heartbeat from the child."""
     index, _arg = index_and_arg
-    heartbeat = proc_pool._HEARTBEAT
-    heartbeat.value = _SENTINEL_HEARTBEAT
+    heartbeat = proc_pool.HEARTBEAT
+    heartbeat.value = SENTINEL_HEARTBEAT
     return index, float(heartbeat.value)
 
 
@@ -105,7 +105,7 @@ def input_data() -> gui_data.GuiInputData:
     return gui_data.load_input_data(gui_data.DEFAULT_CSV_PATH)
 
 
-def _picklable_payload(
+def picklable_payload(
     input_data: gui_data.GuiInputData,
 ) -> gui_data.GuiRunResults:
     """A small, fully synthetic ``GuiRunResults`` for a pickle round trip."""
@@ -139,7 +139,7 @@ class TestHeartbeatPool:
         """Every submitted point comes back, aligned to its input slot."""
         log_file: Path = tmp_path / "workers.log"
         pool: HeartbeatPool = HeartbeatPool(
-            _noop_task, _log_initializer, (str(log_file),), workers=2
+            noop_task, log_initializer, (str(log_file),), workers=2
         )
         try:
             seen: list[tuple[int, Any]] = []
@@ -157,7 +157,7 @@ class TestHeartbeatPool:
         """Five points across two workers still initialize exactly two."""
         log_file: Path = tmp_path / "workers.log"
         pool: HeartbeatPool = HeartbeatPool(
-            _noop_task, _log_initializer, (str(log_file),), workers=2
+            noop_task, log_initializer, (str(log_file),), workers=2
         )
         try:
             results: list[Any] = pool.map([1.0, 2.0, 3.0, 4.0, 5.0])
@@ -174,7 +174,7 @@ class TestHeartbeatPool:
     ) -> None:
         """A non-trivial initarg must survive the forkserver pickling."""
         pool: HeartbeatPool = HeartbeatPool(
-            _noop_task, _echo_initializer, ({"a": [1, 2]},), workers=1
+            noop_task, echo_initializer, ({"a": [1, 2]},), workers=1
         )
         try:
             results: list[Any] = pool.map([1.0])
@@ -193,12 +193,12 @@ class TestHeartbeatPool:
         parent's copy.
         """
         pool: HeartbeatPool = HeartbeatPool(
-            _sentinel_task, _echo_initializer, (None,), workers=1
+            sentinel_task, echo_initializer, (None,), workers=1
         )
         try:
             results: list[Any] = pool.map([1.0])
-            assert results[0][1] == pytest.approx(_SENTINEL_HEARTBEAT)
-            assert pool.heartbeat.value == pytest.approx(_SENTINEL_HEARTBEAT)
+            assert results[0][1] == pytest.approx(SENTINEL_HEARTBEAT)
+            assert pool.heartbeat.value == pytest.approx(SENTINEL_HEARTBEAT)
         finally:
             pool.close()
 
@@ -211,8 +211,8 @@ class TestHeartbeatPool:
         anywhere near the fake's 60 s sleep.
         """
         pool: HeartbeatPool = HeartbeatPool(
-            _noop_task,
-            _stuck_initializer,
+            noop_task,
+            stuck_initializer,
             (str(tmp_path / "unused.log"),),
             workers=1,
             stall_timeout=1.0,
@@ -230,7 +230,7 @@ class TestHeartbeatPool:
     def test_watchdog_names_all_pending_points(self) -> None:
         """Every point whose result never arrived is named in the error."""
         pool: HeartbeatPool = HeartbeatPool(
-            _sleeping_task, _echo_initializer, (None,), workers=2, stall_timeout=1.0
+            sleeping_task, echo_initializer, (None,), workers=2, stall_timeout=1.0
         )
         started: float = time.monotonic()
         try:
@@ -245,7 +245,7 @@ class TestHeartbeatPool:
     def test_map_after_close_is_rejected(self, tmp_path: Path) -> None:
         """A closed pool refuses new work with an informative error."""
         pool: HeartbeatPool = HeartbeatPool(
-            _noop_task, _echo_initializer, (None,), workers=1
+            noop_task, echo_initializer, (None,), workers=1
         )
         pool.close()
         with pytest.raises(RuntimeError, match="closed"):
@@ -305,7 +305,7 @@ class TestPicklability:
         self, input_data: gui_data.GuiInputData
     ) -> None:
         """A full-mode payload survives a pickle round trip."""
-        payload: gui_data.GuiRunResults = _picklable_payload(input_data)
+        payload: gui_data.GuiRunResults = picklable_payload(input_data)
         restored: gui_data.GuiRunResults = pickle.loads(pickle.dumps(payload))
         assert isinstance(restored, gui_data.GuiRunResults)
 

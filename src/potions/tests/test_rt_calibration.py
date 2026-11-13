@@ -97,7 +97,7 @@ def test_flow_weighted_kge_perfect_fit(q_meas_fixture: Series) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _zone_configs() -> dict[str, RtZoneConfiguration]:
+def zone_configs() -> dict[str, RtZoneConfiguration]:
     cfg = RtZoneConfiguration(do_reactions=True, do_speciation=True)
     return {
         "surface": cfg,
@@ -106,20 +106,20 @@ def _zone_configs() -> dict[str, RtZoneConfiguration]:
     }
 
 
-def _network() -> Any:
+def make_network() -> Any:
     return get_simple_carbon_network()
 
 
 def test_build_bounds_hbv_has_hydro_params() -> None:
-    network = _network()
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    network = make_network()
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     for name in HbvModel.default_parameter_ranges():
         assert name in bounds, f"Missing hydro param {name!r} in bounds"
 
 
 def test_build_bounds_hbv_has_zone_dims() -> None:
-    network = _network()
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    network = make_network()
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     assert "surface.max_water" in bounds
     assert "surface.passive_water_storage" in bounds
     assert "shallow.max_water" in bounds
@@ -127,9 +127,9 @@ def test_build_bounds_hbv_has_zone_dims() -> None:
 
 
 def test_build_bounds_hbv_reactive_zone_mineral_params() -> None:
-    network = _network()
+    network = make_network()
     num_min = network.num_minerals
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     for mid in range(num_min):
         assert f"surface.sw_threshold[{mid}]" in bounds
         assert f"surface.k_a[{mid}]" in bounds
@@ -138,8 +138,8 @@ def test_build_bounds_hbv_reactive_zone_mineral_params() -> None:
 
 
 def test_build_bounds_key_order_starts_with_hydro() -> None:
-    network = _network()
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    network = make_network()
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     hydro_names = list(HbvModel.default_parameter_ranges())
     all_keys = list(bounds.keys())
     for i, hname in enumerate(hydro_names):
@@ -147,14 +147,14 @@ def test_build_bounds_key_order_starts_with_hydro() -> None:
 
 
 def test_build_bounds_no_river_zone() -> None:
-    network = _network()
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    network = make_network()
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     assert all("river." not in k for k in bounds)
 
 
 def test_build_bounds_mineral_bounds_values() -> None:
-    network = _network()
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs())
+    network = make_network()
+    bounds = build_rt_bounds(HbvModel, network, zone_configs())
     # Surface zone: free soil-moisture / temperature / rate bounds.
     assert bounds["surface.sw_threshold[0]"] == (0.0, 1.0)
     assert bounds["surface.sw_exp[0]"] == (0.5, 2.5)
@@ -168,10 +168,10 @@ def test_build_bounds_mineral_bounds_values() -> None:
 
 
 def test_build_bounds_custom_hydro_bounds() -> None:
-    network = _network()
+    network = make_network()
     custom = dict(HbvModel.default_parameter_ranges())
     custom["surface.k0"] = (0.01, 0.5)
-    bounds = build_rt_bounds(HbvModel, network, _zone_configs(), hydro_bounds=custom)
+    bounds = build_rt_bounds(HbvModel, network, zone_configs(), hydro_bounds=custom)
     assert bounds["surface.k0"] == (0.01, 0.5)
 
 
@@ -206,8 +206,8 @@ def test_make_objective_returns_callable() -> None:
 
     data = RtCalibrationData(
         model_type=HbvModel,
-        network=_network(),
-        zone_configs=_zone_configs(),
+        network=make_network(),
+        zone_configs=zone_configs(),
         forc=fd,
         precip_conc=np.zeros((1, 4, 1)),
         q_meas=q_meas,

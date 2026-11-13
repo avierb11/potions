@@ -99,7 +99,7 @@ def dates() -> pd.DatetimeIndex:
     return pd.date_range("2020-01-01", periods=10, freq="D")
 
 
-def _make_forcing(dates: pd.DatetimeIndex, **overrides) -> ForcingData:
+def make_forcing(dates: pd.DatetimeIndex, **overrides) -> ForcingData:
     n: int = len(dates)
     data: dict = {
         "precip": pd.Series(np.linspace(0.1, 2.0, n), index=dates),
@@ -110,7 +110,7 @@ def _make_forcing(dates: pd.DatetimeIndex, **overrides) -> ForcingData:
     return ForcingData(**data)
 
 
-def _with_bad_value(series: pd.Series, idx: int, value: float) -> pd.Series:
+def with_bad_value(series: pd.Series, idx: int, value: float) -> pd.Series:
     out = series.copy()
     out.iloc[idx] = value
     return out
@@ -192,16 +192,16 @@ def test_is_bottom_zone_recognizes_registered_classes() -> None:
 
 def test_register_bottom_zone_decorator() -> None:
     @register_bottom_zone
-    class _DecoratedZone:
+    class DecoratedZone:
         pass
 
-    class _ChildZone(_DecoratedZone):
+    class ChildZone(DecoratedZone):
         pass
 
-    assert _DecoratedZone in BOTTOM_ZONE_CLASSES
-    assert is_bottom_zone(_DecoratedZone())
+    assert DecoratedZone in BOTTOM_ZONE_CLASSES
+    assert is_bottom_zone(DecoratedZone())
     # Subclasses of a registered zone are bottom zones too.
-    assert is_bottom_zone(_ChildZone())
+    assert is_bottom_zone(ChildZone())
     # Unregistered objects are not.
     assert not is_bottom_zone(object())
 
@@ -222,8 +222,8 @@ def test_error_class_hierarchy() -> None:
 
 # ===================== Runtime input validation ===================== #
 def test_nan_precip_raises(model: ValidModel, dates: pd.DatetimeIndex) -> None:
-    fd = _make_forcing(
-        dates, precip=_with_bad_value(pd.Series(0.5, index=dates), 3, float("nan"))
+    fd = make_forcing(
+        dates, precip=with_bad_value(pd.Series(0.5, index=dates), 3, float("nan"))
     )
     with pytest.raises(
         ModelInputError, match=r"the 'precip' series contains non-finite"
@@ -234,9 +234,9 @@ def test_nan_precip_raises(model: ValidModel, dates: pd.DatetimeIndex) -> None:
 def test_negative_precip_raises(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
-    fd = _make_forcing(
+    fd = make_forcing(
         dates,
-        precip=_with_bad_value(
+        precip=with_bad_value(
             pd.Series(np.linspace(0.1, 2.0, len(dates)), index=dates), 2, -1.0
         ),
     )
@@ -247,8 +247,8 @@ def test_negative_precip_raises(
 
 
 def test_negative_pet_raises(model: ValidModel, dates: pd.DatetimeIndex) -> None:
-    fd = _make_forcing(
-        dates, pet=_with_bad_value(pd.Series(0.5, index=dates), 2, -0.5)
+    fd = make_forcing(
+        dates, pet=with_bad_value(pd.Series(0.5, index=dates), 2, -0.5)
     )
     with pytest.raises(ModelInputError, match="PET contains negative"):
         model.run_hydro_model(fd)
@@ -257,7 +257,7 @@ def test_negative_pet_raises(model: ValidModel, dates: pd.DatetimeIndex) -> None
 def test_non_numeric_series_raises(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
-    fd = _make_forcing(
+    fd = make_forcing(
         dates, precip=pd.Series(list("abcdefghij"), index=dates)
     )
     with pytest.raises(
@@ -269,7 +269,7 @@ def test_non_numeric_series_raises(
 def test_mismatched_series_lengths_raise(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
-    fd = _make_forcing(
+    fd = make_forcing(
         dates,
         temp=pd.Series(np.linspace(-2.0, 8.0, len(dates) - 2), index=dates[2:]),
     )
@@ -281,14 +281,14 @@ def test_mismatched_series_lengths_raise(
 
 def test_empty_forcing_raises(model: ValidModel, dates: pd.DatetimeIndex) -> None:
     with pytest.raises(ModelInputError, match=r"series are empty"):
-        model.run_hydro_model(_make_forcing(dates[0:0]))
+        model.run_hydro_model(make_forcing(dates[0:0]))
 
 
 def test_wrong_number_of_forcing_data_raises(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
     m = TwoSurfaceModel(scales=[0.5, 0.5])
-    fd = _make_forcing(dates)
+    fd = make_forcing(dates)
     with pytest.raises(ModelInputError, match="one per surface zone"):
         m.run_hydro_model([fd, fd, fd])
 
@@ -298,7 +298,7 @@ def test_meas_streamflow_wrong_length_raises(
 ) -> None:
     stream = pd.Series(0.1, index=dates[2:])
     with pytest.raises(ModelInputError, match="must have the same length"):
-        model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+        model.run_hydro_model(make_forcing(dates), meas_streamflow=stream)
 
 
 def test_meas_streamflow_negative_raises(
@@ -309,7 +309,7 @@ def test_meas_streamflow_negative_raises(
     with pytest.raises(
         ModelInputError, match="Measured streamflow must be >= 0"
     ):
-        model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+        model.run_hydro_model(make_forcing(dates), meas_streamflow=stream)
 
 
 def test_meas_streamflow_nan_allowed(
@@ -319,7 +319,7 @@ def test_meas_streamflow_nan_allowed(
     stream.iloc[1] = float("nan")
 
     res = model.run_hydro_model(
-        _make_forcing(dates), meas_streamflow=stream, save_results=False
+        make_forcing(dates), meas_streamflow=stream, save_results=False
     )
 
     # NaN marks a missing measurement: the run completes, the series is carried
@@ -346,7 +346,7 @@ def test_meas_streamflow_inf_raises(
     with pytest.raises(
         ModelInputError, match="meas_streamflow contains infinite"
     ):
-        model.run_hydro_model(_make_forcing(dates), meas_streamflow=stream)
+        model.run_hydro_model(make_forcing(dates), meas_streamflow=stream)
 
 
 def test_init_state_wrong_length_raises(
@@ -356,7 +356,7 @@ def test_init_state_wrong_length_raises(
     with pytest.raises(
         ModelInputError, match="One initial storage value per zone"
     ):
-        model.run_hydro_model(_make_forcing(dates), init_state=np.zeros(3))
+        model.run_hydro_model(make_forcing(dates), init_state=np.zeros(3))
 
 
 def test_init_state_negative_raises(
@@ -365,7 +365,7 @@ def test_init_state_negative_raises(
     init = np.zeros(model.num_zones)
     init[0] = -1.0
     with pytest.raises(ModelInputError, match="init_state contains negative"):
-        model.run_hydro_model(_make_forcing(dates), init_state=init)
+        model.run_hydro_model(make_forcing(dates), init_state=init)
 
 
 def test_init_state_nan_raises(
@@ -376,14 +376,14 @@ def test_init_state_nan_raises(
     with pytest.raises(
         ModelInputError, match="init_state contains non-finite"
     ):
-        model.run_hydro_model(_make_forcing(dates), init_state=init)
+        model.run_hydro_model(make_forcing(dates), init_state=init)
 
 
 # ===================== Happy paths ===================== #
 def test_run_happy_path(model: ValidModel, dates: pd.DatetimeIndex) -> None:
     stream = pd.Series(np.linspace(0.0, 0.5, len(dates)), index=dates)
     res = model.run_hydro_model(
-        _make_forcing(dates), meas_streamflow=stream, save_results=False
+        make_forcing(dates), meas_streamflow=stream, save_results=False
     )
     numeric = res.simulation.select_dtypes("number")
     assert np.isfinite(numeric.to_numpy(dtype=float)).all()
@@ -393,14 +393,14 @@ def test_check_water_balance_happy_path(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
     # The conservative model passes its own water-balance check (opt-in).
-    model.run_hydro_model(_make_forcing(dates), check_water_balance=True, save_results=False)
+    model.run_hydro_model(make_forcing(dates), check_water_balance=True, save_results=False)
 
 
 def test_negative_temperatures_are_allowed(
     model: ValidModel, dates: pd.DatetimeIndex
 ) -> None:
     # Temperature legitimately goes below zero: only finiteness is checked.
-    fd = _make_forcing(dates, temp=pd.Series(-5.0, index=dates))
+    fd = make_forcing(dates, temp=pd.Series(-5.0, index=dates))
     model.run_hydro_model(fd, save_results=False)
 
 
@@ -442,7 +442,7 @@ def rt_model() -> RtValidationModel:
     )
 
 
-def _hydro_sim_df(n: int) -> pd.DataFrame:
+def hydro_sim_df(n: int) -> pd.DataFrame:
     """A minimal simulated-hydrology table as produced by run_hydro_model."""
     df = pd.DataFrame(index=pd.date_range("2020-01-01", periods=n, freq="D"))
     for z in ("snow", "surface", "ground"):
@@ -466,7 +466,7 @@ def test_rt_precip_conc_nan_raises(
         ModelInputError, match="non-finite \\(NaN/Inf\\) concentration"
     ):
         rt_model.construct_rt_forcing_matrix(
-            _make_forcing(dates), _hydro_sim_df(len(dates)), pc, rt_model.rt_zones
+            make_forcing(dates), hydro_sim_df(len(dates)), pc, rt_model.rt_zones
         )
 
 
@@ -476,7 +476,7 @@ def test_rt_precip_conc_wrong_surface_dim(
     pc = np.ones((2, len(dates), 2))  # 2 != 1 surface zone
     with pytest.raises(ModelInputError, match="number of surface zones"):
         rt_model.construct_rt_forcing_matrix(
-            _make_forcing(dates), _hydro_sim_df(len(dates)), pc, rt_model.rt_zones
+            make_forcing(dates), hydro_sim_df(len(dates)), pc, rt_model.rt_zones
         )
 
 
@@ -488,5 +488,5 @@ def test_rt_precip_conc_wrong_steps_dim(
         ModelInputError, match="number of steps in the hydro simulation"
     ):
         rt_model.construct_rt_forcing_matrix(
-            _make_forcing(dates), _hydro_sim_df(len(dates)), pc, rt_model.rt_zones
+            make_forcing(dates), hydro_sim_df(len(dates)), pc, rt_model.rt_zones
         )

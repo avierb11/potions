@@ -37,11 +37,11 @@ from potions.gui.data import measured_roles
 # means "not chosen yet" (OK stays disabled until a column is
 # picked); an optional row's sentinel means "deliberately absent"
 # (the role is excluded from the loaded record).
-_SELECT_SENTINEL: Final[str] = "(select…)"
-_NONE_SENTINEL: Final[str] = "(none)"
+SELECT_SENTINEL: Final[str] = "(select…)"
+NONE_SENTINEL: Final[str] = "(none)"
 
 # The dialog's header: the units policy of the loaded record.
-_UNITS_POLICY: Final[str] = (
+UNITS_POLICY: Final[str] = (
     "Values are used as they appear in the spreadsheet, in the "
     "model's units: precipitation, streamflow, and potential "
     "evapotranspiration in mm/day; temperature in °C; "
@@ -49,7 +49,7 @@ _UNITS_POLICY: Final[str] = (
 )
 
 
-def _role_rows(network: pt.ReactionNetwork) -> list[tuple[str, str, bool]]:
+def role_rows(network: pt.ReactionNetwork) -> list[tuple[str, str, bool]]:
     """
     The dialog's rows, in display order.
 
@@ -112,19 +112,19 @@ class ColumnMappingDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Map record columns")
-        self._rows: list[tuple[str, str, bool]] = _role_rows(network)
+        self._rows: list[tuple[str, str, bool]] = role_rows(network)
         self._combos: dict[str, QComboBox] = {}
 
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        header: QLabel = QLabel(_UNITS_POLICY)
+        header: QLabel = QLabel(UNITS_POLICY)
         header.setWordWrap(True)
         layout.addWidget(header)
 
         for role, label, required in self._rows:
-            sentinel: str = _SELECT_SENTINEL if required else _NONE_SENTINEL
+            sentinel: str = SELECT_SENTINEL if required else NONE_SENTINEL
             row: QHBoxLayout = QHBoxLayout()
             row.setSpacing(6)
             caption: QLabel = QLabel(label)
@@ -182,7 +182,7 @@ class ColumnMappingDialog(QDialog):
         out: dict[str, str | None] = {}
         for role, _label, _required in self._rows:
             text: str = self._combos[role].currentText()
-            out[role] = None if text == _NONE_SENTINEL else text
+            out[role] = None if text == NONE_SENTINEL else text
         return out
 
     def _validate(self, _index: int) -> None:
@@ -198,12 +198,12 @@ class ColumnMappingDialog(QDialog):
         choices: dict[str, str | None] = {}
         for role, combo in self._combos.items():
             text: str = combo.currentText()
-            choices[role] = None if text == _NONE_SENTINEL else text
+            choices[role] = None if text == NONE_SENTINEL else text
 
         missing: list[str] = [
             label
             for role, label, required in self._rows
-            if required and choices[role] == _SELECT_SENTINEL
+            if required and choices[role] == SELECT_SENTINEL
         ]
         if missing:
             self._status_label.setText("Select a column for: " + ", ".join(missing))

@@ -10,7 +10,7 @@ from ..core import (
 )
 
 
-def _assert_step_mass_balance(
+def assert_step_mass_balance(
     zone, s_0: float, d: HydroForcing, dt: float, tol: float = 1e-6
 ) -> None:
     """For every zone, a single step must satisfy the storage update identity
@@ -40,7 +40,7 @@ def test_SnowZone() -> None:
     assert abs(new_state.state - 1.0) < 1e-7
     assert abs(new_state.forc_flux - 1.0) < 1e-7
 
-    _assert_step_mass_balance(sz, s_0, d, d_t)
+    assert_step_mass_balance(sz, s_0, d, d_t)
 
     # Base case, no snowfall -> no new state.
     d_base = HydroForcing(precip=0.0, temp=0.0, pet=0.0, q_in=0.0)
@@ -65,7 +65,7 @@ def test_SurfaceZone() -> None:
 
     # The step must conserve mass.
     new_state: HydroStep = sz.step(s_0, d, d_t)
-    _assert_step_mass_balance(sz, s_0, d, d_t)
+    assert_step_mass_balance(sz, s_0, d, d_t)
 
     # Evapotranspiration cannot exceed the incoming water budget.
     assert new_state.state >= -1e-9
@@ -95,7 +95,7 @@ def test_SubsurfaceZone() -> None:
 
     s_0: float = 50.0
     d_t: float = 1.0
-    _assert_step_mass_balance(gz, s_0, d, d_t)
+    assert_step_mass_balance(gz, s_0, d, d_t)
 
 
 def test_SubsurfaceZone_default() -> None:

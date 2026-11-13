@@ -73,17 +73,17 @@ SOC_CALCITE_ORDER: list[str] = [
 ]
 
 
-def _core_db() -> CoreDatabase:
+def core_db() -> CoreDatabase:
     """The compiled (Rust) default chemical database."""
     return CoreDatabase.load_default()
 
 
-def _minimal_calcite_network() -> CoreReactionNetwork:
+def minimal_calcite_network() -> CoreReactionNetwork:
     """Minimal Rust network with a single TST calcite mineral.
 
     Primary: Ca++, H+; secondary: CO2(aq), CO3--; no exchange species.
     """
-    db: CoreDatabase = _core_db()
+    db: CoreDatabase = core_db()
     return CoreReactionNetwork(
         primary_aqueous=db.get_primary_aqueous_species(["Ca++", "H+"]),
         mineral=db.get_mineral_species(["Calcite(s)"]),
@@ -93,12 +93,12 @@ def _minimal_calcite_network() -> CoreReactionNetwork:
     )
 
 
-def _stoich_matrix(tst: CoreTstParameters, order: list[str]) -> np.ndarray:
+def stoich_matrix(tst: CoreTstParameters, order: list[str]) -> np.ndarray:
     """The stoichiometry matrix restricted to (and ordered by) ``order``."""
     return tst.stoich.select(order).to_numpy()
 
 
-def _dep_matrix(tst: CoreTstParameters, order: list[str]) -> np.ndarray:
+def dep_matrix(tst: CoreTstParameters, order: list[str]) -> np.ndarray:
     """The dependence matrix restricted to (and ordered by) ``order``."""
     return tst.dep.select(order).to_numpy()
 
@@ -106,8 +106,8 @@ def _dep_matrix(tst: CoreTstParameters, order: list[str]) -> np.ndarray:
 def test_rust_stoich_matrix_is_database_exponents() -> None:
     """Q exponents: the database stoichiometric coefficients of the aqueous
     species, with the mineral's own column zero (unit activity)."""
-    network: CoreReactionNetwork = _minimal_calcite_network()
-    stoich: np.ndarray = _stoich_matrix(network.tst_params, MINIMAL_ORDER)
+    network: CoreReactionNetwork = minimal_calcite_network()
+    stoich: np.ndarray = stoich_matrix(network.tst_params, MINIMAL_ORDER)
 
     assert stoich.shape == (1, len(MINIMAL_ORDER))
     calcite_row = stoich[0]
@@ -121,8 +121,8 @@ def test_rust_stoich_matrix_is_database_exponents() -> None:
 def test_rust_dep_matrix_is_reaction_dependence() -> None:
     """Dependence matrix: the reaction's dependence exponents; calcite lists
     none, so every exponent is zero (forward-rate factor of 1)."""
-    network: CoreReactionNetwork = _minimal_calcite_network()
-    dep: np.ndarray = _dep_matrix(network.tst_params, MINIMAL_ORDER)
+    network: CoreReactionNetwork = minimal_calcite_network()
+    dep: np.ndarray = dep_matrix(network.tst_params, MINIMAL_ORDER)
 
     assert dep.tolist() == [[0.0] * len(MINIMAL_ORDER)]
 
@@ -130,7 +130,7 @@ def test_rust_dep_matrix_is_reaction_dependence() -> None:
 def test_rust_min_eq_const_is_linear_scale() -> None:
     """``min_eq_const`` holds the linear Ksp (``10 ** log10_K``), not the
     raw database log10 value."""
-    network: CoreReactionNetwork = _minimal_calcite_network()
+    network: CoreReactionNetwork = minimal_calcite_network()
     k: np.ndarray = network.tst_params.min_eq_const.to_numpy()
 
     assert k.tolist() == pytest.approx([KSP_CALCITE])
@@ -143,7 +143,7 @@ def test_rust_rate_is_concentration_dependent_and_self_limiting() -> None:
     With Q = Ca++**1.1 * CO3--**0.5 and Ca++ = CO3-- = c, the saturation
     point (Q == K) sits at c = K**(1/1.6).
     """
-    network: CoreReactionNetwork = _minimal_calcite_network()
+    network: CoreReactionNetwork = minimal_calcite_network()
     tst: CoreTstParameters = network.tst_params
     c_sat: float = KSP_CALCITE ** (1.0 / 1.6)
 
@@ -167,7 +167,7 @@ def test_rust_rate_finite_for_nonpositive_concentrations() -> None:
     """The ``log10`` concentration floor keeps the rate finite (no NaN) when
     a root finder probes a trial state with zero or negative
     concentrations."""
-    network: CoreReactionNetwork = _minimal_calcite_network()
+    network: CoreReactionNetwork = minimal_calcite_network()
     tst: CoreTstParameters = network.tst_params
 
     bad: NDArray[np.float64] = np.zeros(len(MINIMAL_ORDER))
@@ -181,7 +181,7 @@ def test_rust_non_tst_mineral_is_zero_row() -> None:
     """A non-TST mineral (Monod here) contributes an all-zero row and a unit
     equilibrium constant, in network order, while the TST mineral's row keeps
     the database exponents."""
-    db: CoreDatabase = _core_db()
+    db: CoreDatabase = core_db()
     network: CoreReactionNetwork = CoreReactionNetwork(
         primary_aqueous=db.get_primary_aqueous_species(["DOC", "Ca++", "H+"]),
         mineral=db.get_mineral_species(["SOC(s)", "Calcite(s)"]),
@@ -202,8 +202,8 @@ def test_rust_non_tst_mineral_is_zero_row() -> None:
         "Calcite(s)",
     ]
     tst: CoreTstParameters = network.tst_params
-    stoich: np.ndarray = _stoich_matrix(tst, order)
-    dep: np.ndarray = _dep_matrix(tst, order)
+    stoich: np.ndarray = stoich_matrix(tst, order)
+    dep: np.ndarray = dep_matrix(tst, order)
     k: np.ndarray = tst.min_eq_const.to_numpy()
 
     assert stoich.shape == (2, len(order))
@@ -222,7 +222,7 @@ def test_rust_full_soc_calcite_network() -> None:
     """The exact showcase network: only the calcite row (the sole TST
     mineral) is non-zero; the two Monod minerals and the dependence matrix
     are all zero."""
-    db: CoreDatabase = _core_db()
+    db: CoreDatabase = core_db()
     network: CoreReactionNetwork = CoreReactionNetwork(
         primary_aqueous=db.get_primary_aqueous_species(
             ["DOC", "Ca++", "HCO3-", "H+"]
@@ -238,8 +238,8 @@ def test_rust_full_soc_calcite_network() -> None:
     assert list(network.species_order) == SOC_CALCITE_ORDER
 
     tst: CoreTstParameters = network.tst_params
-    stoich: np.ndarray = _stoich_matrix(tst, SOC_CALCITE_ORDER)
-    dep: np.ndarray = _dep_matrix(tst, SOC_CALCITE_ORDER)
+    stoich: np.ndarray = stoich_matrix(tst, SOC_CALCITE_ORDER)
+    dep: np.ndarray = dep_matrix(tst, SOC_CALCITE_ORDER)
     k: np.ndarray = tst.min_eq_const.to_numpy()
 
     assert stoich[0].tolist() == [0.0] * len(SOC_CALCITE_ORDER)

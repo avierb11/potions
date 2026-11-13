@@ -32,7 +32,7 @@ from ..result_saving import (
 NUM_STEPS = 30
 
 
-def _make_forcing(num_steps: int = NUM_STEPS) -> ForcingData:
+def make_forcing(num_steps: int = NUM_STEPS) -> ForcingData:
     start = datetime.date(2000, 1, 1)
     dates: list[datetime.date] = [
         start + datetime.timedelta(days=i) for i in range(num_steps)
@@ -45,7 +45,7 @@ def _make_forcing(num_steps: int = NUM_STEPS) -> ForcingData:
     return ForcingData(precip=const(2.0), temp=const(15.0), pet=const(1.0))
 
 
-def _make_rt_results(
+def make_rt_results(
     sim_df: DataFrame, zone_names: list[str] | None = None
 ) -> RtModelResults:
     """A minimal, hand-built RT result object (fast, no Newton solve needed)."""
@@ -92,7 +92,7 @@ def test_make_run_dir_collision(tmp_path: Path) -> None:
 def test_run_hydro_model_saves(tmp_path: Path) -> None:
     model = HbvModel()
     res = model.run_hydro_model(
-        forc=_make_forcing(),
+        forc=make_forcing(),
         save_results=True,
         results_dir=str(tmp_path / "out"),
     )
@@ -126,7 +126,7 @@ def test_run_hydro_model_with_measured_streamflow_saves_objectives(
 ) -> None:
     model = HbvModel()
     num_steps = 90
-    forc = _make_forcing(num_steps=num_steps)
+    forc = make_forcing(num_steps=num_steps)
     index = forc.precip.index
     meas = Series([5.0] * num_steps, index=index, dtype=f64)
 
@@ -150,7 +150,7 @@ def test_run_hydro_model_with_measured_streamflow_saves_objectives(
 def test_run_hydro_model_save_explicit_off(tmp_path: Path) -> None:
     model = HbvModel()
     res = model.run_hydro_model(
-        forc=_make_forcing(),
+        forc=make_forcing(),
         save_results=False,
         results_dir=str(tmp_path),
     )
@@ -173,7 +173,7 @@ def test_save_rt_run_writes_pickle(tmp_path: Path) -> None:
             ]
         ),
     )
-    rt_res = _make_rt_results(sim_df, zone_names=list(model.zone_names))
+    rt_res = make_rt_results(sim_df, zone_names=list(model.zone_names))
 
     out = save_rt_run(model, rt_res, str(tmp_path / "out"))
     pkl_path = out / "results.pkl"
@@ -190,8 +190,8 @@ def test_save_rt_run_writes_pickle(tmp_path: Path) -> None:
 
 def test_save_model_run_combined_layout(tmp_path: Path) -> None:
     model = HbvModel()
-    hydro_res = model.run_hydro_model(forc=_make_forcing(), save_results=False)
-    rt_res = _make_rt_results(hydro_res.simulation)
+    hydro_res = model.run_hydro_model(forc=make_forcing(), save_results=False)
+    rt_res = make_rt_results(hydro_res.simulation)
 
     out = save_model_run(model, hydro_res, rt_res, str(tmp_path / "out"))
 
@@ -215,7 +215,7 @@ def test_save_model_run_combined_layout(tmp_path: Path) -> None:
 # saving logic under test (Pool, worker write, parent aggregation).
 
 
-def _fake_hydro_from_series(cls, series: Series) -> HydrologicalModel:
+def fake_hydro_from_series(cls, series: Series) -> HydrologicalModel:
     del series
     return HbvModel()
 
@@ -224,11 +224,11 @@ def test_run_batch_saves_members(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        HydrologicalModel, "hydro_from_series", classmethod(_fake_hydro_from_series)
+        HydrologicalModel, "hydro_from_series", classmethod(fake_hydro_from_series)
     )
     model = HbvModel()
     params = DataFrame([model.to_series(), model.to_series()])
-    forc = _make_forcing(num_steps=20)
+    forc = make_forcing(num_steps=20)
     index = forc.precip.index
     meas = Series([5.0] * 20, index=index, dtype=f64)
 
@@ -261,11 +261,11 @@ def test_run_batch_save_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        HydrologicalModel, "hydro_from_series", classmethod(_fake_hydro_from_series)
+        HydrologicalModel, "hydro_from_series", classmethod(fake_hydro_from_series)
     )
     model = HbvModel()
     params = DataFrame([model.to_series(), model.to_series()])
-    forc = _make_forcing(num_steps=20)
+    forc = make_forcing(num_steps=20)
 
     res = HbvModel.run_batch(
         params=params,

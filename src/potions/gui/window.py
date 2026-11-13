@@ -173,8 +173,8 @@ from PySide6.QtWidgets import (
 
 from potions.gui.calibration import (
     CalibrationSettings,
-    _CalibrationOutcome,
-    _CalibrationWorker,
+    CalibrationOutcome,
+    CalibrationWorker,
     ask_calibration_settings,
 )
 from potions.gui.common import (
@@ -198,7 +198,7 @@ from potions.gui.data import (
 from potions.gui.data_dialog import ColumnMappingDialog
 from potions.gui.figure_panel import FigureDock, FigurePanel
 from potions.gui.gradients import (
-    _Perturbation,
+    Perturbation,
     free_parameter_steps,
     gradient_matrix,
     objective_vector,
@@ -218,7 +218,7 @@ from potions.gui.model_specs import (
     get_model_spec,
 )
 from potions.gui.network_editor import (
-    _preset_fingerprint_map,
+    preset_fingerprint_map,
     edit_network,
 )
 from potions.gui.network_specs import (
@@ -260,10 +260,10 @@ from potions.gui.state import (
 # ==== Constants ==== #
 # The window title (the title row repeats it in a larger font); the
 # selected model's display name fills the placeholder.
-_TITLE_TEMPLATE: Final[str] = "East River calibration — {model}"
+TITLE_TEMPLATE: Final[str] = "East River calibration — {model}"
 
 
-def _title_for(spec: ModelSpec) -> str:
+def title_for(spec: ModelSpec) -> str:
     """
     The window title for a model spec.
 
@@ -273,40 +273,40 @@ def _title_for(spec: ModelSpec) -> str:
     Returns:
         The title naming the model's display name.
     """
-    return _TITLE_TEMPLATE.format(model=spec.display_name)
+    return TITLE_TEMPLATE.format(model=spec.display_name)
 
 # The debounce interval (ms) between a parameter change and the
 # re-run; a drag or a burst of keyboard steps coalesces into one.
-_DEBOUNCE_MS: Final[int] = 400
+DEBOUNCE_MS: Final[int] = 400
 
 # The interval (ms) at which the elapsed-time label refreshes while
 # a run is in flight.
-_ELAPSED_MS: Final[int] = 200
+ELAPSED_MS: Final[int] = 200
 
 # The initial window size (px), clamped to the screen at startup (see
-# `_available_screen_geometry`); a restored window geometry replaces it
+# `available_screen_geometry`); a restored window geometry replaces it
 # before the window is shown.
-_INITIAL_SIZE: Final[tuple[int, int]] = (1360, 900)
+INITIAL_SIZE: Final[tuple[int, int]] = (1360, 900)
 
 # The initial height (px) of the docked figure area: the retired
 # splitter's 350 px figure section plus the dock title bar and tab
 # bar the figure docks add.  A first session builds the figure docks
 # at this height; a restored session state replaces it with the
 # user's own layout (see Task 4).
-_INITIAL_DOCK_HEIGHT: Final[int] = 380
+INITIAL_DOCK_HEIGHT: Final[int] = 380
 
 # The status label's width limits (px): an unbounded label would
 # grow the window's minimum width with every status message, so the
 # label reports a small constant minimum hint (its text is clipped
 # when the window is narrow; the full text stays in the tooltip)
 # and is capped at the maximum width.
-_STATUS_MIN_WIDTH: Final[int] = 80
-_STATUS_MAX_WIDTH: Final[int] = 350
+STATUS_MIN_WIDTH: Final[int] = 80
+STATUS_MAX_WIDTH: Final[int] = 350
 
 # The side (px) of the toolbar's running-indicator square.  Its
 # fixed size keeps the toolbar's — and so the window's — minimum
 # width constant whether or not a job is running.
-_SPINNER_SIZE: Final[int] = 24
+SPINNER_SIZE: Final[int] = 24
 
 # Squeeze floor (px) for the toolbar combos.  A combo's plain
 # minimum hint is the width of its current text; without a floor a
@@ -315,51 +315,51 @@ _SPINNER_SIZE: Final[int] = 24
 # its full text staying available in its popup.  (The toolbar
 # itself needs no floor: items that no longer fit move into its
 # extension button instead of widening the window.)
-_COMBO_MIN_WIDTH: Final[int] = 100
+COMBO_MIN_WIDTH: Final[int] = 100
 
 # The period (ms) of the running indicator's frame-advance timer.
-_SPINNER_INTERVAL_MS: Final[int] = 100
+SPINNER_INTERVAL_MS: Final[int] = 100
 
 # The running indicator's frames, in cycle order.
-_SPINNER_FRAMES: Final[tuple[str, ...]] = ("▖", "▘", "▝", "▗")
+SPINNER_FRAMES: Final[tuple[str, ...]] = ("▖", "▘", "▝", "▗")
 
 # The fixed objective panel's contents margins (px) in the order
 # left, top, right, bottom: the panel is sized exactly to fit its
 # heading and table plus these margins, so they are the only
 # padding around them.
-_OBJECTIVE_PANEL_MARGINS: Final[tuple[int, int, int, int]] = (12, 4, 12, 8)
+OBJECTIVE_PANEL_MARGINS: Final[tuple[int, int, int, int]] = (12, 4, 12, 8)
 
 # The vertical spacing (px) between the fixed objective panel's
 # heading and its table.
-_OBJECTIVE_PANEL_SPACING: Final[int] = 4
+OBJECTIVE_PANEL_SPACING: Final[int] = 4
 
 # The metrics the line search can optimize: the metrics with 1 as
 # their optimal value, so the search maximizes them (minimizing
 # ``1 - value`` would find the same best point).
-_LINE_SEARCH_METRICS: Final[frozenset[str]] = frozenset(
+LINE_SEARCH_METRICS: Final[frozenset[str]] = frozenset(
     {"KGE", "LogKGE", "NSE", "LogNSE"}
 )
 
 # The width of the checkbox inset the objective table's delegate
 # draws in each cell's left edge (px).
-_CHECKBOX_INSET: Final[int] = 24
+CHECKBOX_INSET: Final[int] = 24
 
 # The most recent in-session runs the History dropdown keeps (the
 # session's own runs, newest first; the saved run directories listed
 # below them are not capped).
-_HISTORY_CAP: Final[int] = 20
+HISTORY_CAP: Final[int] = 20
 
 # The placeholder for an objective cell whose value is missing or
 # NaN.
-_MISSING: Final[str] = "–"
+MISSING: Final[str] = "–"
 
 # An invalid QModelIndex, for the model methods' default parents.
-_INVALID_INDEX: Final[QModelIndex] = QModelIndex()
+INVALID_INDEX: Final[QModelIndex] = QModelIndex()
 # =================== #
 
 
 # ==== Helpers ==== #
-def _available_screen_geometry() -> QRect | None:
+def available_screen_geometry() -> QRect | None:
     """
     The current primary screen's available area, if there is a screen.
 
@@ -377,7 +377,7 @@ def _available_screen_geometry() -> QRect | None:
     return screen.availableGeometry() if screen is not None else None
 
 
-def _clamped_geometry(requested: QRect, available: QRect) -> QRect:
+def clamped_geometry(requested: QRect, available: QRect) -> QRect:
     """
     Fit a requested window geometry inside the screen's available area.
 
@@ -408,7 +408,7 @@ def _clamped_geometry(requested: QRect, available: QRect) -> QRect:
     return QRect(x, y, width, height)
 
 
-def _decode_dock_state(encoded: str | None) -> QByteArray | None:
+def decode_dock_state(encoded: str | None) -> QByteArray | None:
     """
     Decode a saved ``dock_state`` string into a `restoreState` argument.
 
@@ -435,7 +435,7 @@ def _decode_dock_state(encoded: str | None) -> QByteArray | None:
     return QByteArray(raw)
 
 
-def _objective_panel_size(
+def objective_panel_size(
     heading_size: QSize,
     column_widths: list[int],
     row_heights: list[int],
@@ -480,7 +480,7 @@ def _objective_panel_size(
     return (panel_w, panel_h)
 
 
-class _CapturingStream:
+class CapturingStream:
     """
     A stdout stand-in that mirrors writes to the real stdout and
     forwards each completed line to a callback.
@@ -521,7 +521,7 @@ class _CapturingStream:
 
 
 @dataclass(frozen=True, slots=True)
-class _RunOutcome:
+class RunOutcome:
     """
     The outcome of one worker run, delivered on the main thread
     through the worker's ``finished_run`` signal.
@@ -547,7 +547,7 @@ class _RunOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class _HistoryItem:
+class HistoryItem:
     """
     One previous run in the window's history, behind the parameter
     panel's *History* dropdown.
@@ -586,10 +586,10 @@ class _HistoryItem:
 # building and hashing the network is paid at most once (and only
 # when a saved run without a recorded fingerprint is actually
 # matched, which an interactive session usually never does).
-_DEFAULT_NETWORK_FINGERPRINT: str | None = None
+DEFAULT_NETWORK_FINGERPRINT: str | None = None
 
 
-def _default_network_fingerprint() -> str:
+def default_network_fingerprint() -> str:
     """
     The fingerprint of the default reaction network.
 
@@ -600,15 +600,15 @@ def _default_network_fingerprint() -> str:
     Returns:
         The SHA-256 fingerprint of the default network.
     """
-    global _DEFAULT_NETWORK_FINGERPRINT
-    if _DEFAULT_NETWORK_FINGERPRINT is None:
-        _DEFAULT_NETWORK_FINGERPRINT = fingerprint_network(
+    global DEFAULT_NETWORK_FINGERPRINT
+    if DEFAULT_NETWORK_FINGERPRINT is None:
+        DEFAULT_NETWORK_FINGERPRINT = fingerprint_network(
             get_network_spec(DEFAULT_NETWORK_KEY).builder()
         )
-    return _DEFAULT_NETWORK_FINGERPRINT
+    return DEFAULT_NETWORK_FINGERPRINT
 
 
-def _run_matches_network(run_dir: Path, fingerprint: str) -> bool:
+def run_matches_network(run_dir: Path, fingerprint: str) -> bool:
     """
     Whether a saved run recorded the network ``fingerprint``.
 
@@ -627,10 +627,10 @@ def _run_matches_network(run_dir: Path, fingerprint: str) -> bool:
     recorded: str | None = saved_run_network_fingerprint(run_dir)
     if recorded is not None:
         return recorded == fingerprint
-    return fingerprint == _default_network_fingerprint()
+    return fingerprint == default_network_fingerprint()
 
 
-def _run_network(run_dir: Path) -> pt.ReactionNetwork | None:
+def run_network(run_dir: Path) -> pt.ReactionNetwork | None:
     """
     The network a saved run recorded in its ``network.yaml``.
 
@@ -658,7 +658,7 @@ def _run_network(run_dir: Path) -> pt.ReactionNetwork | None:
 
 
 # ==== Worker ==== #
-class _RunWorker(QThread):
+class RunWorker(QThread):
     """
     A worker thread running the models off the event loop: the
     hydrology and reactive-transport models together in full mode,
@@ -667,12 +667,12 @@ class _RunWorker(QThread):
     The worker mirrors its stdout to the real one (so console
     output is unchanged) and forwards each completed line to the
     window's status bar; on completion it emits ``finished_run``
-    with a `_RunOutcome`.  Runs cannot be interrupted, so the
+    with a `RunOutcome`.  Runs cannot be interrupted, so the
     window waits for a worker before closing.
 
     Signals:
         finished_run: Emitted (on the main thread) with the
-            `_RunOutcome` of this run.
+            `RunOutcome` of this run.
         progress_line: Emitted with each completed stdout line of
             the run, for the window's status bar.
         progress_step: Emitted with (done, total) step counts:
@@ -712,7 +712,7 @@ class _RunWorker(QThread):
         # The Any annotation is the type of sys.stdout in the
         # stdlib stubs; the value is a real text stream at runtime.
         real_stdout: Any = sys.stdout
-        sys.stdout = _CapturingStream(self.progress_line.emit, real_stdout)
+        sys.stdout = CapturingStream(self.progress_line.emit, real_stdout)
         started: float = time.perf_counter()
         results: GuiRunResults | None = None
         error: str | None = None
@@ -731,7 +731,7 @@ class _RunWorker(QThread):
             sys.stdout = real_stdout
         self.progress_step.emit(1, 1)
         self.finished_run.emit(
-            _RunOutcome(
+            RunOutcome(
                 self._generation,
                 results,
                 error,
@@ -745,7 +745,7 @@ class _RunWorker(QThread):
 
 
 @dataclass(frozen=True, slots=True)
-class _GradientOutcome:
+class GradientOutcome:
     """
     The outcome of one finished gradient job.
 
@@ -800,7 +800,7 @@ class _GradientOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class _GradientSnapshot:
+class GradientSnapshot:
     """
     The last finished gradient job's results, kept for the figure
     panel.
@@ -835,7 +835,7 @@ class _GradientSnapshot:
     model_key: str
 
 
-class _GradientWorker(QThread):
+class GradientWorker(QThread):
     """
     A worker thread computing the finite-difference gradient of
     every objective function with respect to every free parameter.
@@ -848,13 +848,13 @@ class _GradientWorker(QThread):
     otherwise.  The worker mirrors its stdout to the real one
     (so console output is unchanged) and forwards its progress
     lines to the window's status bar; on completion it emits
-    ``finished_gradient`` with a `_GradientOutcome`.  Jobs cannot
+    ``finished_gradient`` with a `GradientOutcome`.  Jobs cannot
     be interrupted, so the window waits for a worker before
     closing.
 
     Signals:
         finished_gradient: Emitted (on the main thread) with the
-            `_GradientOutcome` of this job.
+            `GradientOutcome` of this job.
         progress_line: Emitted with the job's progress lines (the
             base point, then each perturbed point), for the
             window's status bar.
@@ -887,7 +887,7 @@ class _GradientWorker(QThread):
     def __init__(
         self,
         base_x: np.ndarray,
-        steps: list[_Perturbation],
+        steps: list[Perturbation],
         mode: str,
         data_path: str,
         base_results: GuiRunResults | None,
@@ -898,7 +898,7 @@ class _GradientWorker(QThread):
     ) -> None:
         super().__init__(parent)
         self._base_x: np.ndarray = base_x
-        self._steps: list[_Perturbation] = steps
+        self._steps: list[Perturbation] = steps
         self._mode: str = mode
         self._data_path: str = data_path
         self._base_results: GuiRunResults | None = base_results
@@ -917,13 +917,13 @@ class _GradientWorker(QThread):
         # The Any annotation is the type of sys.stdout in the
         # stdlib stubs; the value is a real text stream at runtime.
         real_stdout: Any = sys.stdout
-        sys.stdout = _CapturingStream(self.progress_line.emit, real_stdout)
+        sys.stdout = CapturingStream(self.progress_line.emit, real_stdout)
         started: float = time.perf_counter()
-        outcome: _GradientOutcome
+        outcome: GradientOutcome
         try:
             outcome = self._compute(started)
         except Exception as err:
-            outcome = _GradientOutcome(
+            outcome = GradientOutcome(
                 error=f"{type(err).__name__}: {err}",
                 table=None,
                 base_results=self._base_results,
@@ -937,7 +937,7 @@ class _GradientWorker(QThread):
             sys.stdout = real_stdout
         self.finished_gradient.emit(outcome)
 
-    def _compute(self, started: float) -> _GradientOutcome:
+    def _compute(self, started: float) -> GradientOutcome:
         """
         Run the job's points in a worker pool and build the
         outcome.
@@ -1011,7 +1011,7 @@ class _GradientWorker(QThread):
         for point, payload in zip(points, payloads):
             if isinstance(payload, str):
                 if self._key(point) == self._key(self._base_x):
-                    return _GradientOutcome(
+                    return GradientOutcome(
                         error=payload,
                         table=None,
                         base_results=self._base_results,
@@ -1054,7 +1054,7 @@ class _GradientWorker(QThread):
             columns=[step.key for step in self._steps],
         )
         csv_path: Path = write_gradient_csv(table)
-        return _GradientOutcome(
+        return GradientOutcome(
             error=None,
             table=table,
             base_results=base_results,
@@ -1070,7 +1070,7 @@ class _GradientWorker(QThread):
 
 # ==== Line search ==== #
 @dataclass(frozen=True, slots=True)
-class _LineSearchOutcome:
+class LineSearchOutcome:
     """
     The outcome of one finished line search job.
 
@@ -1135,7 +1135,7 @@ class _LineSearchOutcome:
     total_points: int = 0
 
 
-class _LineSearchWorker(QThread):
+class LineSearchWorker(QThread):
     """
     One line search job on a worker thread.
 
@@ -1202,14 +1202,14 @@ class _LineSearchWorker(QThread):
         parent: The parent object (the window); defaults to None.
     """
 
-    finished_line_search = Signal(_LineSearchOutcome)
+    finished_line_search = Signal(LineSearchOutcome)
     progress_line = Signal(str)
     progress_step = Signal(int, int)
 
     def __init__(
         self,
         base_x: np.ndarray,
-        steps: list[_Perturbation],
+        steps: list[Perturbation],
         direction: np.ndarray | None,
         terms: list[str],
         mode: str,
@@ -1223,7 +1223,7 @@ class _LineSearchWorker(QThread):
     ) -> None:
         super().__init__(parent)
         self._base_x: np.ndarray = base_x
-        self._steps: list[_Perturbation] = steps
+        self._steps: list[Perturbation] = steps
         self._direction: np.ndarray | None = direction
         self._terms: list[str] = terms
         self._mode: str = mode
@@ -1239,13 +1239,13 @@ class _LineSearchWorker(QThread):
         # The Any annotation is the type of sys.stdout in the
         # stdlib stubs; the value is a real text stream at runtime.
         real_stdout: Any = sys.stdout
-        sys.stdout = _CapturingStream(self.progress_line.emit, real_stdout)
+        sys.stdout = CapturingStream(self.progress_line.emit, real_stdout)
         started: float = time.perf_counter()
-        outcome: _LineSearchOutcome
+        outcome: LineSearchOutcome
         try:
             outcome = self._compute(started)
         except Exception as err:
-            outcome = _LineSearchOutcome(
+            outcome = LineSearchOutcome(
                 error=f"{type(err).__name__}: {err}",
                 profile=None,
                 x_best=None,
@@ -1285,7 +1285,7 @@ class _LineSearchWorker(QThread):
 
     def _failed_outcome(
         self, error: str, started: float
-    ) -> _LineSearchOutcome:
+    ) -> LineSearchOutcome:
         """
         The failed-job outcome carrying `error`.
 
@@ -1294,7 +1294,7 @@ class _LineSearchWorker(QThread):
             started: The wall-clock time the job started, for the
                 outcome's elapsed time.
         """
-        return _LineSearchOutcome(
+        return LineSearchOutcome(
             error=error,
             profile=None,
             x_best=None,
@@ -1306,7 +1306,7 @@ class _LineSearchWorker(QThread):
             model_key=self._model_key,
         )
 
-    def _compute(self, started: float) -> _LineSearchOutcome:
+    def _compute(self, started: float) -> LineSearchOutcome:
         """
         Run the job's points in one session and build its success
         outcome.
@@ -1396,7 +1396,7 @@ class _LineSearchWorker(QThread):
 
         # The direction's points: the forward perturbation of each
         # free parameter, deduplicated against the base point.
-        gradient_steps: list[_Perturbation] = [
+        gradient_steps: list[Perturbation] = [
             step for step in self._steps if point_key(step.x_plus) != base_key
         ]
         # The job's full progress budget: the base run when the
@@ -1629,7 +1629,7 @@ class _LineSearchWorker(QThread):
             # finishes full either way.
             if done < step_total:
                 self.progress_step.emit(step_total, step_total)
-            return _LineSearchOutcome(
+            return LineSearchOutcome(
                 error=None,
                 profile=profile,
                 x_best=x_best,
@@ -1647,7 +1647,7 @@ class _LineSearchWorker(QThread):
 
 
 @dataclass(frozen=True, slots=True)
-class _LineSearchSnapshot:
+class LineSearchSnapshot:
     """
     The last finished line search job's results, kept for the
     figure panel.
@@ -1684,7 +1684,7 @@ class _LineSearchSnapshot:
 
 
 # ==== Objective table ==== #
-class _ObjectiveTableModel(QAbstractTableModel):
+class ObjectiveTableModel(QAbstractTableModel):
     """
     A read-only item model over the per-run objective-function
     table, for the panel left of the parameter panel.
@@ -1779,7 +1779,7 @@ class _ObjectiveTableModel(QAbstractTableModel):
         if len(parts) != 2:
             return False
         target, metric = parts
-        if metric not in _LINE_SEARCH_METRICS:
+        if metric not in LINE_SEARCH_METRICS:
             return False
         try:
             cell: float = float(self._table.loc[metric, target])
@@ -1803,13 +1803,13 @@ class _ObjectiveTableModel(QAbstractTableModel):
         return term in self._selected
 
     def rowCount(
-        self, parent: QModelIndex | QPersistentModelIndex = _INVALID_INDEX
+        self, parent: QModelIndex | QPersistentModelIndex = INVALID_INDEX
     ) -> int:
         """The number of metric rows (zero for any child parent)."""
         return 0 if parent.isValid() else len(self._table)
 
     def columnCount(
-        self, parent: QModelIndex | QPersistentModelIndex = _INVALID_INDEX
+        self, parent: QModelIndex | QPersistentModelIndex = INVALID_INDEX
     ) -> int:
         """The number of target columns (zero for any child parent)."""
         return 0 if parent.isValid() else len(self._table.columns)
@@ -1818,7 +1818,7 @@ class _ObjectiveTableModel(QAbstractTableModel):
         self,
         row: int,
         column: int,
-        parent: QModelIndex | QPersistentModelIndex = _INVALID_INDEX,
+        parent: QModelIndex | QPersistentModelIndex = INVALID_INDEX,
     ) -> QModelIndex:
         """The index of a cell, or an invalid index for a child parent."""
         if not self.hasIndex(row, column) or parent.isValid():
@@ -1844,7 +1844,7 @@ class _ObjectiveTableModel(QAbstractTableModel):
         if cell is None or (
             isinstance(cell, (float, np.floating)) and math.isnan(cell)
         ):
-            return _MISSING
+            return MISSING
         return f"{float(cell):.3g}"
 
     def headerData(
@@ -1858,7 +1858,7 @@ class _ObjectiveTableModel(QAbstractTableModel):
         return str(self._table.index[section])
 
 
-class _ObjectiveSelectionDelegate(QStyledItemDelegate):
+class ObjectiveSelectionDelegate(QStyledItemDelegate):
     """
     The objective table's item delegate: draws each cell's checkbox
     in the cell's left inset.
@@ -1883,7 +1883,7 @@ class _ObjectiveSelectionDelegate(QStyledItemDelegate):
     ) -> QSize:
         """The base size hint, widened by the checkbox inset."""
         hint: QSize = super().sizeHint(option, index)
-        return QSize(hint.width() + _CHECKBOX_INSET, hint.height())
+        return QSize(hint.width() + CHECKBOX_INSET, hint.height())
 
     def paint(
         self,
@@ -1901,10 +1901,10 @@ class _ObjectiveSelectionDelegate(QStyledItemDelegate):
         unshifted left inset.
         """
         shifted: QStyleOptionViewItem = QStyleOptionViewItem(option)
-        shifted.rect = shifted.rect.adjusted(_CHECKBOX_INSET, 0, 0, 0)
+        shifted.rect = shifted.rect.adjusted(CHECKBOX_INSET, 0, 0, 0)
         super().paint(painter, shifted, index)
         model: QAbstractItemModel | None = index.model()
-        if not isinstance(model, _ObjectiveTableModel) or not index.isValid():
+        if not isinstance(model, ObjectiveTableModel) or not index.isValid():
             return
         term: str = model.term_at(index)
         checkbox: QStyleOptionButton = QStyleOptionButton()
@@ -1913,7 +1913,7 @@ class _ObjectiveSelectionDelegate(QStyledItemDelegate):
         checkbox.rect = QRect(
             option.rect.left(),
             option.rect.center().y() - 8,
-            _CHECKBOX_INSET,
+            CHECKBOX_INSET,
             16,
         )
         if model.is_selectable(term):
@@ -1934,7 +1934,7 @@ class _ObjectiveSelectionDelegate(QStyledItemDelegate):
         )
 
 
-class _ObjectiveSelectionFilter(QObject):
+class ObjectiveSelectionFilter(QObject):
     """
     The objective table's viewport event filter: a left mouse press
     on a selectable cell toggles that cell's objective term.
@@ -1970,14 +1970,14 @@ class _ObjectiveSelectionFilter(QObject):
             model: QAbstractItemModel | None = index.model()
             if (
                 index.isValid()
-                and isinstance(model, _ObjectiveTableModel)
+                and isinstance(model, ObjectiveTableModel)
                 and model.is_selectable(model.term_at(index))
             ):
                 self.toggled.emit(model.term_at(index))
         return False
 
 
-class _StatusLabel(QLabel):
+class StatusLabel(QLabel):
     """
     A status line that cannot force the window beyond the screen.
 
@@ -1996,20 +1996,20 @@ class _StatusLabel(QLabel):
     def minimumSizeHint(self) -> QSize:
         """The minimum: a small fixed width and the hint's height."""
         hint = super().minimumSizeHint()
-        return QSize(min(hint.width(), _STATUS_MIN_WIDTH), hint.height())
+        return QSize(min(hint.width(), STATUS_MIN_WIDTH), hint.height())
 
 
-class _SpinnerLabel(QLabel):
+class SpinnerLabel(QLabel):
     """
     The toolbar's running-job indicator: a small square label that
     cycles through its frames while a job (a run, a gradient
     computation, or a line search) is in flight.
 
     The label is hidden while no job runs and has a fixed square
-    footprint (see `_SPINNER_SIZE`), so showing or hiding it never
+    footprint (see `SPINNER_SIZE`), so showing or hiding it never
     changes the toolbar's minimum width and never resizes the
     window.  While spinning, a timer advances the displayed frame
-    on each tick (see `_SPINNER_INTERVAL_MS`).
+    on each tick (see `SPINNER_INTERVAL_MS`).
 
     Args:
         parent: The parent widget; defaults to None.
@@ -2018,12 +2018,12 @@ class _SpinnerLabel(QLabel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._frame_index: int = 0
-        self.setFixedSize(_SPINNER_SIZE, _SPINNER_SIZE)
+        self.setFixedSize(SPINNER_SIZE, SPINNER_SIZE)
         font: QFont = QFont(self.font())
         font.setBold(True)
         self.setFont(font)
         self._timer: QTimer = QTimer(self)
-        self._timer.setInterval(_SPINNER_INTERVAL_MS)
+        self._timer.setInterval(SPINNER_INTERVAL_MS)
         self._timer.timeout.connect(self._advance_frame)
         self.hide()
 
@@ -2048,17 +2048,17 @@ class _SpinnerLabel(QLabel):
 
     def _show_frame(self) -> None:
         """Set the current frame and make the label visible."""
-        self.setText(_SPINNER_FRAMES[self._frame_index])
+        self.setText(SPINNER_FRAMES[self._frame_index])
         self.show()
 
     def _advance_frame(self) -> None:
         """Advance to the next frame of the cycle."""
-        self._frame_index = (self._frame_index + 1) % len(_SPINNER_FRAMES)
+        self._frame_index = (self._frame_index + 1) % len(SPINNER_FRAMES)
         self._show_frame()
 
 
 # ==== Maximize chord ==== #
-class _MaximizeChordFilter(QObject):
+class MaximizeChordFilter(QObject):
     """
     Detect the Home+Up key chord on one window and toggle its maximize.
 
@@ -2235,10 +2235,10 @@ class MainWindow(QMainWindow):
         # flight; the reference is dropped when the worker ends,
         # before the deferred deletion removes the object).
         self._worker: (
-            _RunWorker
-            | _GradientWorker
-            | _LineSearchWorker
-            | _CalibrationWorker
+            RunWorker
+            | GradientWorker
+            | LineSearchWorker
+            | CalibrationWorker
             | None
         ) = None
         # The generation of the latest started run; an outcome with
@@ -2262,9 +2262,9 @@ class MainWindow(QMainWindow):
         # label; None when no run is in flight.
         self._run_started_at: float | None = None
         # The session's previous runs, newest first (capped at
-        # _HISTORY_CAP), ahead of the saved run directories the
+        # HISTORY_CAP), ahead of the saved run directories the
         # panel's *History* dropdown lists below them.
-        self._history_items: list[_HistoryItem] = []
+        self._history_items: list[HistoryItem] = []
         # The saved runs read from disk, by run directory; a saved
         # entry in _history_items keeps only its path and re-reads
         # its state here (once) when it is restored or overlaid.
@@ -2273,11 +2273,11 @@ class MainWindow(QMainWindow):
         # (None while no gradient job has finished); the figure
         # panel draws it as an extra page and the line search
         # reuses its matrix as the search direction.
-        self._gradient_state: _GradientSnapshot | None = None
+        self._gradient_state: GradientSnapshot | None = None
         # The last finished line search job's profile and metadata
         # (None while no line search has finished); the figure
         # panel draws it as an extra page.
-        self._line_search_state: _LineSearchSnapshot | None = None
+        self._line_search_state: LineSearchSnapshot | None = None
         # The objective table cells the user checked as line search
         # objectives (as ``"target: metric"`` terms); None for an
         # unset selection, which searches every selectable term.
@@ -2304,11 +2304,11 @@ class MainWindow(QMainWindow):
         # maximize until the window is fully shown.
         self._restore_maximized: bool = False
 
-        self.setWindowTitle(_title_for(self._input_data.spec))
+        self.setWindowTitle(title_for(self._input_data.spec))
         # The default size is clamped to the screen so a window whose
         # saved history never existed still opens on the display.
-        initial: tuple[int, int] = _INITIAL_SIZE
-        screen_area: QRect | None = _available_screen_geometry()
+        initial: tuple[int, int] = INITIAL_SIZE
+        screen_area: QRect | None = available_screen_geometry()
         if screen_area is not None:
             initial = (
                 min(initial[0], screen_area.width()),
@@ -2318,11 +2318,11 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_actions()
-        # The Home+Up maximize chord (see `_MaximizeChordFilter`): a
+        # The Home+Up maximize chord (see `MaximizeChordFilter`): a
         # window action cannot express a key chord, so the chord is
         # detected with an application-level filter that Qt removes
         # when the window is destroyed (it is parented to the window).
-        self._chord_filter: _MaximizeChordFilter = _MaximizeChordFilter(self)
+        self._chord_filter: MaximizeChordFilter = MaximizeChordFilter(self)
         application: QCoreApplication | None = QApplication.instance()
         if application is not None:
             application.installEventFilter(self._chord_filter)
@@ -2374,11 +2374,11 @@ class MainWindow(QMainWindow):
 
         self._debounce_timer: QTimer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(_DEBOUNCE_MS)
+        self._debounce_timer.setInterval(DEBOUNCE_MS)
         self._debounce_timer.timeout.connect(self._maybe_start_run)
 
         self._elapsed_timer: QTimer = QTimer(self)
-        self._elapsed_timer.setInterval(_ELAPSED_MS)
+        self._elapsed_timer.setInterval(ELAPSED_MS)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
 
         # The dock-layout persistence state: `_apply_saved_run` stores
@@ -2462,7 +2462,7 @@ class MainWindow(QMainWindow):
         Build the toolbar and status bar: the window's fixed chrome.
 
         The toolbar carries the model and network selectors, the
-        running indicator (a `_SpinnerLabel`), the job actions, and
+        running indicator (a `SpinnerLabel`), the job actions, and
         the hydrology toggle; the status label lives in the window's
         status bar.  The toolbar is pinned chrome — not movable, not
         floatable, text-only — because movable chrome can be dragged
@@ -2471,13 +2471,13 @@ class MainWindow(QMainWindow):
         pushes the items that no longer fit into the toolbar's
         extension button (»), so the chrome never pins the window's
         minimum width past the screen.  The combos keep a squeeze
-        floor (see `_COMBO_MIN_WIDTH`) so they stay readable under
+        floor (see `COMBO_MIN_WIDTH`) so they stay readable under
         pressure, and the status label reports its own small minimum
-        and maximum width (see `_StatusLabel`).
+        and maximum width (see `StatusLabel`).
         """
         # The running-job indicator: hidden at rest, its fixed size
         # keeps the toolbar's footprint constant either way.
-        self._job_spinner: _SpinnerLabel = _SpinnerLabel()
+        self._job_spinner: SpinnerLabel = SpinnerLabel()
 
         # The model selector: one entry per curated model spec, the
         # selected model's display name in the text and its spec key
@@ -2536,9 +2536,9 @@ class MainWindow(QMainWindow):
         )
         self._mode_action.toggled.connect(self._on_mode_changed)
 
-        self._status_label: _StatusLabel = _StatusLabel("Preparing…")
+        self._status_label: StatusLabel = StatusLabel("Preparing…")
         self._status_label.setStyleSheet("color: gray;")
-        self._status_label.setMaximumWidth(_STATUS_MAX_WIDTH)
+        self._status_label.setMaximumWidth(STATUS_MAX_WIDTH)
 
         self._save_history_action: QAction = QAction(
             "Save run history", self
@@ -2649,7 +2649,7 @@ class MainWindow(QMainWindow):
             self._network_combo,
         )
         for combo in combos:
-            combo.setMinimumWidth(_COMBO_MIN_WIDTH)
+            combo.setMinimumWidth(COMBO_MIN_WIDTH)
 
         self._toolbar: QToolBar = QToolBar("Main toolbar")
         self._toolbar.setObjectName("main_toolbar")
@@ -2774,7 +2774,7 @@ class MainWindow(QMainWindow):
         window's width is driven by the parameter panel instead of
         the table.
         """
-        self._objective_model: _ObjectiveTableModel = _ObjectiveTableModel(self)
+        self._objective_model: ObjectiveTableModel = ObjectiveTableModel(self)
         self._objective_table: QTableView = QTableView(self)
         self._objective_table.setModel(self._objective_model)
         self._objective_table.setEditTriggers(
@@ -2808,10 +2808,10 @@ class MainWindow(QMainWindow):
         # selectable cell into a toggle of its term (the window
         # stores the checked terms and the model repaints them).
         self._objective_table.setItemDelegate(
-            _ObjectiveSelectionDelegate(self._objective_table)
+            ObjectiveSelectionDelegate(self._objective_table)
         )
-        self._objective_selection_filter: _ObjectiveSelectionFilter = (
-            _ObjectiveSelectionFilter(self._objective_table, self)
+        self._objective_selection_filter: ObjectiveSelectionFilter = (
+            ObjectiveSelectionFilter(self._objective_table, self)
         )
         self._objective_table.viewport().installEventFilter(
             self._objective_selection_filter
@@ -2824,8 +2824,8 @@ class MainWindow(QMainWindow):
         self._objective_heading.setToolTip(METRIC_NOTES)
 
         layout: QVBoxLayout = QVBoxLayout()
-        layout.setContentsMargins(*_OBJECTIVE_PANEL_MARGINS)
-        layout.setSpacing(_OBJECTIVE_PANEL_SPACING)
+        layout.setContentsMargins(*OBJECTIVE_PANEL_MARGINS)
+        layout.setSpacing(OBJECTIVE_PANEL_SPACING)
         layout.addWidget(self._objective_heading)
         layout.addWidget(self._objective_table)
         self._objective_panel: QWidget = QWidget(self)
@@ -2840,7 +2840,7 @@ class MainWindow(QMainWindow):
         contents (plus the panel's margins) keeps the window's
         width from growing with the table, and leaves the rest of
         the row to the stretching parameter panel.  The size is the
-        table's own measurements run through `_objective_panel_size`:
+        table's own measurements run through `objective_panel_size`:
         the section sizes the view actually renders (the wider of
         the header text and the cell content, recomputed here since
         both headers are in `ResizeToContents` mode — a header-text-
@@ -2854,7 +2854,7 @@ class MainWindow(QMainWindow):
         # model is still empty (the build-time call site).
         table.horizontalHeader().resizeSections()
         table.verticalHeader().resizeSections()
-        width, height = _objective_panel_size(
+        width, height = objective_panel_size(
             self._objective_heading.sizeHint(),
             [
                 table.horizontalHeader().sectionSize(c)
@@ -2867,8 +2867,8 @@ class MainWindow(QMainWindow):
             table.verticalHeader().sizeHint().width(),
             table.horizontalHeader().sizeHint().height(),
             table.frameWidth(),
-            _OBJECTIVE_PANEL_MARGINS,
-            _OBJECTIVE_PANEL_SPACING,
+            OBJECTIVE_PANEL_MARGINS,
+            OBJECTIVE_PANEL_SPACING,
         )
         self._objective_panel.setFixedSize(width, height)
 
@@ -2897,7 +2897,7 @@ class MainWindow(QMainWindow):
         Register the Left / Right arrow actions that flip the figure pages.
 
         Maximizing is not an action here: a QAction shortcut cannot
-        express the Home+Up key chord, which `_MaximizeChordFilter`
+        express the Home+Up key chord, which `MaximizeChordFilter`
         detects from raw key events instead.
         """
         previous_action: QAction = QAction("Previous figure", self)
@@ -2942,11 +2942,11 @@ class MainWindow(QMainWindow):
                     self._switch_model(key, start_run=False)
             recorded: str | None = (
                 saved_run_network_fingerprint(latest)
-                or _default_network_fingerprint()
+                or default_network_fingerprint()
             )
             if recorded != fingerprint_network(self._input_data.network):
                 self._switch_network(
-                    _run_network(latest)
+                    run_network(latest)
                     or get_network_spec(DEFAULT_NETWORK_KEY).builder(),
                     start_run=False,
                 )
@@ -2963,10 +2963,10 @@ class MainWindow(QMainWindow):
             run
             for run in runs
             if saved_run_model_key(run) == current_key
-            and _run_matches_network(run, current_fingerprint)
+            and run_matches_network(run, current_fingerprint)
         ]
         self._history_items = [
-            _HistoryItem(
+            HistoryItem(
                 label=run.name,
                 run_dir=run,
                 param_values=None,
@@ -3033,7 +3033,7 @@ class MainWindow(QMainWindow):
         # state may still carry them, and `state.py` still parses
         # them, but the dock layout (its successor) arrives with the
         # v9 `dock_state`.
-        self._pending_dock_state = _decode_dock_state(saved.dock_state)
+        self._pending_dock_state = decode_dock_state(saved.dock_state)
         self._apply_history_entry(
             saved.param_values,
             saved.param_bounds,
@@ -3052,14 +3052,14 @@ class MainWindow(QMainWindow):
             requested: QRect = QRect(
                 saved.window_geometry.get("x", 0),
                 saved.window_geometry.get("y", 0),
-                saved.window_geometry.get("width", _INITIAL_SIZE[0]),
-                saved.window_geometry.get("height", _INITIAL_SIZE[1]),
+                saved.window_geometry.get("width", INITIAL_SIZE[0]),
+                saved.window_geometry.get("height", INITIAL_SIZE[1]),
             )
-            screen_area: QRect | None = _available_screen_geometry()
+            screen_area: QRect | None = available_screen_geometry()
             self.setGeometry(
                 requested
                 if screen_area is None
-                else _clamped_geometry(requested, screen_area)
+                else clamped_geometry(requested, screen_area)
             )
         # The maximized state is restored through the window system
         # (see `showEvent`), not through the clamped geometry above:
@@ -3197,7 +3197,7 @@ class MainWindow(QMainWindow):
         self._calibrate_action.setEnabled(False)
         self._status("Running the model…")
 
-        worker: _RunWorker = _RunWorker(
+        worker: RunWorker = RunWorker(
             self._run_generation, x, self._input_data, mode, self
         )
         worker.progress_line.connect(self._on_progress_line)
@@ -3266,9 +3266,9 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
 
-        if not isinstance(payload, _RunOutcome):
+        if not isinstance(payload, RunOutcome):
             return
-        outcome: _RunOutcome = payload
+        outcome: RunOutcome = payload
         if (
             outcome.generation != self._run_generation
             or self._start_x is None
@@ -3368,7 +3368,7 @@ class MainWindow(QMainWindow):
         run's; a job cannot be interrupted.
         """
         x: np.ndarray = self._current_x()
-        steps: list[_Perturbation] = free_parameter_steps(
+        steps: list[Perturbation] = free_parameter_steps(
             x, self._param_panel.current_bounds()
         )
         if not steps:
@@ -3393,7 +3393,7 @@ class MainWindow(QMainWindow):
         self._calibrate_action.setEnabled(False)
         self._status("Computing gradients…")
 
-        worker: _GradientWorker = _GradientWorker(
+        worker: GradientWorker = GradientWorker(
             x,
             steps,
             self._current_mode(),
@@ -3439,9 +3439,9 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setValue(0)
 
-        if not isinstance(payload, _GradientOutcome):
+        if not isinstance(payload, GradientOutcome):
             return
-        outcome: _GradientOutcome = payload
+        outcome: GradientOutcome = payload
         if outcome.model_key != self._input_data.spec.key:
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it and restore
@@ -3466,7 +3466,7 @@ class MainWindow(QMainWindow):
                 self._results = outcome.base_results
                 self._last_run_x = outcome.base_x
                 self._last_run_mode = outcome.mode
-            self._gradient_state = _GradientSnapshot(
+            self._gradient_state = GradientSnapshot(
                 table=table,
                 base_x=outcome.base_x,
                 mode=outcome.mode,
@@ -3653,7 +3653,7 @@ class MainWindow(QMainWindow):
         bounds: dict[str, tuple[float, float]] = (
             self._param_panel.current_bounds()
         )
-        steps: list[_Perturbation] = free_parameter_steps(x, bounds)
+        steps: list[Perturbation] = free_parameter_steps(x, bounds)
         if not steps:
             self._status("No free parameters to search.")
             return
@@ -3666,7 +3666,7 @@ class MainWindow(QMainWindow):
             if f"{target}: {metric}" in effective
         ]
         direction: np.ndarray | None = None
-        snapshot: _GradientSnapshot | None = self._gradient_state
+        snapshot: GradientSnapshot | None = self._gradient_state
         if (
             snapshot is not None
             and snapshot.mode == self._current_mode()
@@ -3709,7 +3709,7 @@ class MainWindow(QMainWindow):
                 f"Line search in progress: "
                 f"{len(terms_list)} selected objectives …"
             )
-        self._worker = _LineSearchWorker(
+        self._worker = LineSearchWorker(
             x,
             steps,
             direction,
@@ -3723,7 +3723,7 @@ class MainWindow(QMainWindow):
             self._column_map,
             self,
         )
-        worker: _LineSearchWorker = self._worker
+        worker: LineSearchWorker = self._worker
         worker.progress_line.connect(self._on_line_search_progress_line)
         worker.progress_step.connect(self._on_progress_step)
         worker.finished_line_search.connect(self._on_finished_line_search)
@@ -3753,13 +3753,13 @@ class MainWindow(QMainWindow):
         value is missing, possible only on the
         handed-in-direction path since the computed path validates
         the base first — the best point's parameters and results
-        are adopted into the window (the panel is restored to the
-        best point's values and the figures and table refresh),
-        and the status reports the best step and value.  When the
-        base value is finite and the best does not exceed it,
-        nothing is adopted: the parameters and the results on
-        screen stay exactly as they were, and the status says no
-        improvement was found.
+        are adopted into the window (the panel's cells are updated
+        in place to the best point's values and the figures and
+        table refresh), and the status reports the best step and
+        value.  When the base value is finite and the best does not
+        exceed it, nothing is adopted: the parameters and the
+        results on screen stay exactly as they were, and the status
+        says no improvement was found.
         """
         self._elapsed_timer.stop()
         self._progress_strip.hide()
@@ -3771,9 +3771,9 @@ class MainWindow(QMainWindow):
         self._gradients_action.setEnabled(True)
         self._line_search_action.setEnabled(True)
 
-        if not isinstance(payload, _LineSearchOutcome):
+        if not isinstance(payload, LineSearchOutcome):
             return
-        outcome: _LineSearchOutcome = payload
+        outcome: LineSearchOutcome = payload
         if outcome.model_key != self._input_data.spec.key:
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it (the job
@@ -3823,7 +3823,7 @@ class MainWindow(QMainWindow):
 
         # The finished profile is kept as the figure panel's page in
         # both outcomes, so it is set before the adoption decision.
-        self._line_search_state = _LineSearchSnapshot(
+        self._line_search_state = LineSearchSnapshot(
             profile=outcome.profile,
             terms=list(outcome.terms),
             mode=outcome.mode,
@@ -3870,7 +3870,12 @@ class MainWindow(QMainWindow):
             key: float(value)
             for key, value in zip(bounds, outcome.x_best, strict=True)
         }
-        self._param_panel.restore_state(best_values, bounds)
+        # `bounds` are the panel's own current bounds, so applying
+        # the best point is a values-only update: `set_values` keeps
+        # the bounds and the cells, where `restore_state` would
+        # rebuild every group and reset the panel's scroll position
+        # for no gain.
+        self._param_panel.set_values(best_values)
         self._results = outcome.best_results
         self._last_run_x = outcome.x_best
         self._last_run_mode = outcome.mode
@@ -4006,7 +4011,7 @@ class MainWindow(QMainWindow):
         self._calibrate_action.setEnabled(False)
         self._status("Calibrating the hydrology model…")
 
-        worker: _CalibrationWorker = _CalibrationWorker(
+        worker: CalibrationWorker = CalibrationWorker(
             x,
             self._input_data,
             bounds,
@@ -4049,9 +4054,9 @@ class MainWindow(QMainWindow):
         self._gradients_action.setEnabled(True)
         self._line_search_action.setEnabled(True)
 
-        if not isinstance(payload, _CalibrationOutcome):
+        if not isinstance(payload, CalibrationOutcome):
             return
-        outcome: _CalibrationOutcome = payload
+        outcome: CalibrationOutcome = payload
         if outcome.model_key != self._input_data.spec.key:
             # The model changed mid-job: the outcome belongs to the
             # model the window no longer shows.  Drop it.
@@ -4150,7 +4155,7 @@ class MainWindow(QMainWindow):
         (ahead of the older session entries and the saved run
         directories, which keep their own order below it); the
         oldest session entry is dropped once the session's part of
-        the list reaches _HISTORY_CAP, so a long session never
+        the list reaches HISTORY_CAP, so a long session never
         bloats the dropdown.
         """
         if self._results is None or self._last_run_mode is None:
@@ -4161,7 +4166,7 @@ class MainWindow(QMainWindow):
             f"{datetime.now().strftime('%H:%M:%S')} "
             f"({'full' if mode == MODE_FULL else 'hydro'})"
         )
-        item: _HistoryItem = _HistoryItem(
+        item: HistoryItem = HistoryItem(
             label=label,
             run_dir=None,
             param_values=self._param_panel.param_values(),
@@ -4169,12 +4174,12 @@ class MainWindow(QMainWindow):
             mode=mode,
             model_key=self._input_data.spec.key,
         )
-        session_entries: list[_HistoryItem] = [
+        session_entries: list[HistoryItem] = [
             entry for entry in self._history_items if entry.run_dir is None
         ]
         session_entries.insert(0, item)
-        del session_entries[_HISTORY_CAP:]
-        saved_entries: list[_HistoryItem] = [
+        del session_entries[HISTORY_CAP:]
+        saved_entries: list[HistoryItem] = [
             entry for entry in self._history_items if entry.run_dir is not None
         ]
         self._history_items = session_entries + saved_entries
@@ -4194,17 +4199,17 @@ class MainWindow(QMainWindow):
         """
         if run_dir in self._saved_run_cache:
             del self._saved_run_cache[run_dir]
-        session_entries: list[_HistoryItem] = [
+        session_entries: list[HistoryItem] = [
             entry for entry in self._history_items if entry.run_dir is None
         ]
-        saved_entries: list[_HistoryItem] = [
+        saved_entries: list[HistoryItem] = [
             entry
             for entry in self._history_items
             if entry.run_dir is not None and entry.run_dir != run_dir
         ]
         saved_entries.insert(
             0,
-            _HistoryItem(
+            HistoryItem(
                 label=run_dir.name,
                 run_dir=run_dir,
                 param_values=None,
@@ -4230,7 +4235,7 @@ class MainWindow(QMainWindow):
             [item.label for item in self._history_items]
         )
 
-    def _selected_history_item(self) -> _HistoryItem | None:
+    def _selected_history_item(self) -> HistoryItem | None:
         """
         The history entry selected in the *History* dropdown.
 
@@ -4240,13 +4245,13 @@ class MainWindow(QMainWindow):
         index: int = self._param_panel.history_selected_index()
         if index < 0 or index >= len(self._history_items):
             return None
-        item: _HistoryItem = self._history_items[index]
+        item: HistoryItem = self._history_items[index]
         if item.model_key != self._input_data.spec.key:
             return None
         return item
 
     def _load_saved_history_item(
-        self, item: _HistoryItem
+        self, item: HistoryItem
     ) -> SavedRun | None:
         """
         Read a saved-run entry's state from disk, once.
@@ -4304,7 +4309,7 @@ class MainWindow(QMainWindow):
         """
         if not self._param_panel.history_overlay_enabled():
             return None
-        item: _HistoryItem | None = self._selected_history_item()
+        item: HistoryItem | None = self._selected_history_item()
         if item is None:
             return None
         results: GuiRunResults
@@ -4349,7 +4354,7 @@ class MainWindow(QMainWindow):
             A note naming the restored run, or an explanatory note
             when the dropdown is empty.
         """
-        item: _HistoryItem | None = self._selected_history_item()
+        item: HistoryItem | None = self._selected_history_item()
         if item is None:
             self._status("No previous run selected: the history is empty.")
             return
@@ -4558,7 +4563,7 @@ class MainWindow(QMainWindow):
         self._fit_objective_panel()
         self._saved_run_cache.clear()
         self._history_items = [
-            _HistoryItem(
+            HistoryItem(
                 label=run.name,
                 run_dir=run,
                 param_values=None,
@@ -4568,10 +4573,10 @@ class MainWindow(QMainWindow):
             )
             for run in list_run_dirs()
             if saved_run_model_key(run) == key
-            and _run_matches_network(run, fingerprint_network(self._network))
+            and run_matches_network(run, fingerprint_network(self._network))
         ]
         self._sync_history_combo()
-        self.setWindowTitle(_title_for(spec))
+        self.setWindowTitle(title_for(spec))
         self._status(f"Switched to {spec.display_name}.")
         if not start_run:
             return
@@ -4603,7 +4608,7 @@ class MainWindow(QMainWindow):
                 "edited" when there is none.  Ignored for presets.
         """
         fingerprint: str = fingerprint_network(self._network)
-        preset_key: str | None = _preset_fingerprint_map().get(
+        preset_key: str | None = preset_fingerprint_map().get(
             fingerprint
         )
         self._network_combo.blockSignals(True)
@@ -4661,7 +4666,7 @@ class MainWindow(QMainWindow):
         if not isinstance(data, str) or data not in NETWORK_SPECS:
             return
         if (
-            _preset_fingerprint_map().get(
+            preset_fingerprint_map().get(
                 fingerprint_network(self._network)
             )
             == data
@@ -4687,7 +4692,7 @@ class MainWindow(QMainWindow):
         table, the gradient and line search pages, and the
         session history.  The saved runs listed in the history
         dropdown are filtered to runs of the same model on this
-        network's fingerprint (`_run_matches_network`: a run
+        network's fingerprint (`run_matches_network`: a run
         without a recorded fingerprint is treated as a run of the
         default network).  The network selector follows the
         switch.
@@ -4747,7 +4752,7 @@ class MainWindow(QMainWindow):
         self._fit_objective_panel()
         self._saved_run_cache.clear()
         self._history_items = [
-            _HistoryItem(
+            HistoryItem(
                 label=run.name,
                 run_dir=run,
                 param_values=None,
@@ -4757,7 +4762,7 @@ class MainWindow(QMainWindow):
             )
             for run in list_run_dirs()
             if saved_run_model_key(run) == spec.key
-            and _run_matches_network(run, fingerprint_network(network))
+            and run_matches_network(run, fingerprint_network(network))
         ]
         self._sync_history_combo()
         self._sync_network_selector(name)
@@ -5071,7 +5076,7 @@ class MainWindow(QMainWindow):
             )
 
         # The network the run used, in the canonical file format;
-        # a restore of this run reads it back (``_run_network``).
+        # a restore of this run reads it back (``run_network``).
         # A failure here would leave a partially saved run (the
         # run saver has already written the directory) that the
         # restore path would misclassify as pre-fingerprint, so
@@ -5294,7 +5299,7 @@ class MainWindow(QMainWindow):
         # changes, and plot-selection changes until the next
         # successful job replaces it.
         if self._gradient_state is not None:
-            snapshot: _GradientSnapshot = self._gradient_state
+            snapshot: GradientSnapshot = self._gradient_state
             note: str = (
                 "Central differences, h = 1% of each parameter's "
                 f"range; saved to {snapshot.csv_path}."
@@ -5306,7 +5311,7 @@ class MainWindow(QMainWindow):
         # The last finished line search's profile rides along as an
         # extra page, like the gradient matrix.
         if self._line_search_state is not None:
-            search: _LineSearchSnapshot = self._line_search_state
+            search: LineSearchSnapshot = self._line_search_state
             if len(search.terms) == 1:
                 note = (
                     f"Steepest ascent of {search.terms[0]}, "
@@ -5354,7 +5359,7 @@ class MainWindow(QMainWindow):
         ``dock_state`` blob, applied through `restoreState`), or —
         with no blob (a first session, a pre-v9 saved run, or an
         unreadable blob) — with the default figure-strip height from
-        `_INITIAL_DOCK_HEIGHT`.  After the first application the hook
+        `INITIAL_DOCK_HEIGHT`.  After the first application the hook
         is inert: a later rebuild from a parameter or selection
         change must not stomp on a layout the user has since dragged
         around.
@@ -5377,7 +5382,7 @@ class MainWindow(QMainWindow):
         if not self._dock_layout_applied:
             self.resizeDocks(
                 [self._figure_panel.docks()[0]],
-                [_INITIAL_DOCK_HEIGHT],
+                [INITIAL_DOCK_HEIGHT],
                 Qt.Orientation.Vertical,
             )
             self._dock_layout_applied = True
@@ -5412,7 +5417,7 @@ class MainWindow(QMainWindow):
         if first_open is not None:
             first_open.raise_()
             self.resizeDocks(
-                [first_open], [_INITIAL_DOCK_HEIGHT], Qt.Orientation.Vertical
+                [first_open], [INITIAL_DOCK_HEIGHT], Qt.Orientation.Vertical
             )
         self._status("Dock layout reset.")
 

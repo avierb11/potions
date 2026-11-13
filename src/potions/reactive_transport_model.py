@@ -100,7 +100,7 @@ class SolverBackupWarning(UserWarning):
     """
 
 
-def _validate_derived_species(
+def validate_derived_species(
     derived_species: Sequence[DerivedSpecies],
     network: ReactionNetwork,
 ) -> dict[str, tuple[str, ...]]:
@@ -164,7 +164,7 @@ def _validate_derived_species(
     return derived
 
 
-def _fsolve_backup_step(
+def fsolve_backup_step(
     zone: RtZone,
     s_i: NDArray[np.float64],
     d_i: RtForcing,
@@ -242,7 +242,7 @@ def _fsolve_backup_step(
     # keeping only the aqueous block.
     frozen_tail: NDArray[np.float64] = c_0[n_aq:]
 
-    def _residual(x_aq: NDArray[np.float64]) -> NDArray[np.float64]:
+    def residual(x_aq: NDArray[np.float64]) -> NDArray[np.float64]:
         x_full: NDArray[np.float64] = np.concatenate([x_aq, frozen_tail])
         return zone.residual_function(c_0, x_full, d_i, dt_days)[:n_aq]
 
@@ -261,7 +261,7 @@ def _fsolve_backup_step(
         # Evaluate the candidate's residual before spending an fsolve on
         # it: if it already sits under the backup bar, it satisfies the
         # backup's acceptance criterion by itself.
-        f0: NDArray[np.float64] = _residual(x0)
+        f0: NDArray[np.float64] = residual(x0)
         f0_max: float = float(np.max(np.abs(f0))) if f0.size else 0.0
         if bool(np.all(np.isfinite(f0))) and f0_max <= FSOLVE_BACKUP_RESIDUAL_MAX:
             x_sol = x0
@@ -272,7 +272,7 @@ def _fsolve_backup_step(
                 )
             break
 
-        x_try, info, ier, _ = fsolve(_residual, x0, full_output=True)
+        x_try, info, ier, _ = fsolve(residual, x0, full_output=True)
         f_max: float = float(np.max(np.abs(info["fvec"])))
         # The acceptance decision never consults fsolve's convergence flag
         # ``ier`` (hybrd flags a stationary point "xtol too small" even at
@@ -300,7 +300,7 @@ def _fsolve_backup_step(
     return zone.step_with_solution(c_0, x_full_sol, d_i, dt_days, verbose)
 
 
-def _speciation_conc_valid(
+def speciation_conc_valid(
     eq: EquilibriumParameters,
     x_free: NDArray[np.float64],
 ) -> bool:
@@ -327,7 +327,7 @@ def _speciation_conc_valid(
     return bool(np.all(np.isfinite(concs)) and np.all(concs > 0.0))
 
 
-def _fsolve_backup_speciation(
+def fsolve_backup_speciation(
     zone: RtZone,
     s_i: NDArray[np.float64],
     d_i: RtForcing,
@@ -419,10 +419,10 @@ def _fsolve_backup_speciation(
     # solve. The residual depends on their conserved totals only.
     c_after_rt: NDArray[np.float64] = zone.solve_rt_step(s_i, d_i, dt_days, verbose)
 
-    def _residual(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
+    def residual(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
         return zone.eq.speciation_residual(c_after_rt, x_free)
 
-    def _jacobian(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
+    def jacobian(x_free: NDArray[np.float64]) -> NDArray[np.float64]:
         return zone.eq.speciation_jacobian(x_free)
 
     # Candidates, in order of preference. The payload may arrive
@@ -450,12 +450,12 @@ def _fsolve_backup_speciation(
         # itself — no fsolve is spent. This is how a failed solve that
         # only overshot the internal solver's 1e-6 target bar (still
         # within ``SPECIATION_ACCEPT_RESIDUAL_MAX``) is accepted.
-        f0: NDArray[np.float64] = _residual(x0)
+        f0: NDArray[np.float64] = residual(x0)
         f0_max: float = float(np.max(np.abs(f0))) if f0.size else 0.0
         if (
             bool(np.all(np.isfinite(f0)))
             and f0_max <= SPECIATION_ACCEPT_RESIDUAL_MAX
-            and _speciation_conc_valid(zone.eq, x0)
+            and speciation_conc_valid(zone.eq, x0)
         ):
             x_sol = x0
             if verbose:
@@ -466,7 +466,7 @@ def _fsolve_backup_speciation(
             break
 
         x_try, info, ier, _ = fsolve(
-            _residual, x0, fprime=_jacobian, full_output=True, maxfev=900
+            residual, x0, fprime=jacobian, full_output=True, maxfev=900
         )
         f_max: float = float(np.max(np.abs(info["fvec"])))
         # The acceptance decision never consults fsolve's convergence flag
@@ -477,7 +477,7 @@ def _fsolve_backup_speciation(
         under_bar: bool = bool(
             np.isfinite(f_max) and f_max <= SPECIATION_ACCEPT_RESIDUAL_MAX
         )
-        if x_finite and under_bar and _speciation_conc_valid(zone.eq, x_try):
+        if x_finite and under_bar and speciation_conc_valid(zone.eq, x_try):
             x_sol = x_try
             if verbose:
                 print(
@@ -490,7 +490,7 @@ def _fsolve_backup_speciation(
         else:
             # fsolve reached a finite point at or under the backup bar:
             # the physical-validity gate is what rejected this candidate.
-            last_reject = (ier, f_max, _speciation_conc_valid(zone.eq, x_try))
+            last_reject = (ier, f_max, speciation_conc_valid(zone.eq, x_try))
         if verbose:
             print(
                 f"  fsolve backup (zone '{zone.name}', step {step_index}): "
@@ -567,7 +567,7 @@ class ReactiveTransportModel(HydrologicalModel):
                     "`derived_species` requires a reactive transport `network`; "
                     "a hydrology-only model has no species to combine"
                 )
-            self._derived_species = _validate_derived_species(
+            self._derived_species = validate_derived_species(
                 derived_species, network
             )
 
@@ -958,9 +958,9 @@ class ReactiveTransportModel(HydrologicalModel):
         # step) in a pure-Rust call, resuming it whenever a zone's Newton /
         # LM solve fails: a failed kinetic solve has its aqueous block
         # re-solved with `scipy.optimize.fsolve` (see
-        # `_fsolve_backup_step`), a failed speciation re-equilibration has
+        # `fsolve_backup_step`), a failed speciation re-equilibration has
         # its free-variable system re-solved the same way (see
-        # `_fsolve_backup_speciation`, dispatched on the `subsystem` tag of
+        # `fsolve_backup_speciation`, dispatched on the `subsystem` tag of
         # the typed error), and each rescued step is finalized through the
         # normal post-solve path before the sweep is resumed from the next
         # zone. Each resumed call seeds its
@@ -1028,8 +1028,8 @@ class ReactiveTransportModel(HydrologicalModel):
             # variables as the network has aqueous species, the two failure
             # types are indistinguishable by dimension alone. A speciation
             # failure re-solves the free-variable system
-            # (`_fsolve_backup_speciation`); a kinetic failure re-solves the
-            # aqueous block of the step residual (`_fsolve_backup_step`).
+            # (`fsolve_backup_speciation`); a kinetic failure re-solves the
+            # aqueous block of the step residual (`fsolve_backup_step`).
             # Failures with no recognized tag propagate as before.
             opt_err: OptimizationError | None = (
                 e if isinstance(e, OptimizationError) else None
@@ -1047,9 +1047,9 @@ class ReactiveTransportModel(HydrologicalModel):
             rescued: RtStep | None = None
             if backup_attempted and opt_err is not None:
                 backup: FsolveBackup = (
-                    _fsolve_backup_speciation
+                    fsolve_backup_speciation
                     if is_speciation
-                    else _fsolve_backup_step
+                    else fsolve_backup_step
                 )
                 try:
                     rescued = backup(

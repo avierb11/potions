@@ -37,7 +37,7 @@ from typing import Final
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QAction, QResizeEvent
 from PySide6.QtWidgets import QDockWidget, QMenu, QMainWindow
 
@@ -88,7 +88,7 @@ def dock_object_name(title: str, index: int) -> str:
 
 
 # ==== Types ==== #
-class _FigureCanvas(FigureCanvasQTAgg):
+class FigureCanvas(FigureCanvasQTAgg):
     """
     A canvas that re-lays out its figure's below-axes legend rows
     whenever it is resized to a size it could actually be shown at.
@@ -196,6 +196,11 @@ class FigurePanel:
         self._view_actions: list[QAction] = []
         # The raised page, or -1 while no figures are loaded.
         self._current_index: int = -1
+        # Bumped with every rebuild.  A rebuild schedules its page
+        # re-assertion (see `_reassert_page`) tagged with this
+        # generation, and a scheduled call drops itself when a newer
+        # rebuild has since replaced the docks.
+        self._rebuild_generation: int = 0
     # =================== #
 
     # ==== Public ==== #
@@ -206,9 +211,15 @@ class FigurePanel:
         Every figure is restated at `CANVAS_DPI` — its dpi and the
         construction-time stamp the high-dpi rescale bases itself
         on — attached to a fresh canvas, and wrapped in a titled
-        dock.  The previously raised page is kept when it still
-        exists, so a rebuild (e.g. after a plot-selection change)
-        does not move the user to a different figure.
+        dock.  The previously raised page is kept when its title
+        survives the rebuild, at that title's new position, so a
+        rebuild (e.g. after a plot-selection change or the line
+        search adding its profile page) does not move the user to a
+        different figure; a title that is gone falls back to the
+        previous index clamped into the new range.  Qt settles a
+        fresh tabify chain on a later event-loop pass and raises the
+        first dock there, so the chosen page is re-asserted once
+        those queued layout events have run (see `_reassert_page`).
 
         The old docks are removed *before* the new ones are built:
         Qt's dock state addresses docks by object name, so a
@@ -222,7 +233,13 @@ class FigurePanel:
         Args:
             figures: The (page title, figure) pairs, in page order.
         """
-        previous: int = self._current_index
+        self._rebuild_generation += 1
+        previous_index: int = self._current_index
+        previous_title: str | None = (
+            self._titles[previous_index]
+            if 0 <= previous_index < len(self._titles)
+            else None
+        )
         # Detach the old toggles before the docks: removing them
         # first keeps a `toggled` signal from touching a dying dock
         # during the teardown below.
@@ -246,7 +263,7 @@ class FigurePanel:
             # The canvas is untyped source inside the py.typed
             # matplotlib package, so the constructor call carries a
             # type-ignore.
-            canvas: _FigureCanvas = _FigureCanvas(
+            canvas: FigureCanvas = FigureCanvas(
                 fig
             )  # type: ignore[no-untyped-call]
             dock: FigureDock = FigureDock(title, self._window)
@@ -279,11 +296,17 @@ class FigurePanel:
             )
 
         if self._docks:
-            target: int = min(previous, len(self._docks) - 1)
+            target: int = min(previous_index, len(self._docks) - 1)
             if target < 0:
                 target = 0
+            if previous_title is not None and previous_title in self._titles:
+                target = self._titles.index(previous_title)
             self._docks[target].raise_()
             self._current_index = target
+            generation: int = self._rebuild_generation
+            QTimer.singleShot(
+                0, lambda: self._reassert_page(target, generation)
+            )
 
     def docks(self) -> list[FigureDock]:
         """
@@ -384,6 +407,29 @@ class FigurePanel:
         self._canvases.clear()
         self._titles.clear()
         self._current_index = -1
+
+    def _reassert_page(self, page: int, generation: int) -> None:
+        """
+        Re-raise the page a rebuild chose, unless a newer rebuild replaced it.
+
+        `set_figures` raises the chosen page synchronously, but Qt
+        finalizes the fresh tabify chain on a later event-loop pass
+        and raises the first dock there; that dock's visibility
+        handler then records page 0 as the current page, discarding
+        the choice.  Scheduling this call with a zero-delay timer
+        makes it run after those queued layout events and restore
+        the chosen page.  The generation check drops the call when
+        `set_figures` has rebuilt the docks again in the meantime,
+        so a stale re-assertion can never raise a dead dock or
+        override a newer rebuild's page.
+
+        Args:
+            page: The page index the rebuild chose to show.
+            generation: The rebuild generation the call was scheduled for.
+        """
+        if generation != self._rebuild_generation:
+            return
+        self.show_page(page)
 
     def _visibility_handler(self, page: int) -> Callable[[bool], None]:
         """

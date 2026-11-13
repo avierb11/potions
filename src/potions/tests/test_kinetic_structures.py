@@ -13,7 +13,7 @@ from ..reactive_transport.kinetic_structures import (
 )
 
 
-def _make_rt_forcing(s_w: float, temp: float) -> MagicMock:
+def make_rt_forcing(s_w: float, temp: float) -> MagicMock:
     """A stand-in exposing only the fields the MineralParameters factor functions
     read: s_w and hydro_forc.temp. A real RtForcing is a Rust object, but
     these pure-Python methods never touch anything else on it."""
@@ -122,7 +122,7 @@ def test_soil_water_factor_above_threshold() -> None:
         q_10=np.array([1.5]),
         k_a=np.array([10.0]),
     )
-    forc = _make_rt_forcing(s_w=0.5, temp=30.0)
+    forc = make_rt_forcing(s_w=0.5, temp=30.0)
     # s_w >= threshold: ((1-s_w)/(1-thr))^exp = (0.5/0.7)^2
     assert mp.soil_water_factor(forc)[0] == pytest.approx((0.5 / 0.7) ** 2)
 
@@ -134,7 +134,7 @@ def test_soil_water_factor_below_threshold() -> None:
         q_10=np.array([1.5]),
         k_a=np.array([10.0]),
     )
-    forc = _make_rt_forcing(s_w=0.1, temp=20.0)
+    forc = make_rt_forcing(s_w=0.1, temp=20.0)
     # s_w < threshold: (s_w/thr)^exp = (0.1/0.3)^2
     assert mp.soil_water_factor(forc)[0] == pytest.approx((0.1 / 0.3) ** 2)
 
@@ -147,9 +147,9 @@ def test_temperature_factor() -> None:
         k_a=np.array([10.0]),
     )
     # At 20C the factor is exactly 1 (the reference temperature).
-    assert mp.temperature_factor(_make_rt_forcing(0.5, 20.0))[0] == pytest.approx(1.0)
+    assert mp.temperature_factor(make_rt_forcing(0.5, 20.0))[0] == pytest.approx(1.0)
     # At 30C the factor is q10^((30-20)/10) = 1.5.
-    assert mp.temperature_factor(_make_rt_forcing(0.5, 30.0))[0] == pytest.approx(1.5)
+    assert mp.temperature_factor(make_rt_forcing(0.5, 30.0))[0] == pytest.approx(1.5)
 
 
 def test_combined_factor_is_product_of_components() -> None:
@@ -159,7 +159,7 @@ def test_combined_factor_is_product_of_components() -> None:
         q_10=np.array([1.5]),
         k_a=np.array([10.0]),
     )
-    forc = _make_rt_forcing(s_w=0.5, temp=30.0)
+    forc = make_rt_forcing(s_w=0.5, temp=30.0)
     expected = (
         mp.soil_water_factor(forc)[0]
         * mp.temperature_factor(forc)[0]

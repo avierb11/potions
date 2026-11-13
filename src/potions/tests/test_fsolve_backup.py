@@ -8,7 +8,7 @@ Covers:
   populated, which the Python driver relies on;
 * ``RtZone.step_with_solution`` finalizing an externally computed
   post-reaction state identically to ``RtZone.step``;
-* ``_fsolve_backup_step`` rescuing a zone whose kinetic solve failed and
+* ``fsolve_backup_step`` rescuing a zone whose kinetic solve failed and
   refusing to re-solve failures that are not the aqueous kinetic block
   (dimension mismatch) or whose fsolve result does not meet the acceptance
   checks (stalled above the residual bar, non-finite vector; fsolve's
@@ -40,7 +40,7 @@ from ..core import (
 from ..reactive_transport.common_networks import get_carbon_network
 from ..reactive_transport_model import (
     FSOLVE_BACKUP_RESIDUAL_MAX,
-    _fsolve_backup_step,
+    fsolve_backup_step,
 )
 
 # One entry per network species, in network order:
@@ -51,7 +51,7 @@ C0: NDArray[np.float64] = np.array([1e-3, 1e-3, 1e-7, 1e-4, 1e-10, 1e-2, 1e-3, 1
 DT_DAYS: float = 1.0
 
 
-def _forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
+def forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
     """A minimal forcing: no precipitation / inflow, optional surface forcing
     flux (which also opens the water denominator for mass coupling)."""
     hydro_step = HydroStep(
@@ -75,7 +75,7 @@ def _forcing(conc_in: NDArray[np.float64], forc_flux: float = 0.0) -> RtForcing:
     )
 
 
-def _forcing_fluxes(
+def forcing_fluxes(
     conc_in: NDArray[np.float64],
     lat_flux: float,
     vert_flux: float,
@@ -106,7 +106,7 @@ def _forcing_fluxes(
     )
 
 
-def _fake_optimization_error(best_x: list[float]) -> OptimizationError:
+def fake_optimization_error(best_x: list[float]) -> OptimizationError:
     """A synthetic, fully-populated ``OptimizationError`` standing in for a
     failed Newton / LM solve.
 
@@ -165,7 +165,7 @@ def test_nan_state_raises_typed_optimization_error(zone: RtZone) -> None:
     c_0: NDArray[np.float64] = C0.copy()
     c_0[0] = np.nan
     with pytest.raises(OptimizationError) as excinfo:
-        zone.solve_rt_step(c_0, _forcing(np.zeros(len(C0))), DT_DAYS)
+        zone.solve_rt_step(c_0, forcing(np.zeros(len(C0))), DT_DAYS)
     err = excinfo.value
     # The core of the fix: the raised object matches the class, so
     # `isinstance(e, OptimizationError)` in the driver works.
@@ -181,7 +181,7 @@ def test_nan_state_raises_typed_optimization_error(zone: RtZone) -> None:
     c_tail: NDArray[np.float64] = C0.copy()
     c_tail[5] = np.nan
     with pytest.raises(OptimizationError) as excinfo:
-        zone.solve_rt_step(c_tail, _forcing(np.zeros(len(C0))), DT_DAYS)
+        zone.solve_rt_step(c_tail, forcing(np.zeros(len(C0))), DT_DAYS)
     tail_err = excinfo.value
     assert "NaN" in str(tail_err)
     assert len(tail_err.last_x) == n_aq
@@ -196,7 +196,7 @@ def test_run_zone_steps_failure_payload_is_typed(zone: RtZone) -> None:
     c_0: NDArray[np.float64] = C0.copy()
     c_0[0] = np.nan
     states: NDArray[np.float64] = c_0[None, :]
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
 
     steps, failure = run_zone_steps(
         [zone], states, [d], np.zeros((1, 1)), np.zeros((1, 1)), [], DT_DAYS
@@ -225,7 +225,7 @@ def test_step_with_solution_matches_step(zone: RtZone) -> None:
     """Feeding a state produced by ``RtZone.step`` back through
     ``step_with_solution`` reproduces the step's result exactly
     (the post-solve path is shared)."""
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
     reference = zone.step(C0, d, DT_DAYS)
 
     rescued = zone.step_with_solution(C0, reference.state, d, DT_DAYS)
@@ -251,7 +251,7 @@ def test_outgoing_mass_formula(zone: RtZone) -> None:
     # 1) Bypass only (no internal water): the full pass-through mass
     #    (q_external = 2 + 1 = 3, i.e. 3e-4 per aqueous species) splits
     #    by the external fractions 2/3 (lateral) and 1/3 (vertical).
-    d_bypass = _forcing_fluxes(c_in, 0.0, 0.0, 2.0, 1.0)
+    d_bypass = forcing_fluxes(c_in, 0.0, 0.0, 2.0, 1.0)
     lat, vert = zone.outgoing_mass(C0, d_bypass)
     lat = np.asarray(lat)
     vert = np.asarray(vert)
@@ -268,7 +268,7 @@ def test_outgoing_mass_formula(zone: RtZone) -> None:
     #    vertical of the total outgoing water (1.3).
     q_int: float = 0.5
     q_ext: float = 0.8
-    d_mix = _forcing_fluxes(c_in, 0.3, 0.2, 0.9, 0.4)
+    d_mix = forcing_fluxes(c_in, 0.3, 0.2, 0.9, 0.4)
     lat, vert = zone.outgoing_mass(C0, d_mix)
     lat = np.asarray(lat)
     vert = np.asarray(vert)
@@ -282,29 +282,29 @@ def test_outgoing_mass_formula(zone: RtZone) -> None:
         assert vert[sp] == 0.0
 
     # 3) No outgoing water at all: the 1e-20 sentinel for every species.
-    d_dry = _forcing_fluxes(c_in, 0.0, 0.0, 0.0, 0.0)
+    d_dry = forcing_fluxes(c_in, 0.0, 0.0, 0.0, 0.0)
     lat, vert = zone.outgoing_mass(C0, d_dry)
     assert np.all(np.asarray(lat) == 1e-20)
     assert np.all(np.asarray(vert) == 1e-20)
 
 
-# ===================== _fsolve_backup_step ===================== #
+# ===================== fsolve_backup_step ===================== #
 def test_fsolve_backup_rescues_converging_zone(zone: RtZone) -> None:
     """With a synthetic failed-solve error whose best iterate is a residual
     root (a stall short of convergence), the fsolve backup re-solves the
     aqueous block, passes its acceptance checks, and the finalized step
     matches the internal solver's to solver tolerance."""
     n_aq: int = zone.network.num_aqueous_species
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
 
     reference = zone.step(C0, d, DT_DAYS)
     # The kinetic-solve solution stands in for Newton's best iterate: a
     # finite aqueous block at (near) a residual root, which is what the
     # driver hands to fsolve in a rescuable failure.
     sol_aq: NDArray[np.float64] = np.asarray(zone.solve_rt_step(C0, d, DT_DAYS))[:n_aq]
-    err = _fake_optimization_error(best_x=list(sol_aq))
+    err = fake_optimization_error(best_x=list(sol_aq))
 
-    rescued = _fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, verbose=False)
+    rescued = fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, verbose=False)
 
     assert rescued is not None
     # fsolve started at a residual root, so it stays there: the finalized
@@ -355,17 +355,17 @@ def test_fsolve_backup_refuses_dimension_mismatch(zone: RtZone) -> None:
     a mismatched ``last_x`` size (e.g. a speciation solve) or a state that
     does not match the network both return ``None``."""
     n_aq: int = zone.network.num_aqueous_species
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
 
     # ``last_x`` the wrong size: not an aqueous kinetic failure.
-    wrong_dim_err = _fake_optimization_error(best_x=[0.0] * (n_aq + 3))
-    assert _fsolve_backup_step(zone, C0, d, DT_DAYS, wrong_dim_err, 0, False) is None
+    wrong_dim_err = fake_optimization_error(best_x=[0.0] * (n_aq + 3))
+    assert fsolve_backup_step(zone, C0, d, DT_DAYS, wrong_dim_err, 0, False) is None
 
     # A state that does not match the network size.
     short_state: NDArray[np.float64] = np.zeros(len(C0) - 1)
-    good_err = _fake_optimization_error(best_x=list(C0[:n_aq]))
+    good_err = fake_optimization_error(best_x=list(C0[:n_aq]))
     assert (
-        _fsolve_backup_step(zone, short_state, d, DT_DAYS, good_err, 0, False)
+        fsolve_backup_step(zone, short_state, d, DT_DAYS, good_err, 0, False)
         is None
     )
 
@@ -380,24 +380,24 @@ def test_fsolve_backup_rejects_failed_fsolve(
     far above the bar, whatever its ``ier``; the second because its
     vector is non-finite."""
     n_aq: int = zone.network.num_aqueous_species
-    d = _forcing(np.zeros(len(C0)))
-    err = _fake_optimization_error(best_x=list(C0[:n_aq]))
+    d = forcing(np.zeros(len(C0)))
+    err = fake_optimization_error(best_x=list(C0[:n_aq]))
 
-    def _not_converged(
+    def not_converged(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return np.full(n_aq, 1.0), {"fvec": np.ones(n_aq)}, 0, "no convergence"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _not_converged)
-    assert _fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False) is None
+    monkeypatch.setattr(reactive_transport_model, "fsolve", not_converged)
+    assert fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False) is None
 
-    def _nan_solution(
+    def nan_solution(
         _func: object, x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return np.full(n_aq, np.nan), {"fvec": np.zeros(n_aq)}, 1, "converged"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _nan_solution)
-    assert _fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False) is None
+    monkeypatch.setattr(reactive_transport_model, "fsolve", nan_solution)
+    assert fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False) is None
 
 
 def test_fsolve_backup_accepts_under_bar_result_regardless_of_ier(
@@ -409,18 +409,18 @@ def test_fsolve_backup_accepts_under_bar_result_regardless_of_ier(
     speciation backup's acceptance criterion: the flag is diagnostic-only
     and the residual norm is the arbiter."""
     n_aq: int = zone.network.num_aqueous_species
-    d = _forcing(np.zeros(len(C0)))
+    d = forcing(np.zeros(len(C0)))
     sol_aq: NDArray[np.float64] = np.asarray(zone.solve_rt_step(C0, d, DT_DAYS))[:n_aq]
-    err = _fake_optimization_error(best_x=[7.0] * n_aq)
+    err = fake_optimization_error(best_x=[7.0] * n_aq)
 
-    def _stalled_at_bar(
+    def stalled_at_bar(
         _func: object, _x0: NDArray[np.float64], **_kwargs: object
     ) -> tuple[NDArray[np.float64], dict[str, object], int, str]:
         return sol_aq.copy(), {"fvec": np.zeros(n_aq)}, 5, "xtol too small"
 
-    monkeypatch.setattr(reactive_transport_model, "fsolve", _stalled_at_bar)
+    monkeypatch.setattr(reactive_transport_model, "fsolve", stalled_at_bar)
 
-    rescued = _fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False)
+    rescued = fsolve_backup_step(zone, C0, d, DT_DAYS, err, 0, False)
 
     assert rescued is not None
     reference = zone.step(C0, d, DT_DAYS)
@@ -438,8 +438,8 @@ def test_run_zone_steps_resume_matches_full_run(zone: RtZone) -> None:
     reproduces the uninterrupted sweep's result for the remaining zone
     (the Gauss-Seidel coupling is identical)."""
     n_spec: int = len(C0)
-    d0 = _forcing(np.zeros(n_spec), forc_flux=0.5)
-    d1 = _forcing(np.zeros(n_spec), forc_flux=0.5)
+    d0 = forcing(np.zeros(n_spec), forc_flux=0.5)
+    d1 = forcing(np.zeros(n_spec), forc_flux=0.5)
     states: NDArray[np.float64] = np.stack([C0, C0])
     # Zone 1 receives all of zone 0's outgoing lateral mass.
     lat_mat: NDArray[np.float64] = np.array([[0.0, 0.0], [1.0, 0.0]])
@@ -503,7 +503,7 @@ def test_run_zone_steps_resume_validation(zone: RtZone) -> None:
     resuming past the last zone, and resuming without the required mass
     buffers."""
     n_spec: int = len(C0)
-    d = _forcing(np.zeros(n_spec))
+    d = forcing(np.zeros(n_spec))
     states: NDArray[np.float64] = np.stack([C0])
     lat_mat: NDArray[np.float64] = np.zeros((1, 1))
     vert_mat: NDArray[np.float64] = np.zeros((1, 1))

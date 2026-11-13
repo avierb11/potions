@@ -80,7 +80,7 @@ RUN_HISTORY_FILENAME: Final[str] = "gui_run_history.jsonl"
 MODE_FULL: Final[str] = "full"
 MODE_HYDRO: Final[str] = "hydro"
 # The set of the valid run modes.
-_VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
+VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # The versions of the gui_state.json format accepted on restore:
 # the current one (9, the dock-layout blob), version 8 (the
 # maximized-window flag), version 7 (the run's network fingerprint),
@@ -89,13 +89,13 @@ _VALID_MODES: Final[frozenset[str]] = frozenset({MODE_FULL, MODE_HYDRO})
 # (the time-series figure's selection list), version 2 (the last
 # version this GUI has written), and version 1 (the two-splitter
 # layout, whose splitter sizes are mapped onto the current one).
-_ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
+ACCEPTED_VERSIONS: Final[frozenset[int]] = frozenset(
     {1, 2, 3, 4, 5, 6, 7, 8, GUI_STATE_VERSION}
 )
 # The name pattern of the run directories `potions.result_saving`
 # creates: a zero-padded timestamp and, when two runs landed in the
 # same second, a counter suffix.
-_RUN_DIR_NAME: Final[re.Pattern[str]] = re.compile(
+RUN_DIR_NAME: Final[re.Pattern[str]] = re.compile(
     r"^run_(\d{8})_(\d{6})(?:_(\d+))?$"
 )
 # =================== #
@@ -255,15 +255,15 @@ class GuiState:
 
         Raises:
             ValueError: Raised when the file's version is not one of
-                the accepted versions (`_ACCEPTED_VERSIONS`) or a
+                the accepted versions (`ACCEPTED_VERSIONS`) or a
                 required field is missing or has an unexpected
                 shape.
         """
         version: object = data.get("version", GUI_STATE_VERSION)
-        if version not in _ACCEPTED_VERSIONS:
+        if version not in ACCEPTED_VERSIONS:
             raise ValueError(
                 f"Unsupported gui_state.json version {version!r} "
-                f"(expected {sorted(_ACCEPTED_VERSIONS)})."
+                f"(expected {sorted(ACCEPTED_VERSIONS)})."
             )
 
         csv_path: object = data.get("csv_path")
@@ -275,19 +275,19 @@ class GuiState:
 
         return cls(
             csv_path=csv_path,
-            param_values=_require_values(data),
-            param_bounds=_require_bounds(data),
-            selection=_require_selection(data, years),
-            window_geometry=_optional_geometry(data),
-            splitter_sizes=_optional_splitter_sizes(data),
-            save_history=_optional_save_history(data),
-            mode=_optional_mode(data),
-            objective_terms=_optional_objective_terms(data),
-            model_key=_optional_model_key(data),
-            network_fingerprint=_optional_network_fingerprint(data),
-            column_map=_optional_column_map(data),
-            window_maximized=_optional_maximized(data),
-            dock_state=_optional_dock_state(data),
+            param_values=require_values(data),
+            param_bounds=require_bounds(data),
+            selection=require_selection(data, years),
+            window_geometry=optional_geometry(data),
+            splitter_sizes=optional_splitter_sizes(data),
+            save_history=optional_save_history(data),
+            mode=optional_mode(data),
+            objective_terms=optional_objective_terms(data),
+            model_key=optional_model_key(data),
+            network_fingerprint=optional_network_fingerprint(data),
+            column_map=optional_column_map(data),
+            window_maximized=optional_maximized(data),
+            dock_state=optional_dock_state(data),
         )
 
 
@@ -358,7 +358,7 @@ class RunHistoryEntry:
 
 
 # ==== Functions ==== #
-def _require_values(data: dict[str, object]) -> dict[str, float]:
+def require_values(data: dict[str, object]) -> dict[str, float]:
     """
     The ``param_values`` field of a gui_state.json mapping.
 
@@ -377,7 +377,7 @@ def _require_values(data: dict[str, object]) -> dict[str, float]:
         raise ValueError("gui_state.json is missing the 'param_values' mapping.")
     values: dict[str, float] = {}
     for name, value in raw.items():
-        if not isinstance(name, str) or _not_number(value):
+        if not isinstance(name, str) or not_number(value):
             raise ValueError(
                 f"gui_state.json param_values entry {name!r} is not a number."
             )
@@ -385,7 +385,7 @@ def _require_values(data: dict[str, object]) -> dict[str, float]:
     return values
 
 
-def _require_bounds(data: dict[str, object]) -> dict[str, tuple[float, float]]:
+def require_bounds(data: dict[str, object]) -> dict[str, tuple[float, float]]:
     """
     The ``param_bounds`` field of a gui_state.json mapping.
 
@@ -408,8 +408,8 @@ def _require_bounds(data: dict[str, object]) -> dict[str, tuple[float, float]]:
             not isinstance(name, str)
             or not isinstance(value, (list, tuple))
             or len(value) != 2
-            or _not_number(value[0])
-            or _not_number(value[1])
+            or not_number(value[0])
+            or not_number(value[1])
         ):
             raise ValueError(
                 f"gui_state.json param_bounds entry {name!r} "
@@ -419,7 +419,7 @@ def _require_bounds(data: dict[str, object]) -> dict[str, tuple[float, float]]:
     return bounds
 
 
-def _require_selection(
+def require_selection(
     data: dict[str, object],
     years: list[int] = WATER_YEARS,
 ) -> PlotSelection:
@@ -462,7 +462,7 @@ def _require_selection(
     if not isinstance(raw, dict):
         raise ValueError("gui_state.json is missing the 'selection' mapping.")
 
-    def _strings(
+    def strings(
         key: str, optional_default: Sequence[str] | None = None
     ) -> list[str]:
         entry: object = raw.get(key)
@@ -480,7 +480,7 @@ def _require_selection(
             )
         return list(entry)
 
-    def _bool(key: str, default: bool) -> bool:
+    def read_bool(key: str, default: bool) -> bool:
         entry: object = raw.get(key)
         if entry is None:
             return default
@@ -491,18 +491,18 @@ def _require_selection(
             )
         return entry
 
-    def _year(key: str, default: int) -> int:
+    def year(key: str, default: int) -> int:
         entry: object = raw.get(key)
         if entry is None:
             return default
-        if not _is_int(entry) or entry not in years:
+        if not is_int(entry) or entry not in years:
             raise ValueError(
                 f"gui_state.json selection field {key!r} is not a "
                 f"water year."
             )
         return int(entry)
 
-    def _date(key: str, default: str) -> str:
+    def date(key: str, default: str) -> str:
         entry: object = raw.get(key)
         if entry is None:
             return default
@@ -527,12 +527,12 @@ def _require_selection(
         # Version 5 stores the window as water years; the current
         # shape stores its first and last days.
         if "window_start" in raw or "window_end" in raw:
-            start: str = _date("window_start", DEFAULT_WINDOW_START)
-            end: str = _date("window_end", DEFAULT_WINDOW_END)
+            start: str = date("window_start", DEFAULT_WINDOW_START)
+            end: str = date("window_end", DEFAULT_WINDOW_END)
         elif "water_years_from" in raw or "water_years_to" in raw:
             legacy_start, legacy_end = water_year_window(
-                _year("water_years_from", years[0]),
-                _year("water_years_to", years[-1]),
+                year("water_years_from", years[0]),
+                year("water_years_to", years[-1]),
             )
             start = legacy_start.strftime("%Y-%m-%d")
             end = legacy_end.strftime("%Y-%m-%d")
@@ -545,28 +545,28 @@ def _require_selection(
                 f"after its end {end!r}."
             )
         return PlotSelection(
-            species=_strings("species"),
-            zones=_strings("zones"),
+            species=strings("species"),
+            zones=strings("zones"),
             mineral=str(raw["mineral"]),
-            streamflow=_bool("streamflow", True),
+            streamflow=read_bool("streamflow", True),
             window_start=start,
             window_end=end,
         )
 
     # The version 3 or earlier shape: migrate it onto the current
     # one (see the docstring for the mapping).
-    legacy_species: list[str] = _strings("species")
-    legacy_time_series: list[str] = _strings(
+    legacy_species: list[str] = strings("species")
+    legacy_time_series: list[str] = strings(
         "time_series", optional_default=["Streamflow", *RIVER_SPECIES]
     )
-    legacy_minerals: list[str] = _strings("minerals")
+    legacy_minerals: list[str] = strings("minerals")
     return PlotSelection(
         species=[
             name
             for name in RIVER_SPECIES
             if name in legacy_species or name in legacy_time_series
         ],
-        zones=_strings("zones"),
+        zones=strings("zones"),
         mineral=legacy_minerals[0]
         if legacy_minerals
         else default_plot_mineral(),
@@ -576,7 +576,7 @@ def _require_selection(
     )
 
 
-def _optional_geometry(data: dict[str, object]) -> dict[str, int] | None:
+def optional_geometry(data: dict[str, object]) -> dict[str, int] | None:
     """
     The optional ``window_geometry`` field of a gui_state.json mapping.
 
@@ -595,7 +595,7 @@ def _optional_geometry(data: dict[str, object]) -> dict[str, int] | None:
     if raw is None:
         return None
     if not isinstance(raw, dict) or not all(
-        isinstance(key, str) and _is_int(value) for key, value in raw.items()
+        isinstance(key, str) and is_int(value) for key, value in raw.items()
     ):
         raise ValueError(
             "gui_state.json 'window_geometry' must be a mapping of integers."
@@ -603,7 +603,7 @@ def _optional_geometry(data: dict[str, object]) -> dict[str, int] | None:
     return {key: int(value) for key, value in raw.items()}
 
 
-def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
+def optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
     """
     The optional ``splitter_sizes`` field of a gui_state.json mapping.
 
@@ -632,7 +632,7 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
     if raw is None:
         return None
     if not isinstance(raw, list) or not all(
-        _is_int(item) for item in raw
+        is_int(item) for item in raw
     ):
         raise ValueError(
             "gui_state.json 'splitter_sizes' must be a list of integers."
@@ -651,7 +651,7 @@ def _optional_splitter_sizes(data: dict[str, object]) -> list[int] | None:
     )
 
 
-def _optional_save_history(data: dict[str, object]) -> bool:
+def optional_save_history(data: dict[str, object]) -> bool:
     """
     The optional ``save_history`` field of a gui_state.json mapping.
 
@@ -678,7 +678,7 @@ def _optional_save_history(data: dict[str, object]) -> bool:
     return raw
 
 
-def _optional_maximized(data: dict[str, object]) -> bool:
+def optional_maximized(data: dict[str, object]) -> bool:
     """
     The optional ``window_maximized`` field of a gui_state.json mapping.
 
@@ -705,7 +705,7 @@ def _optional_maximized(data: dict[str, object]) -> bool:
     return raw
 
 
-def _optional_dock_state(data: dict[str, object]) -> str | None:
+def optional_dock_state(data: dict[str, object]) -> str | None:
     """
     The optional ``dock_state`` field of a gui_state.json mapping.
 
@@ -733,7 +733,7 @@ def _optional_dock_state(data: dict[str, object]) -> str | None:
     return raw
 
 
-def _optional_mode(data: dict[str, object]) -> str:
+def optional_mode(data: dict[str, object]) -> str:
     """
     The optional ``mode`` field of a gui_state.json mapping.
 
@@ -751,7 +751,7 @@ def _optional_mode(data: dict[str, object]) -> str:
     raw: object = data.get("mode")
     if raw is None:
         return MODE_FULL
-    if not isinstance(raw, str) or raw not in _VALID_MODES:
+    if not isinstance(raw, str) or raw not in VALID_MODES:
         raise ValueError(
             f"gui_state.json 'mode' must be 'full' or 'hydro', "
             f"got {raw!r}."
@@ -759,7 +759,7 @@ def _optional_mode(data: dict[str, object]) -> str:
     return raw
 
 
-def _optional_objective_terms(data: dict[str, object]) -> list[str] | None:
+def optional_objective_terms(data: dict[str, object]) -> list[str] | None:
     """
     The optional ``objective_terms`` field of a gui_state.json mapping.
 
@@ -787,7 +787,7 @@ def _optional_objective_terms(data: dict[str, object]) -> list[str] | None:
     return list(raw)
 
 
-def _optional_model_key(data: dict[str, object]) -> str:
+def optional_model_key(data: dict[str, object]) -> str:
     """
     The optional ``model_key`` field of a gui_state.json mapping.
 
@@ -815,7 +815,7 @@ def _optional_model_key(data: dict[str, object]) -> str:
         raise ValueError(f"gui_state.json {error}") from error
 
 
-def _optional_network_fingerprint(data: dict[str, object]) -> str | None:
+def optional_network_fingerprint(data: dict[str, object]) -> str | None:
     """
     The optional ``network_fingerprint`` field of a gui_state.json
     mapping.
@@ -846,7 +846,7 @@ def _optional_network_fingerprint(data: dict[str, object]) -> str | None:
     return raw
 
 
-def _optional_column_map(
+def optional_column_map(
     data: dict[str, object],
 ) -> dict[str, str | None] | None:
     """
@@ -896,12 +896,12 @@ def _optional_column_map(
     return mapping
 
 
-def _not_number(value: object) -> bool:
+def not_number(value: object) -> bool:
     """Whether a JSON value is not a (non-boolean) number."""
     return not isinstance(value, (int, float)) or isinstance(value, bool)
 
 
-def _is_int(value: object) -> bool:
+def is_int(value: object) -> bool:
     """Whether a JSON value is an integer (a boolean is not)."""
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1053,7 +1053,7 @@ def list_run_dirs(results_dir: str | Path = "results") -> list[Path]:
     for entry in base.iterdir():
         if not entry.is_dir():
             continue
-        match: re.Match[str] | None = _RUN_DIR_NAME.match(entry.name)
+        match: re.Match[str] | None = RUN_DIR_NAME.match(entry.name)
         if match is None:
             continue
         stamp: str = f"{match.group(1)}{match.group(2)}"
@@ -1286,7 +1286,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
         range(input_data.window[0].year, input_data.window[1].year + 1)
     )
     state: GuiState | None = read_gui_state(run_dir, years)
-    results: GuiRunResults = _reconstruct_results(run_dir, input_data)
+    results: GuiRunResults = reconstruct_results(run_dir, input_data)
 
     if state is not None:
         return SavedRun(
@@ -1312,7 +1312,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
             dock_state=state.dock_state,
         )
 
-    parsed: tuple[dict[str, float], str] = _parse_saved_parameters(
+    parsed: tuple[dict[str, float], str] = parse_saved_parameters(
         run_dir, input_data
     )
     values: dict[str, float] = parsed[0]
@@ -1348,7 +1348,7 @@ def load_saved_run(run_dir: Path, input_data: GuiInputData) -> SavedRun:
     )
 
 
-def _read_simulation_csv(path: Path) -> pd.DataFrame:
+def read_simulation_csv(path: Path) -> pd.DataFrame:
     """
     Read a saved simulation CSV.
 
@@ -1366,7 +1366,7 @@ def _read_simulation_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, index_col="date", parse_dates=["date"])
 
 
-def _read_hydro_objectives(path: Path) -> pd.Series:
+def read_hydro_objectives(path: Path) -> pd.Series:
     """
     Read a saved hydrology objective-functions CSV.
 
@@ -1395,7 +1395,7 @@ def _read_hydro_objectives(path: Path) -> pd.Series:
     return df["value"].astype(float)
 
 
-def _read_rt_objectives(path: Path) -> pd.DataFrame | None:
+def read_rt_objectives(path: Path) -> pd.DataFrame | None:
     """
     Read a saved reactive-transport objective-functions CSV.
 
@@ -1412,7 +1412,7 @@ def _read_rt_objectives(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path, index_col=0)
 
 
-def _zone_names_from_hydro_sim(hydro_sim: pd.DataFrame) -> list[str]:
+def zone_names_from_hydro_sim(hydro_sim: pd.DataFrame) -> list[str]:
     """
     Recover the ordered zone names from a saved hydrology simulation frame.
 
@@ -1444,7 +1444,7 @@ def _zone_names_from_hydro_sim(hydro_sim: pd.DataFrame) -> list[str]:
     return names
 
 
-def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResults:
+def reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResults:
     """
     Rebuild the model results from a run's saved simulation CSVs.
 
@@ -1481,23 +1481,23 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResul
     hydro_objectives: pd.Series
     rt_objectives: pd.DataFrame | None
     if (run_dir / "hydro" / "simulation.csv").is_file():
-        hydro_sim = _read_simulation_csv(run_dir / "hydro" / "simulation.csv")
-        rt_sim = _read_simulation_csv(run_dir / "rt" / "simulation.csv")
-        hydro_objectives = _read_hydro_objectives(
+        hydro_sim = read_simulation_csv(run_dir / "hydro" / "simulation.csv")
+        rt_sim = read_simulation_csv(run_dir / "rt" / "simulation.csv")
+        hydro_objectives = read_hydro_objectives(
             run_dir / "hydro" / "objective_functions.csv"
         )
-        rt_objectives = _read_rt_objectives(
+        rt_objectives = read_rt_objectives(
             run_dir / "rt" / "objective_functions.csv"
         )
     else:
-        hydro_sim = _read_simulation_csv(run_dir / "simulation.csv")
+        hydro_sim = read_simulation_csv(run_dir / "simulation.csv")
         rt_sim = None
-        hydro_objectives = _read_hydro_objectives(
+        hydro_objectives = read_hydro_objectives(
             run_dir / "objective_functions.csv"
         )
         rt_objectives = None
 
-    zone_names = _zone_names_from_hydro_sim(hydro_sim)
+    zone_names = zone_names_from_hydro_sim(hydro_sim)
 
     hydro_results: pt.HydroModelResults = pt.HydroModelResults(
         forcing=input_data.forc,
@@ -1518,7 +1518,7 @@ def _reconstruct_results(run_dir: Path, input_data: GuiInputData) -> GuiRunResul
     return GuiRunResults(hydro=hydro_results, rt=rt_results)
 
 
-def _parse_saved_parameters(
+def parse_saved_parameters(
     run_dir: Path, input_data: GuiInputData
 ) -> tuple[dict[str, float], str]:
     """
@@ -1578,7 +1578,7 @@ def _parse_saved_parameters(
     recovered: dict[str, float] = {}
     found: int = 0
     for row in df.itertuples(index=False):
-        key: str | None = _row_key(row.zone, row.name, mineral_index)
+        key: str | None = row_key(row.zone, row.name, mineral_index)
         if key is None or key not in bounds:
             continue
         try:
@@ -1620,7 +1620,7 @@ def _parse_saved_parameters(
     return values, note
 
 
-def _row_key(
+def row_key(
     zone: object, name: object, mineral_index: dict[str, int]
 ) -> str | None:
     """

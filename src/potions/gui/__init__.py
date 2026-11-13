@@ -105,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             parser.error(
                 f"--network {args.network} must be a .yaml or .yml file."
             )
-        network = _load_network_file(network_path)
+        network = load_network_file(network_path)
 
     set_rc_params()
     app: QApplication = QApplication([])
@@ -132,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     sys.exit(app.exec())
 
 
-def _load_network_file(path: Path) -> pt.ReactionNetwork:
+def load_network_file(path: Path) -> pt.ReactionNetwork:
     """
     Load a reaction-network YAML file for the ``--network`` option.
 

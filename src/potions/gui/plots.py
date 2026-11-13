@@ -103,7 +103,7 @@ from matplotlib.transforms import Bbox
 # The alpha of the faint lines that overlay a previous run's results
 # on the current figures (the parameter panel's *History* group,
 # *Overlay previous results* checkbox).
-_OVERLAY_ALPHA: Final[float] = 0.5
+OVERLAY_ALPHA: Final[float] = 0.5
 # =================== #
 
 from potions.gui.common import (
@@ -123,7 +123,7 @@ from potions.gui.common import (
 
 
 # ==== Functions ==== #
-def _day_number(timestamp: pd.Timestamp) -> float:
+def day_number(timestamp: pd.Timestamp) -> float:
     """
     The matplotlib date number (days since 1970-01-01) of `timestamp`.
 
@@ -134,7 +134,7 @@ def _day_number(timestamp: pd.Timestamp) -> float:
     return float(timestamp.value / 1e9 / 86400)
 
 
-def _clip_frame(
+def clip_frame(
     frame: pd.DataFrame, window: tuple[pd.Timestamp, pd.Timestamp]
 ) -> pd.DataFrame:
     """
@@ -150,13 +150,13 @@ def _clip_frame(
     return frame.loc[(frame.index >= start) & (frame.index <= end)]
 
 
-def _clip_series(
+def clip_series(
     series: pd.Series, window: tuple[pd.Timestamp, pd.Timestamp]
 ) -> pd.Series:
     """
     `series` restricted to the plotting window's rows.
 
-    See `_clip_frame` for the intersection and NaN semantics.
+    See `clip_frame` for the intersection and NaN semantics.
     """
     start, end = window
     return series.loc[(series.index >= start) & (series.index <= end)]
@@ -167,12 +167,12 @@ def _clip_series(
 # above the figure's bottom edge, the spacing between stacked
 # rows, and the margin the axes' bottom edge keeps beyond the
 # deepest label hanging below it.
-_LEGEND_BOTTOM_GAP: Final[float] = 0.02
-_LEGEND_ROW_GAP: Final[float] = 0.03
-_TICK_LABEL_MARGIN: Final[float] = 0.015
+LEGEND_BOTTOM_GAP: Final[float] = 0.02
+LEGEND_ROW_GAP: Final[float] = 0.03
+TICK_LABEL_MARGIN: Final[float] = 0.015
 
 
-def _legend_top_edge(fig: Figure, legend: Legend) -> float:
+def legend_top_edge(fig: Figure, legend: Legend) -> float:
     """
     The top edge of a drawn legend, in figure fractions.
 
@@ -186,7 +186,7 @@ def _legend_top_edge(fig: Figure, legend: Legend) -> float:
     return float(extent.y1) / fig_height
 
 
-def _axes_tick_depth(fig: Figure) -> float:
+def axes_tick_depth(fig: Figure) -> float:
     """
     The deepest label hanging below the figure's axes' bottom
     edges, in figure fractions.
@@ -246,12 +246,12 @@ def _axes_tick_depth(fig: Figure) -> float:
     return depth
 
 
-def _axes_gap(fig: Figure) -> float:
+def axes_gap(fig: Figure) -> float:
     """
     The figure-fraction gap the axes' bottom edge keeps above the
     topmost below-axes legend row.
 
-    At least `_LEGEND_ROW_GAP`, the builders' margin, grown to
+    At least `LEGEND_ROW_GAP`, the builders' margin, grown to
     clear the labels that hang below the axes' bottom edge: a
     fixed gap does not survive the panel's rescale of the
     point-based tick labels, and one too small for them lets a
@@ -266,12 +266,12 @@ def _axes_gap(fig: Figure) -> float:
         restated margin.
     """
     return max(
-        _LEGEND_ROW_GAP,
-        _axes_tick_depth(fig) + _TICK_LABEL_MARGIN,
+        LEGEND_ROW_GAP,
+        axes_tick_depth(fig) + TICK_LABEL_MARGIN,
     )
 
 
-def _attach_legend(
+def attach_legend(
     fig: Figure,
     handles: Sequence[Artist],
     labels: Sequence[str],
@@ -287,8 +287,8 @@ def _attach_legend(
     frame is off, and the legend never overlaps the drawn series.
     It is created once and drawn (with the figure's canvas) to
     measure its display height, then anchored so that its bottom
-    edge sits `_LEGEND_BOTTOM_GAP` above the figure's bottom edge —
-    or `_LEGEND_ROW_GAP` above the `above` row, when stacking a
+    edge sits `LEGEND_BOTTOM_GAP` above the figure's bottom edge —
+    or `LEGEND_ROW_GAP` above the `above` row, when stacking a
     second row (the builders reserve the room with
     `Figure.subplots_adjust` after placing their rows).  Because the
     series are drawn inside the axes and the legend below them, they
@@ -307,7 +307,7 @@ def _attach_legend(
 
     Returns:
         The attached legend, its top edge at
-        `_legend_top_edge(fig, ...)` for the builders' layout math.
+        `legend_top_edge(fig, ...)` for the builders' layout math.
     """
     legend: Legend = fig.legend(
         handles,
@@ -327,9 +327,9 @@ def _attach_legend(
     legend._below_axes_row = True  # type: ignore[attr-defined]
     fig.canvas.draw()
     if above is not None:
-        floor: float = _legend_top_edge(fig, above) + _LEGEND_ROW_GAP
+        floor: float = legend_top_edge(fig, above) + LEGEND_ROW_GAP
     else:
-        floor = _LEGEND_BOTTOM_GAP
+        floor = LEGEND_BOTTOM_GAP
     height: float = (
         float(legend.get_window_extent().height)
         / (fig.get_figheight() * fig.dpi)
@@ -353,7 +353,7 @@ def relayout_below_axes_legends(fig: Figure) -> None:
     the panel's fixed-size page export).  The relayout re-measures
     each tagged row in stacking order, from the bottom up,
     re-anchors it to the floor the builders designed, and restates
-    the axes' bottom margin — `_axes_gap`: the builders' row gap,
+    the axes' bottom margin — `axes_gap`: the builders' row gap,
     grown to clear the axes' point-based hanging labels — so the
     rows stay inside the figure, out of the tick labels, at any
     size the panel gives it.
@@ -380,7 +380,7 @@ def relayout_below_axes_legends(fig: Figure) -> None:
     # Both extents come from the figure's renderer, so their ratio
     # is a pure figure fraction at whatever size the figure now is.
     fig_height: float = float(fig.get_window_extent().height)
-    floor: float = _LEGEND_BOTTOM_GAP
+    floor: float = LEGEND_BOTTOM_GAP
     for legend in rows:
         extent: Bbox = legend.get_window_extent()
         height: float = float(extent.height) / fig_height
@@ -392,11 +392,11 @@ def relayout_below_axes_legends(fig: Figure) -> None:
         # The anchor is the row's top edge, `_LEGEND_*_GAP` above
         # the floor, as at construction.
         legend.set_bbox_to_anchor((0.5, floor + height + gap))
-        floor = floor + height + _LEGEND_ROW_GAP
+        floor = floor + height + LEGEND_ROW_GAP
     # The builders' margin above the topmost row, restated at the
-    # measured position: at least `_LEGEND_ROW_GAP`, grown to
-    # clear the axes' hanging labels (`_axes_gap`).
-    fig.subplots_adjust(bottom=floor - _LEGEND_ROW_GAP + _axes_gap(fig))
+    # measured position: at least `LEGEND_ROW_GAP`, grown to
+    # clear the axes' hanging labels (`axes_gap`).
+    fig.subplots_adjust(bottom=floor - LEGEND_ROW_GAP + axes_gap(fig))
 
 
 def make_hydrology_figure(
@@ -444,12 +444,12 @@ def make_hydrology_figure(
     Returns:
         The completed figure.
     """
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     q_meas_plot: pd.Series | None = (
-        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+        clip_series(q_meas, window).dropna() if q_meas is not None else None
     )
     overlay_hydro_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_hydro_sim, window)
+        clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
         else None
     )
@@ -464,7 +464,7 @@ def make_hydrology_figure(
             overlay_hydro_plot.index,
             overlay_hydro_plot["streamflow_sim"],
             color=SIM_Q_COLOR,
-            alpha=_OVERLAY_ALPHA,
+            alpha=OVERLAY_ALPHA,
             linewidth=1,
         )
 
@@ -487,8 +487,8 @@ def make_hydrology_figure(
     ax.set_title("Streamflow")
     ax.set_ylabel("Discharge (mm/d)")
     ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(hydro_plot.index.max()),
+        day_number(window[0]),
+        day_number(hydro_plot.index.max()),
     )
     ax.set_ylim(0, 2 * ax.get_ylim()[1])
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
@@ -512,8 +512,8 @@ def make_hydrology_figure(
         )
         legend_labels.append("Streamflow (meas)")
 
-    legend: Legend = _attach_legend(fig, legend_handles, legend_labels)
-    fig.subplots_adjust(bottom=_legend_top_edge(fig, legend) + _axes_gap(fig))
+    legend: Legend = attach_legend(fig, legend_handles, legend_labels)
+    fig.subplots_adjust(bottom=legend_top_edge(fig, legend) + axes_gap(fig))
 
     return fig
 
@@ -562,9 +562,9 @@ def make_storage_figure(
     Returns:
         The completed figure.
     """
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     overlay_hydro_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_hydro_sim, window)
+        clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
         else None
     )
@@ -582,7 +582,7 @@ def make_storage_figure(
                     overlay_hydro_plot.index,
                     overlay_hydro_plot[overlay_storage],
                     color=zone_colors[zone],
-                    alpha=_OVERLAY_ALPHA,
+                    alpha=OVERLAY_ALPHA,
                     linewidth=1,
                 )
 
@@ -597,24 +597,24 @@ def make_storage_figure(
     storage_ax.set_title("Storage")
     storage_ax.set_ylabel("Storage (mm)")
     storage_ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(hydro_plot.index.max()),
+        day_number(window[0]),
+        day_number(hydro_plot.index.max()),
     )
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
-    legend: Legend = _attach_legend(
+    legend: Legend = attach_legend(
         fig,
         [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in zones],
         [zone_labels[zone] for zone in zones],
         title="Zone",
         ncol=max(len(zones), 1),
     )
-    fig.subplots_adjust(bottom=_legend_top_edge(fig, legend) + _axes_gap(fig))
+    fig.subplots_adjust(bottom=legend_top_edge(fig, legend) + axes_gap(fig))
 
     return fig
 
 
-def _river_zone_stack_order(
+def river_zone_stack_order(
     hydro_sim: pd.DataFrame,
     stack_order: list[str] = ZONE_STACK_ORDER,
 ) -> list[str]:
@@ -651,7 +651,7 @@ def _river_zone_stack_order(
     )
 
 
-def _draw_river_stack(
+def draw_river_stack(
     ax: Axes,
     frame: pd.DataFrame,
     zones: list[str],
@@ -757,17 +757,17 @@ def make_partitioning_figure(
     Returns:
         The completed figure.
     """
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     q_meas_plot: pd.Series | None = (
-        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+        clip_series(q_meas, window).dropna() if q_meas is not None else None
     )
     overlay_hydro_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_hydro_sim, window)
+        clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
         else None
     )
 
-    zones: list[str] = _river_zone_stack_order(hydro_plot, stack_order)
+    zones: list[str] = river_zone_stack_order(hydro_plot, stack_order)
 
     fig: Figure = Figure(figsize=(15, 5))
     ax: Axes = fig.gca()
@@ -775,15 +775,15 @@ def make_partitioning_figure(
     # The previous run's stack, drawn first (behind) and faintly,
     # without labels (they stay out of the legends).
     if overlay_hydro_plot is not None:
-        _draw_river_stack(
+        draw_river_stack(
             ax,
             overlay_hydro_plot,
             zones,
-            alpha=_OVERLAY_ALPHA,
+            alpha=OVERLAY_ALPHA,
             zone_colors=zone_colors,
         )
 
-    _draw_river_stack(ax, hydro_plot, zones, alpha=None, zone_colors=zone_colors)
+    draw_river_stack(ax, hydro_plot, zones, alpha=None, zone_colors=zone_colors)
 
     # The measured streamflow: scatter points, never a line — and
     # absent entirely when the record carries none.
@@ -798,15 +798,15 @@ def make_partitioning_figure(
     ax.set_title("Partitioning")
     ax.set_ylabel("Discharge (mm/d)")
     ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(hydro_plot.index.max()),
+        day_number(window[0]),
+        day_number(hydro_plot.index.max()),
     )
     ax.set_ylim(bottom=0.0)
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
     zone_row: Legend | None = None
     if zones:
-        zone_row = _attach_legend(
+        zone_row = attach_legend(
             fig,
             [
                 Patch(facecolor=zone_colors[zone], edgecolor="none")
@@ -821,7 +821,7 @@ def make_partitioning_figure(
     # are present.
     discharge_row: Legend | None = None
     if q_meas_plot is not None:
-        discharge_row = _attach_legend(
+        discharge_row = attach_legend(
             fig,
             [
                 Line2D(
@@ -842,7 +842,7 @@ def make_partitioning_figure(
     )
     if bottom_row is not None:
         fig.subplots_adjust(
-            bottom=_legend_top_edge(fig, bottom_row) + _axes_gap(fig)
+            bottom=legend_top_edge(fig, bottom_row) + axes_gap(fig)
         )
 
     return fig
@@ -900,15 +900,15 @@ def make_river_loads_figure(
     Returns:
         The completed figure.
     """
-    rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    rt_plot: pd.DataFrame = clip_frame(rt_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     overlay_rt_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_rt_sim, window)
+        clip_frame(overlay_rt_sim, window)
         if overlay_rt_sim is not None
         else None
     )
     overlay_hydro_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_hydro_sim, window)
+        clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
         else None
     )
@@ -928,7 +928,7 @@ def make_river_loads_figure(
                 overlay_rt_plot[load_column]
                 * overlay_hydro_plot["streamflow_sim"],
                 color=RIVER_SPECIES_SIM_COLORS[species_name],
-                alpha=_OVERLAY_ALPHA,
+                alpha=OVERLAY_ALPHA,
                 linewidth=1,
             )
 
@@ -946,12 +946,12 @@ def make_river_loads_figure(
     ax.set_title("River loads")
     ax.set_ylabel("Load (mm·mol/L/d)")
     ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(hydro_plot.index.max()),
+        day_number(window[0]),
+        day_number(hydro_plot.index.max()),
     )
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
-    legend: Legend = _attach_legend(
+    legend: Legend = attach_legend(
         fig,
         [
             Line2D([], [], color=RIVER_SPECIES_SIM_COLORS[name], linewidth=2)
@@ -961,7 +961,7 @@ def make_river_loads_figure(
         title="Species",
         ncol=max(len(species), 1),
     )
-    fig.subplots_adjust(bottom=_legend_top_edge(fig, legend) + _axes_gap(fig))
+    fig.subplots_adjust(bottom=legend_top_edge(fig, legend) + axes_gap(fig))
 
     return fig
 
@@ -1026,12 +1026,12 @@ def make_conc_discharge_figure(
     Returns:
         The completed figure.
     """
-    rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    rt_plot: pd.DataFrame = clip_frame(rt_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     q_meas_plot: pd.Series | None = (
-        _clip_series(q_meas, window) if q_meas is not None else None
+        clip_series(q_meas, window) if q_meas is not None else None
     )
-    conc_plot: pd.DataFrame = _clip_frame(conc_df, window)
+    conc_plot: pd.DataFrame = clip_frame(conc_df, window)
 
     fig: Figure = Figure(figsize=(15, 5))
     if not species:
@@ -1076,7 +1076,7 @@ def make_conc_discharge_figure(
 
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
-    sim_row: Legend = _attach_legend(
+    sim_row: Legend = attach_legend(
         fig,
         [
             Line2D(
@@ -1103,7 +1103,7 @@ def make_conc_discharge_figure(
     )
     meas_row: Legend | None = None
     if measured_names:
-        meas_row = _attach_legend(
+        meas_row = attach_legend(
             fig,
             [
                 Line2D(
@@ -1122,7 +1122,7 @@ def make_conc_discharge_figure(
         )
     bottom_row: Legend = meas_row if meas_row is not None else sim_row
     fig.subplots_adjust(
-        bottom=_legend_top_edge(fig, bottom_row) + _axes_gap(fig)
+        bottom=legend_top_edge(fig, bottom_row) + axes_gap(fig)
     )
 
     return fig
@@ -1185,9 +1185,9 @@ def make_zone_concentrations_figure(
     Returns:
         The completed figure.
     """
-    rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
+    rt_plot: pd.DataFrame = clip_frame(rt_sim, window)
     overlay_rt_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_rt_sim, window)
+        clip_frame(overlay_rt_sim, window)
         if overlay_rt_sim is not None
         else None
     )
@@ -1210,7 +1210,7 @@ def make_zone_concentrations_figure(
                         overlay_rt_plot[overlay_column],
                         color=zone_colors[zone],
                         linestyle=overlay_linestyle,
-                        alpha=_OVERLAY_ALPHA,
+                        alpha=OVERLAY_ALPHA,
                         linewidth=1,
                     )
 
@@ -1245,12 +1245,12 @@ def make_zone_concentrations_figure(
     ax.set_title("Concentration")
     ax.set_ylabel("Concentration (mol/L)")
     ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(rt_plot.index.max()),
+        day_number(window[0]),
+        day_number(rt_plot.index.max()),
     )
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
-    zone_row: Legend = _attach_legend(
+    zone_row: Legend = attach_legend(
         fig,
         [
             Line2D([], [], color=zone_colors[zone], linewidth=2)
@@ -1260,7 +1260,7 @@ def make_zone_concentrations_figure(
         title="Zone",
         ncol=max(len(plotted_zones), 1),
     )
-    species_row: Legend = _attach_legend(
+    species_row: Legend = attach_legend(
         fig,
         [
             Line2D(
@@ -1279,7 +1279,7 @@ def make_zone_concentrations_figure(
         above=zone_row,
     )
     fig.subplots_adjust(
-        bottom=_legend_top_edge(fig, species_row) + _axes_gap(fig)
+        bottom=legend_top_edge(fig, species_row) + axes_gap(fig)
     )
 
     return fig
@@ -1363,19 +1363,19 @@ def make_river_concentrations_figure(
     if not streamflow and not species:
         return Figure(figsize=(15, 5))
 
-    rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
-    hydro_plot: pd.DataFrame = _clip_frame(hydro_sim, window)
+    rt_plot: pd.DataFrame = clip_frame(rt_sim, window)
+    hydro_plot: pd.DataFrame = clip_frame(hydro_sim, window)
     q_meas_plot: pd.Series | None = (
-        _clip_series(q_meas, window).dropna() if q_meas is not None else None
+        clip_series(q_meas, window).dropna() if q_meas is not None else None
     )
-    conc_plot: pd.DataFrame = _clip_frame(conc_df, window)
+    conc_plot: pd.DataFrame = clip_frame(conc_df, window)
     overlay_rt_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_rt_sim, window)
+        clip_frame(overlay_rt_sim, window)
         if overlay_rt_sim is not None
         else None
     )
     overlay_hydro_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_hydro_sim, window)
+        clip_frame(overlay_hydro_sim, window)
         if overlay_hydro_sim is not None
         else None
     )
@@ -1400,7 +1400,7 @@ def make_river_concentrations_figure(
                 overlay_hydro_plot.index,
                 overlay_hydro_plot["streamflow_sim"],
                 color=SIM_Q_COLOR,
-                alpha=_OVERLAY_ALPHA,
+                alpha=OVERLAY_ALPHA,
                 linewidth=1,
             )
         left_ax.plot(
@@ -1425,7 +1425,7 @@ def make_river_concentrations_figure(
         left_ax.set_title("Streamflow")
         left_ax.set_ylabel("Discharge (mm/d)")
         left_ax.set_xlim(
-            _day_number(window[0]), _day_number(hydro_plot.index.max())
+            day_number(window[0]), day_number(hydro_plot.index.max())
         )
 
         handles.append(Line2D([], [], color=SIM_Q_COLOR, linewidth=2))
@@ -1458,7 +1458,7 @@ def make_river_concentrations_figure(
                     overlay_rt_plot.index,
                     overlay_rt_plot[overlay_column],
                     color=RIVER_SPECIES_SIM_COLORS[name],
-                    alpha=_OVERLAY_ALPHA,
+                    alpha=OVERLAY_ALPHA,
                     linewidth=1,
                 )
 
@@ -1518,16 +1518,16 @@ def make_river_concentrations_figure(
         species_ax.set_title("River concentrations")
     species_ax.set_ylabel("Concentration (mol/L)")
     species_ax.set_xlim(
-        _day_number(window[0]), _day_number(rt_plot.index.max())
+        day_number(window[0]), day_number(rt_plot.index.max())
     )
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
     if handles:
-        legend: Legend = _attach_legend(
+        legend: Legend = attach_legend(
             fig, handles, labels, ncol=max(len(handles), 1)
         )
         fig.subplots_adjust(
-            bottom=_legend_top_edge(fig, legend) + _axes_gap(fig)
+            bottom=legend_top_edge(fig, legend) + axes_gap(fig)
         )
 
     return fig
@@ -1585,9 +1585,9 @@ def make_rate_figure(
     Returns:
         The completed figure.
     """
-    rt_plot: pd.DataFrame = _clip_frame(rt_sim, window)
+    rt_plot: pd.DataFrame = clip_frame(rt_sim, window)
     overlay_rt_plot: pd.DataFrame | None = (
-        _clip_frame(overlay_rt_sim, window)
+        clip_frame(overlay_rt_sim, window)
         if overlay_rt_sim is not None
         else None
     )
@@ -1614,7 +1614,7 @@ def make_rate_figure(
                     overlay_rt_plot.index,
                     overlay_rt_plot[overlay_column],
                     color=zone_colors[zone],
-                    alpha=_OVERLAY_ALPHA,
+                    alpha=OVERLAY_ALPHA,
                     linewidth=1,
                 )
 
@@ -1629,13 +1629,13 @@ def make_rate_figure(
     ax.set_title(f"Reaction rates ({mineral})")
     ax.set_ylabel("Reaction rate (mol/L/day)")
     ax.set_xlim(
-        _day_number(window[0]),
-        _day_number(rt_plot.index.max()),
+        day_number(window[0]),
+        day_number(rt_plot.index.max()),
     )
     fig.subplots_adjust(left=0.07, right=0.96, top=0.88)
 
     if plot_zones:
-        zone_row: Legend = _attach_legend(
+        zone_row: Legend = attach_legend(
             fig,
             [Line2D([], [], color=zone_colors[zone], linewidth=2) for zone in plot_zones],
             [zone_labels[zone] for zone in plot_zones],
@@ -1643,7 +1643,7 @@ def make_rate_figure(
             ncol=max(len(plot_zones), 1),
         )
         fig.subplots_adjust(
-            bottom=_legend_top_edge(fig, zone_row) + _axes_gap(fig)
+            bottom=legend_top_edge(fig, zone_row) + axes_gap(fig)
         )
 
     return fig

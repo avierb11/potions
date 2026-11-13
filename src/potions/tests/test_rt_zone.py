@@ -12,7 +12,7 @@ from ..reactive_transport.rt_zone import (
 )
 
 
-def _make_zone(dimensions: ZoneDimensions) -> MagicMock:
+def make_zone(dimensions: ZoneDimensions) -> MagicMock:
     """A mock RtZone exposing only the attribute the rt_zone helpers read:
     zone.parameters.dimensions."""
     zone = MagicMock()
@@ -28,10 +28,10 @@ def dimensions() -> ZoneDimensions:
 
 @pytest.fixture
 def zones(dimensions: ZoneDimensions) -> dict:
-    return {"shallow": _make_zone(dimensions)}
+    return {"shallow": make_zone(dimensions)}
 
 
-def _storage_series(values) -> pd.DataFrame:
+def storage_series(values) -> pd.DataFrame:
     return pd.DataFrame({"s_shallow": values})
 
 
@@ -40,7 +40,7 @@ def test_max_water(dimensions: ZoneDimensions) -> None:
 
 
 def test_calculate_moisture_fraction_formula(zones, dimensions) -> None:
-    sim = _storage_series([0.0, 10.0, 14.9])
+    sim = storage_series([0.0, 10.0, 14.9])
     sw = calculate_moisture_fraction(zones, sim)
     assert sw.shape == (1, 3)
     # (s + passive) / (max_water + passive)
@@ -51,18 +51,18 @@ def test_calculate_moisture_fraction_formula(zones, dimensions) -> None:
 def test_moisture_fraction_full_at_max_capacity(zones, dimensions) -> None:
     # As storage approaches the max water volume (15 mm), the fraction approaches 1.
     # (Exactly at max it raises, so use a value just below.)
-    sim = _storage_series([14.99])
+    sim = storage_series([14.99])
     sw = calculate_moisture_fraction(zones, sim)
     assert sw[0, 0] == pytest.approx(1.0, abs=1e-3)
 
 
 def test_moisture_fraction_exceeds_max_raises(zones) -> None:
-    sim = _storage_series([15.1])
+    sim = storage_series([15.1])
     with pytest.raises(WaterVolumeError):
         calculate_moisture_fraction(zones, sim)
 
 
-def _full_simulation(storage_values) -> pd.DataFrame:
+def full_simulation(storage_values) -> pd.DataFrame:
     index = pd.date_range("2000-01-01", periods=len(storage_values))
     sim = pd.DataFrame({"s_shallow": storage_values}, index=index)
     for flux in [
@@ -79,13 +79,13 @@ def _full_simulation(storage_values) -> pd.DataFrame:
 
 
 def test_get_hydro_steps_shape() -> None:
-    sim = _full_simulation([0.0, 10.0, 14.9])
+    sim = full_simulation([0.0, 10.0, 14.9])
     steps = get_hydro_steps(sim)
     assert steps.shape == (1, 3)
 
 
 def test_get_hydro_steps_carries_per_zone_values() -> None:
-    sim = _full_simulation([0.0, 10.0, 14.9])
+    sim = full_simulation([0.0, 10.0, 14.9])
     steps = get_hydro_steps(sim)
     cell = steps[0, 1]
     assert cell.state == pytest.approx(10.0)
@@ -97,7 +97,7 @@ def test_get_hydro_steps_carries_per_zone_values() -> None:
 
 def test_get_hydro_steps_multiple_zones() -> None:
     index = pd.date_range("2000-01-01", periods=2)
-    sim = _full_simulation([0.0, 5.0])
+    sim = full_simulation([0.0, 5.0])
     # Add a second zone's state + flux columns so both zones are discovered.
     for z in ["deep"]:
         sim[f"s_{z}"] = np.array([1.0, 2.0])
@@ -115,7 +115,7 @@ def test_get_hydro_steps_multiple_zones() -> None:
     assert steps.shape == (2, 2)
 
 
-def _misc() -> MiscData:
+def misc() -> MiscData:
     return MiscData(
         mineral_stoichiometry=np.array([[1.0]]),
         species_mobility=np.array([True, False]),
@@ -139,7 +139,7 @@ def test_miscdata_equality_allclose() -> None:
 
 
 def test_miscdata_inequality_on_differing_field() -> None:
-    a = _misc()
+    a = misc()
     c = MiscData(
         np.array([[2.0]]),
         np.array([True, False]),
@@ -151,4 +151,4 @@ def test_miscdata_inequality_on_differing_field() -> None:
 
 def test_miscdata_equality_type_mismatch_raises() -> None:
     with pytest.raises(TypeError):
-        _misc() == "not a micdata"  # type: ignore[comparison-overlap]
+        misc() == "not a micdata"  # type: ignore[comparison-overlap]

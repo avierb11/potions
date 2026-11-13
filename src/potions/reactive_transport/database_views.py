@@ -36,14 +36,14 @@ from ..core import (
 )
 
 
-class _StoichiometricEntry(Protocol):
+class StoichiometricEntry(Protocol):
     """An entry that has a name and a variable-length stoichiometry mapping."""
 
     name: str
     stoichiometry: dict[str, float]
 
 
-def _log10_k(eq_consts: list[float]) -> float:
+def log10_k(eq_consts: list[float]) -> float:
     """
     Return the log10-K value used by the speciation solve.
 
@@ -63,7 +63,7 @@ def _log10_k(eq_consts: list[float]) -> float:
     return float("nan")
 
 
-def _stoich_rows(entries: Sequence[_StoichiometricEntry]) -> list[tuple[str, str, float]]:
+def stoich_rows(entries: Sequence[StoichiometricEntry]) -> list[tuple[str, str, float]]:
     """
     Melt the stoichiometry mappings of the entries into long-format rows.
 
@@ -134,7 +134,7 @@ def secondary_species_df(db: ChemicalDatabase) -> pd.DataFrame:
             "molar_mass": [s.molar_mass for s in species],
             "charge": [s.charge for s in species],
             "dh_size_param": [s.dh_size_param for s in species],
-            "log10_k_eq": [_log10_k(c) for c in eq_consts],
+            "log10_k_eq": [log10_k(c) for c in eq_consts],
             "eq_consts": eq_consts,
         },
         index=pd.Index([s.name for s in species], name="name"),
@@ -158,7 +158,7 @@ def secondary_stoich_df(db: ChemicalDatabase) -> pd.DataFrame:
         db.get_secondary_species_names()
     )
     return pd.DataFrame(
-        _stoich_rows(species), columns=["species", "component", "stoich"]
+        stoich_rows(species), columns=["species", "component", "stoich"]
     )
 
 
@@ -186,7 +186,7 @@ def mineral_species_df(db: ChemicalDatabase) -> pd.DataFrame:
         {
             "molar_mass": [s.molar_mass for s in species],
             "molar_volume": [s.molar_volume for s in species],
-            "log10_k_eq": [_log10_k(c) for c in eq_consts],
+            "log10_k_eq": [log10_k(c) for c in eq_consts],
             "eq_consts": eq_consts,
         },
         index=pd.Index([s.name for s in species], name="name"),
@@ -210,7 +210,7 @@ def mineral_stoich_df(db: ChemicalDatabase) -> pd.DataFrame:
         db.get_mineral_species_names()
     )
     return pd.DataFrame(
-        _stoich_rows(species), columns=["mineral", "component", "stoich"]
+        stoich_rows(species), columns=["mineral", "component", "stoich"]
     )
 
 
@@ -255,7 +255,7 @@ def exchange_stoich_df(db: ChemicalDatabase) -> pd.DataFrame:
         db.get_exchange_species_names()
     )
     return pd.DataFrame(
-        _stoich_rows(reactions),
+        stoich_rows(reactions),
         columns=["exchange_species", "component", "stoich"],
     )
 

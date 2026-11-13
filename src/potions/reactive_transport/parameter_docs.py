@@ -62,15 +62,15 @@ PARAMETER_DOCS: dict[str, dict[str, str]] = {
 
 # Dimension ordering differs between RT and river zones; each tuple lists the
 # dimension fields in the order they should be reported for that zone kind.
-_DIMENSION_ORDER = {
+DIMENSION_ORDER = {
     "rt": ("max_water", "passive_water_storage"),
     "river": ("bed_depth", "passive_water_storage"),
 }
 
-_MINERAL_FIELDS = ("sw_threshold", "sw_exp", "q_10", "k_a")
+MINERAL_FIELDS = ("sw_threshold", "sw_exp", "q_10", "k_a")
 
 
-def _fmt(value: object) -> str:
+def fmt(value: object) -> str:
     """Render a scalar parameter value the way ``structure_diagram`` does."""
     if isinstance(value, bool):
         return str(value)
@@ -79,7 +79,7 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def _mineral_arrays(mineral_params) -> dict[str, list]:
+def mineral_arrays(mineral_params) -> dict[str, list]:
     """Pull the four per-mineral arrays out of a ``MineralParameters``."""
     return {
         field: list(getattr(mineral_params, getter)())
@@ -92,13 +92,13 @@ def _mineral_arrays(mineral_params) -> dict[str, list]:
     }
 
 
-def _row(zone_name: str, name: str, value: object) -> dict:
+def row(zone_name: str, name: str, value: object) -> dict:
     """Build a single parameter row, falling back to empty unit/description."""
     meta = PARAMETER_DOCS.get(name, {})
     return {
         "zone": zone_name,
         "name": name,
-        "value": _fmt(value),
+        "value": fmt(value),
         "unit": meta.get("unit", ""),
         "description": meta.get("description", ""),
     }
@@ -114,20 +114,20 @@ def rt_zone_rows(zone) -> list[dict]:
     rows: list[dict] = []
 
     dimensions = zone.dimensions
-    for field in _DIMENSION_ORDER["rt"]:
-        rows.append(_row(zone_name, field, getattr(dimensions, field)))
+    for field in DIMENSION_ORDER["rt"]:
+        rows.append(row(zone_name, field, getattr(dimensions, field)))
 
     if zone.do_reactions:
         mineral_params = zone.parameters.mineral_params
         if mineral_params is not None:
-            arrays = _mineral_arrays(mineral_params)
+            arrays = mineral_arrays(mineral_params)
             num_minerals = len(arrays["k_a"])
             species_names = list(zone.mineral_species)
             for i in range(num_minerals):
                 label = species_names[i] if i < len(species_names) else f"Mineral {i}"
-                for field in _MINERAL_FIELDS:
+                for field in MINERAL_FIELDS:
                     name = f"{label}.{field}"
-                    rows.append(_row(zone_name, name, arrays[field][i]))
+                    rows.append(row(zone_name, name, arrays[field][i]))
 
     return rows
 
@@ -138,20 +138,20 @@ def river_zone_rows(zone) -> list[dict]:
     rows: list[dict] = []
 
     dimensions = zone.dimensions
-    for field in _DIMENSION_ORDER["river"]:
-        rows.append(_row(zone_name, field, getattr(dimensions, field)))
+    for field in DIMENSION_ORDER["river"]:
+        rows.append(row(zone_name, field, getattr(dimensions, field)))
 
     if zone.do_reactions:
         mineral_params = zone.parameters.mineral_params
         if mineral_params is not None:
-            arrays = _mineral_arrays(mineral_params)
+            arrays = mineral_arrays(mineral_params)
             num_minerals = len(arrays["k_a"])
             species_names = list(zone.mineral_species)
             for i in range(num_minerals):
                 label = species_names[i] if i < len(species_names) else f"Mineral {i}"
-                for field in _MINERAL_FIELDS:
+                for field in MINERAL_FIELDS:
                     name = f"{label}.{field}"
-                    rows.append(_row(zone_name, name, arrays[field][i]))
+                    rows.append(row(zone_name, name, arrays[field][i]))
 
     return rows
 
@@ -200,5 +200,5 @@ def zone_parameter_rows(
     if kind == "hydro":
         if names is None or values is None:
             raise ValueError("Hydro rows require both `names` and `values`")
-        return [_row(zone.name, n, v) for n, v in zip(names, values, strict=False)]
+        return [row(zone.name, n, v) for n, v in zip(names, values, strict=False)]
     raise ValueError(f"Unknown zone kind: {kind!r}")

@@ -46,7 +46,7 @@ def network() -> ReactionNetwork:
     return get_carbon_network()
 
 
-def _make_rt_zones(network: ReactionNetwork) -> dict[str, RtZone]:
+def make_rt_zones(network: ReactionNetwork) -> dict[str, RtZone]:
     """One reactive-transport zone per zone of ``ThreeLayerModel``."""
     mp = MineralParameters(
         np.array([0.1]), np.array([2.0]), np.array([1.5]), np.array([10.0])
@@ -77,7 +77,7 @@ def _make_rt_zones(network: ReactionNetwork) -> dict[str, RtZone]:
     }
 
 
-def _make_model(
+def make_model(
     network: ReactionNetwork,
     derived_species: list[DerivedSpecies] | None,
 ) -> ThreeLayerModel:
@@ -85,7 +85,7 @@ def _make_model(
     return ThreeLayerModel(
         scales=[1.0],
         network=network,
-        rt_zones=_make_rt_zones(network),
+        rt_zones=make_rt_zones(network),
         derived_species=derived_species,
     )
 
@@ -95,7 +95,7 @@ def dates() -> pd.DatetimeIndex:
     return pd.date_range("2020-01-01", periods=20, freq="D")
 
 
-def _make_forcing(dates: pd.DatetimeIndex) -> ForcingData:
+def make_forcing(dates: pd.DatetimeIndex) -> ForcingData:
     n: int = len(dates)
     return ForcingData(
         precip=pd.Series(np.linspace(0.1, 2.0, n), index=dates),
@@ -104,7 +104,7 @@ def _make_forcing(dates: pd.DatetimeIndex) -> ForcingData:
     )
 
 
-def _make_init_states(network: ReactionNetwork) -> dict[str, ChemicalState]:
+def make_init_states(network: ReactionNetwork) -> dict[str, ChemicalState]:
     """A finite, mineral-bearing initial state for every zone."""
     return {
         "snow": ChemicalState(),
@@ -131,7 +131,7 @@ def _make_init_states(network: ReactionNetwork) -> dict[str, ChemicalState]:
     }
 
 
-def _make_precip_conc(
+def make_precip_conc(
     network: ReactionNetwork, num_steps: int
 ) -> np.ndarray:
     return np.full(
@@ -139,7 +139,7 @@ def _make_precip_conc(
     )
 
 
-def _make_meas_river_conc(
+def make_meas_river_conc(
     dates: pd.DatetimeIndex,
 ) -> pd.DataFrame:
     n: int = len(dates)
@@ -154,7 +154,7 @@ def _make_meas_river_conc(
 
 @pytest.fixture(scope="module")
 def model(network: ReactionNetwork) -> ThreeLayerModel:
-    return _make_model(
+    return make_model(
         network, [DerivedSpecies(name="DIC", components=DIC_COMPONENTS)]
     )
 
@@ -165,14 +165,14 @@ def results(
     network: ReactionNetwork,
     dates: pd.DatetimeIndex,
 ) -> ModelResults:
-    meas = _make_meas_river_conc(dates)
+    meas = make_meas_river_conc(dates)
     # Mark a missing measurement: the model excludes it pairwise, exactly as
     # it does for any other measured river concentration.
     meas.loc[dates[3], "DIC"] = np.nan
     return model.run_both_models(
-        forc=_make_forcing(dates),
-        precip_conc=_make_precip_conc(network, len(dates)),
-        init_conc=_make_init_states(network),
+        forc=make_forcing(dates),
+        precip_conc=make_precip_conc(network, len(dates)),
+        init_conc=make_init_states(network),
         meas_river_conc=meas,
         save_results=False,
     )
@@ -199,7 +199,7 @@ def test_derived_measurement_is_scored(
     assert obj is not None
     assert "DIC" in obj.index
 
-    meas = _make_meas_river_conc(dates)
+    meas = make_meas_river_conc(dates)
     meas.loc[dates[3], "DIC"] = np.nan
     expected = np.array(
         [
@@ -232,9 +232,9 @@ def test_unknown_measurement_column_raises(
         match="neither species of the reaction network",
     ):
         model.run_both_models(
-            forc=_make_forcing(dates),
-            precip_conc=_make_precip_conc(network, len(dates)),
-            init_conc=_make_init_states(network),
+            forc=make_forcing(dates),
+            precip_conc=make_precip_conc(network, len(dates)),
+            init_conc=make_init_states(network),
             meas_river_conc=meas,
             save_results=False,
         )
@@ -245,7 +245,7 @@ def test_network_species_name_collision_raises(
     network: ReactionNetwork,
 ) -> None:
     with pytest.raises(ValueError, match="already a species"):
-        _make_model(
+        make_model(
             network, [DerivedSpecies(name="DOC", components=DIC_COMPONENTS)]
         )
 
@@ -253,26 +253,26 @@ def test_network_species_name_collision_raises(
 def test_duplicate_derived_name_raises(network: ReactionNetwork) -> None:
     derived = [DerivedSpecies(name="DIC", components=DIC_COMPONENTS)]
     with pytest.raises(ValueError, match="declared more than once"):
-        _make_model(network, [*derived, *derived])
+        make_model(network, [*derived, *derived])
 
 
 def test_derived_without_components_raises(
     network: ReactionNetwork,
 ) -> None:
     with pytest.raises(ValueError, match="has no component species"):
-        _make_model(network, [DerivedSpecies(name="DIC", components=())])
+        make_model(network, [DerivedSpecies(name="DIC", components=())])
 
 
 def test_non_network_component_raises(network: ReactionNetwork) -> None:
     with pytest.raises(ValueError, match="not a species of the reaction"):
-        _make_model(
+        make_model(
             network, [DerivedSpecies(name="DIC", components=("CH4",))]
         )
 
 
 def test_non_aqueous_component_raises(network: ReactionNetwork) -> None:
     with pytest.raises(ValueError, match="must be aqueous"):
-        _make_model(
+        make_model(
             network, [DerivedSpecies(name="DIC", components=("SOC(s)",))]
         )
 

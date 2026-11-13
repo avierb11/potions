@@ -63,7 +63,7 @@ OUTPUT_COLUMNS_PER_ZONE: Final[int] = (
 # =================== #
 
 
-def _run_model(
+def run_model(
     cls: type[Model],
     i: int,
     params: Series,
@@ -277,7 +277,7 @@ class Model(ReactiveTransportModel):
             )
 
         with Pool(num_threads) as pool:
-            results = pool.starmap(_run_model, args)  # type: ignore
+            results = pool.starmap(run_model, args)  # type: ignore
 
         ok_runs: list[tuple[int, HydroModelResults]] = [
             (idx, res) for idx, res in results if res is not None

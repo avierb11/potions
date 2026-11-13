@@ -8,7 +8,7 @@ matrix, or the gradient computed by the same forward differences
 as the *Gradients* job) defines the straight ascent line
 ``x + t * direction``, and this module adapts that line's geometry
 to the shared wave-search engine in `potions.line_search`.  The
-window describes its parameters as `_Perturbation` steps and a
+window describes its parameters as `Perturbation` steps and a
 bounds mapping; the engine works in raw vector positions and bound
 pairs, so each helper here translates the window's description and
 delegates the arithmetic: turning a free-space direction row into
@@ -29,7 +29,7 @@ import pandas as pd
 from potions.result_saving import DEFAULT_RESULTS_DIR
 
 from .. import line_search as engine
-from .gradients import _Perturbation
+from .gradients import Perturbation
 
 search_t_points = engine.search_t_points
 
@@ -37,7 +37,7 @@ search_t_points = engine.search_t_points
 def feasible_t_interval(
     x: np.ndarray,
     direction: np.ndarray,
-    steps: list[_Perturbation],
+    steps: list[Perturbation],
     bounds: dict[str, tuple[float, float]],
 ) -> tuple[float, float] | None:
     """
@@ -74,7 +74,7 @@ def feasible_t_interval(
 def project_direction(
     x: np.ndarray,
     direction: np.ndarray,
-    steps: list[_Perturbation],
+    steps: list[Perturbation],
     bounds: dict[str, tuple[float, float]],
 ) -> np.ndarray:
     """
@@ -115,7 +115,7 @@ def project_direction(
 
 def expand_direction(
     row: np.ndarray,
-    steps: list[_Perturbation],
+    steps: list[Perturbation],
     bounds: dict[str, tuple[float, float]],
 ) -> np.ndarray:
     """

@@ -462,7 +462,7 @@ class TestTrimRecord:
 # ------------------------------------------------------------------ #
 
 
-def _forcing_frame(
+def forcing_frame(
     index: pd.DatetimeIndex, with_streamflow: bool = True
 ) -> pd.DataFrame:
     """A complete daily forcing frame for the record tests (ISO date
@@ -507,7 +507,7 @@ class TestReadRecord:
         index: pd.DatetimeIndex = pd.date_range(
             "2019-01-01", periods=300, freq="D"
         )
-        _forcing_frame(index).to_csv(path, index=False)
+        forcing_frame(index).to_csv(path, index=False)
         data: gui_data.GuiInputData = gui_data.load_input_data(path)
         assert len(data.forc.precip) == 450
         assert data.q_meas is not None
@@ -528,7 +528,7 @@ class TestReadRecord:
         index: pd.DatetimeIndex = pd.date_range(
             "2019-01-01", periods=100, freq="D"
         )
-        _forcing_frame(index).to_csv(path, index=False)
+        forcing_frame(index).to_csv(path, index=False)
         data: gui_data.GuiInputData = gui_data.load_input_data(
             path, spinup_days=10
         )
@@ -541,7 +541,7 @@ class TestReadRecord:
         index: pd.DatetimeIndex = pd.date_range(
             "2019-01-01", periods=30, freq="D"
         )
-        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
         data: gui_data.GuiInputData = gui_data.load_input_data(path)
         assert data.q_meas is None
         assert not data.forc.precip.isna().any()
@@ -555,7 +555,7 @@ class TestReadRecord:
         index: pd.DatetimeIndex = pd.date_range(
             "2019-01-01", periods=30, freq="D"
         )
-        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
         data: gui_data.GuiInputData = gui_data.load_input_data(path)
         assert list(data.conc_df.columns) == []
         assert data.conc_df.index.equals(data.forc.precip.index)
@@ -575,7 +575,7 @@ class TestReadRecord:
         index errors occur."""
         path: Path = tmp_path / "one_day.csv"
         index: pd.DatetimeIndex = pd.date_range("2019-06-15", periods=1)
-        _forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
+        forcing_frame(index, with_streamflow=False).to_csv(path, index=False)
         data: gui_data.GuiInputData = gui_data.load_input_data(path)
         assert len(data.forc.precip) == 1
         assert data.window == (
@@ -589,7 +589,7 @@ class TestReadRecord:
         loads (and its short span caps the spin-up to half)."""
         path: Path = tmp_path / "mapped.xlsx"
         index: pd.DatetimeIndex = pd.date_range("2019-01-01", periods=10)
-        frame: pd.DataFrame = _forcing_frame(index, with_streamflow=False)
+        frame: pd.DataFrame = forcing_frame(index, with_streamflow=False)
         frame.rename(
             columns={
                 "date": "day",
@@ -616,7 +616,7 @@ class TestReadRecord:
 # ------------------------------------------------------------------ #
 
 
-def _midpoint_vector(input_data: gui_data.GuiInputData) -> np.ndarray:
+def midpoint_vector(input_data: gui_data.GuiInputData) -> np.ndarray:
     """The parameter vector at every bound's midpoint."""
     return np.array(
         [0.5 * (lo + hi) for lo, hi in input_data.bounds.values()]
@@ -638,7 +638,7 @@ class TestNoneSafeRunBuilders:
         ``None`` (Review Focus 2)."""
         index: pd.DatetimeIndex = pd.date_range("2019-01-01", periods=10)
         path: Path = tmp_path / "forcing_only.csv"
-        _forcing_frame(index, with_streamflow=False).to_csv(
+        forcing_frame(index, with_streamflow=False).to_csv(
             path, index=False
         )
         input_data: gui_data.GuiInputData = gui_data.load_input_data(path)
@@ -664,8 +664,8 @@ class TestNoneSafeRunBuilders:
             HydrologicalModel, "run_hydro_model", fake_run_hydro_model
         )
 
-        gui_data.arr_to_results(_midpoint_vector(input_data), input_data)
-        gui_data.arr_to_hydro_results(_midpoint_vector(input_data), input_data)
+        gui_data.arr_to_results(midpoint_vector(input_data), input_data)
+        gui_data.arr_to_hydro_results(midpoint_vector(input_data), input_data)
 
         assert len(seen_both) == 1
         assert seen_both[0]["meas_streamflow"] is None
@@ -692,7 +692,7 @@ class TestNoneSafeRunBuilders:
 
         monkeypatch.setattr(Model, "run_both_models", fake_run_both_models)
 
-        gui_data.arr_to_results(_midpoint_vector(input_data), input_data)
+        gui_data.arr_to_results(midpoint_vector(input_data), input_data)
 
         assert len(seen) == 1
         assert seen[0]["meas_streamflow"] is input_data.q_meas
@@ -747,7 +747,7 @@ class TestWorkerPoolPlumbing:
         the worker's initializer: the mapped streamflow column
         becomes ``q_meas`` (NaN over the capped spin-up)."""
         index: pd.DatetimeIndex = pd.date_range("2020-01-01", periods=10)
-        frame: pd.DataFrame = _forcing_frame(index, with_streamflow=True)
+        frame: pd.DataFrame = forcing_frame(index, with_streamflow=True)
         frame.rename(
             columns={
                 "date": "day",
@@ -772,8 +772,8 @@ class TestWorkerPoolPlumbing:
                 model_specs.DEFAULT_MODEL_KEY,
                 column_map=mapping,
             )
-            assert proc_pool._INIT_ERROR is None
-            loaded: gui_data.GuiInputData | None = proc_pool._INPUT_DATA
+            assert proc_pool.INIT_ERROR is None
+            loaded: gui_data.GuiInputData | None = proc_pool.INPUT_DATA
             assert loaded is not None
             q_meas: pd.Series | None = loaded.q_meas
             assert q_meas is not None
@@ -784,8 +784,8 @@ class TestWorkerPoolPlumbing:
             assert list(q_meas.iloc[5:]) == list(range(10))
         finally:
             # In-process init leaves the module globals set.
-            proc_pool._INPUT_DATA = None
-            proc_pool._INIT_ERROR = None
+            proc_pool.INPUT_DATA = None
+            proc_pool.INIT_ERROR = None
 
     def test_init_worker_bad_map_reports(self, tmp_path: Path) -> None:
         """A map that points a role at a missing column does not
@@ -793,7 +793,7 @@ class TestWorkerPoolPlumbing:
         holds, and no input data is loaded."""
         index: pd.DatetimeIndex = pd.date_range("2020-01-01", periods=10)
         path: Path = tmp_path / "bad_map.csv"
-        _forcing_frame(index, with_streamflow=True).to_csv(
+        forcing_frame(index, with_streamflow=True).to_csv(
             path, index=False
         )
 
@@ -805,12 +805,12 @@ class TestWorkerPoolPlumbing:
                 model_specs.DEFAULT_MODEL_KEY,
                 column_map={"q_meas": "nope"},
             )
-            assert proc_pool._INPUT_DATA is None
-            captured_error = proc_pool._INIT_ERROR
+            assert proc_pool.INPUT_DATA is None
+            captured_error = proc_pool.INIT_ERROR
         finally:
             # In-process init leaves the module globals set.
-            proc_pool._INPUT_DATA = None
-            proc_pool._INIT_ERROR = None
+            proc_pool.INPUT_DATA = None
+            proc_pool.INIT_ERROR = None
         assert captured_error is not None
         assert captured_error.startswith(
             "ValueError: The column map points the role 'q_meas' at "
@@ -823,7 +823,7 @@ class TestWorkerPoolPlumbing:
         unchanged by the mapping parameter (the ~0.3 s cost is the
         pool's one record re-parse plus one hydro run)."""
         input_data: gui_data.GuiInputData = gui_data.load_input_data()
-        point: np.ndarray = _midpoint_vector(input_data)
+        point: np.ndarray = midpoint_vector(input_data)
         runs: list[gui_data.GuiRunResults | str] = model_pool.map_model_runs(
             [point],
             gui_state.MODE_HYDRO,

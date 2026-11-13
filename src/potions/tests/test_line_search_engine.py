@@ -5,7 +5,7 @@ The engine is tested as a pure-numerical component: a surrogate
 `evaluate` replaces the model runs, so every test is fast, deterministic,
 and independent of Qt, multiprocessing, and the model.  Each surrogate is
 a module-level function (the shape the real pool pickles), and the
-`_Surrogate` wrapper records every point the engine handed to
+`Surrogate` wrapper records every point the engine handed to
 `evaluate`, which lets the tests pin the engine's contracts: batched
 evaluation, no point ever evaluated twice, and each `stopped_by`
 condition reachable.
@@ -35,7 +35,7 @@ from ..line_search import (
 # ------------------------------------------------------------------ #
 
 
-class _Surrogate:
+class Surrogate:
     """
     A surrogate objective that records every point `evaluate` received.
 
@@ -58,41 +58,41 @@ class _Surrogate:
         return [self._value_of(point) for point in arrays]
 
 
-def _peak_at_04(point: np.ndarray) -> float:
+def peak_at_04(point: np.ndarray) -> float:
     """The 1-D bump `-(t - 0.4)^2 + 1` read straight off the point."""
     t: float = float(point[0])
     return -(t - 0.4) ** 2 + 1.0
 
 
-def _bump_at_045(point: np.ndarray) -> float:
+def bump_at_045(point: np.ndarray) -> float:
     """The 1-D quadratic bump `1 - (t - 0.45)^2` (peak off-center)."""
     t: float = float(point[0])
     return 1.0 - (t - 0.45) ** 2
 
 
-def _valley_at_04(point: np.ndarray) -> float:
+def valley_at_04(point: np.ndarray) -> float:
     """The 1-D valley `(t - 0.4)^2` — the inverted bump, for minimize."""
     t: float = float(point[0])
     return (t - 0.4) ** 2
 
 
-def _quadratic_2d(point: np.ndarray) -> float:
+def quadratic_2d(point: np.ndarray) -> float:
     """`-(x0 - 1)^2 - (x1 - 2)^2`, the test-2 gradient surrogate."""
     return -(float(point[0]) - 1.0) ** 2 - (float(point[1]) - 2.0) ** 2
 
 
-def _flat(point: np.ndarray) -> float:
+def flat(point: np.ndarray) -> float:
     """A constant: nothing a wave evaluates can improve on the base."""
     return 1.0
 
 
-def _sharp_quartic_at_045(point: np.ndarray) -> float:
+def sharp_quartic_at_045(point: np.ndarray) -> float:
     """A sharp quartic peak: `1 - 40 (t - 0.45)^4`."""
     t: float = float(point[0])
     return 1.0 - 40.0 * (t - 0.45) ** 4
 
 
-def _two_finite(point: np.ndarray) -> float:
+def two_finite(point: np.ndarray) -> float:
     """Finite only at t = 0 and t = -1; NaN everywhere else."""
     t: float = float(point[0])
     if abs(t) <= 1e-12:
@@ -102,7 +102,7 @@ def _two_finite(point: np.ndarray) -> float:
     return float("nan")
 
 
-def _keys_of(points: Sequence[np.ndarray]) -> list[tuple[float, ...]]:
+def keys_of(points: Sequence[np.ndarray]) -> list[tuple[float, ...]]:
     """The point keys of a batch record, for the no-duplicates asserts."""
     return [point_key(point) for point in points]
 
@@ -142,7 +142,7 @@ class TestForwardGradient:
         base and zero-step offsets never enter a batch, and every new
         point is evaluated exactly once in a single batch.
         """
-        surrogate = _Surrogate(_quadratic_2d)
+        surrogate = Surrogate(quadratic_2d)
         base: np.ndarray = np.array([0.5, 3.0])
         offsets: list[np.ndarray] = [
             np.array([0.01, 0.0]),
@@ -151,7 +151,7 @@ class TestForwardGradient:
         ]
         positions: list[int] = [0, 1, 0]
         initial: dict[tuple[float, ...], float] = {
-            point_key(base): _quadratic_2d(base)
+            point_key(base): quadratic_2d(base)
         }
 
         gradient: np.ndarray = forward_gradient(
@@ -168,8 +168,8 @@ class TestForwardGradient:
         # from the memo and the zero offset was never evaluated.
         assert len(surrogate.batches) == 1
         assert len(surrogate.points) == 2
-        assert len(set(_keys_of(surrogate.points))) == 2
-        assert point_key(base) not in _keys_of(surrogate.points)
+        assert len(set(keys_of(surrogate.points))) == 2
+        assert point_key(base) not in keys_of(surrogate.points)
 
 
 class TestWaveSearch:
@@ -177,7 +177,7 @@ class TestWaveSearch:
 
     def test_wave_search_finds_interior_maximum(self) -> None:
         """The schedule homes in on a bump's peak strictly inside the interval."""
-        surrogate = _Surrogate(_peak_at_04)
+        surrogate = Surrogate(peak_at_04)
         result: LineSearchResult = wave_search(
             surrogate.evaluate,
             np.array([0.0]),
@@ -195,12 +195,12 @@ class TestWaveSearch:
         # Values stay aligned with the steps: every recorded value is the
         # surrogate evaluated at its own step.
         for t, value in zip(result.t_points, result.values):
-            assert value == pytest.approx(_peak_at_04(np.array([t])))
+            assert value == pytest.approx(peak_at_04(np.array([t])))
         assert result.evaluations <= 16
 
     def test_wave_search_stops_on_improvement_bar(self) -> None:
         """A flat plateau stops the schedule before the second wave runs."""
-        surrogate = _Surrogate(_flat)
+        surrogate = Surrogate(flat)
         result: LineSearchResult = wave_search(
             surrogate.evaluate,
             np.array([0.0]),
@@ -219,7 +219,7 @@ class TestWaveSearch:
         bar: the schedule stops by "bracket" before the third wave, and
         the best step lies inside the bracket it collapsed from.
         """
-        surrogate = _Surrogate(_sharp_quartic_at_045)
+        surrogate = Surrogate(sharp_quartic_at_045)
         base: np.ndarray = np.array([0.0])
         config = LineSearchConfig(bracket_width_fraction=0.25)
         result: LineSearchResult = wave_search(
@@ -229,7 +229,7 @@ class TestWaveSearch:
             -1.0,
             1.0,
             config,
-            {point_key(base): _sharp_quartic_at_045(base)},
+            {point_key(base): sharp_quartic_at_045(base)},
         )
         assert result.stopped_by == "bracket"
         # The wave-1 grid peaks near t = 0.333, so its best three span
@@ -242,7 +242,7 @@ class TestWaveSearch:
         With only two finite values the parabola has nothing to fit:
         the search stops by "parabola" at the grid and keeps the NaNs.
         """
-        surrogate = _Surrogate(_two_finite)
+        surrogate = Surrogate(two_finite)
         result: LineSearchResult = wave_search(
             surrogate.evaluate,
             np.array([0.0]),
@@ -260,7 +260,7 @@ class TestWaveSearch:
 
     def test_wave_search_budget(self) -> None:
         """A surrogate that never trips a bar runs the schedule inside the budget."""
-        surrogate = _Surrogate(_bump_at_045)
+        surrogate = Surrogate(bump_at_045)
         config = LineSearchConfig()
         result: LineSearchResult = wave_search(
             surrogate.evaluate,
@@ -277,7 +277,7 @@ class TestWaveSearch:
 
     def test_wave_search_minimize_flag(self) -> None:
         """With minimize=True the engine reports the minimum raw value."""
-        surrogate = _Surrogate(_valley_at_04)
+        surrogate = Surrogate(valley_at_04)
         result: LineSearchResult = wave_search(
             surrogate.evaluate,
             np.array([0.0]),
@@ -295,7 +295,7 @@ class TestWaveSearch:
 
     def test_dedup_never_reevaluates(self) -> None:
         """Waves that re-hit earlier grid points never hand a point to evaluate twice."""
-        surrogate = _Surrogate(_bump_at_045)
+        surrogate = Surrogate(bump_at_045)
         wave_search(
             surrogate.evaluate,
             np.array([0.0]),
@@ -305,7 +305,7 @@ class TestWaveSearch:
             LineSearchConfig(),
             {},
         )
-        keys: list[tuple[float, ...]] = _keys_of(surrogate.points)
+        keys: list[tuple[float, ...]] = keys_of(surrogate.points)
         assert len(keys) == len(set(keys))
 
 

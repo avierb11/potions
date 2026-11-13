@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .model import Model
 
 
-def _run_twice(f: Callable[[NDArray], float], x1: NDArray, x2: NDArray) -> tuple[float, float]:
+def run_twice(f: Callable[[NDArray], float], x1: NDArray, x2: NDArray) -> tuple[float, float]:
     return (f(x1), f(x2))
 
 
@@ -72,7 +72,7 @@ def parallel_numerical_gradient(
         num_threads = os.cpu_count()
 
     with Pool(num_threads) as pool:
-        res: list[tuple[float, float]] = pool.starmap(_run_twice, args)
+        res: list[tuple[float, float]] = pool.starmap(run_twice, args)
 
     fx_dn: NDArray = np.array([x[0] for x in res])
     fx_up: NDArray = np.array([x[1] for x in res])
@@ -82,7 +82,7 @@ def parallel_numerical_gradient(
 
 #: Mineral auxiliary-parameter fields, in the order used by
 #: :meth:`~potions.core.MineralParameters.from_array`.
-_MINERAL_FIELDS: tuple[str, str, str, str] = (
+MINERAL_FIELDS: tuple[str, str, str, str] = (
     "sw_threshold",
     "sw_exp",
     "q_10",
@@ -92,7 +92,7 @@ _MINERAL_FIELDS: tuple[str, str, str, str] = (
 #: Default (min, max) bounds for the mineral auxiliary parameters of zones
 #: whose reaction rate depends on soil moisture and temperature (surface
 #: zones; the river zone reuses these same free bounds).
-_SURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
+SURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
     "sw_threshold": (0.0, 1.0),
     "sw_exp": (0.5, 2.5),
     "q_10": (1.0, 5.0),
@@ -102,7 +102,7 @@ _SURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
 #: Degenerate bounds for subsurface zones: the soil-moisture and
 #: temperature dependencies are fixed (no dependence), so only ``k_a``
 #: varies.
-_SUBSURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
+SUBSURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
     "sw_threshold": (0.0, 0.0),
     "sw_exp": (0.0, 0.0),
     "q_10": (1.0, 1.0),
@@ -110,7 +110,7 @@ _SUBSURFACE_MINERAL_BOUNDS: dict[str, tuple[float, float]] = {
 }
 
 
-def _mineral_bounds_for_zone(
+def mineral_bounds_for_zone(
     model_type: type["Model"],
     zone_name: str,
 ) -> dict[str, tuple[float, float]]:
@@ -119,8 +119,8 @@ def _mineral_bounds_for_zone(
     Zones whose class is a subclass of :class:`SubsurfaceZone` or
     :class:`SubsurfaceZoneB` have no soil-moisture or temperature
     dependence and receive the degenerate bounds from
-    :data:`_SUBSURFACE_MINERAL_BOUNDS`; every other zone class receives the
-    free bounds from :data:`_SURFACE_MINERAL_BOUNDS`.
+    :data:`SUBSURFACE_MINERAL_BOUNDS`; every other zone class receives the
+    free bounds from :data:`SURFACE_MINERAL_BOUNDS`.
 
     Args:
         model_type: The model class that declares the zone structure.
@@ -136,8 +136,8 @@ def _mineral_bounds_for_zone(
     """
     zone_class: type = model_type.get_zone_type(zone_name)
     if issubclass(zone_class, (SubsurfaceZone, SubsurfaceZoneB)):
-        return _SUBSURFACE_MINERAL_BOUNDS
-    return _SURFACE_MINERAL_BOUNDS
+        return SUBSURFACE_MINERAL_BOUNDS
+    return SURFACE_MINERAL_BOUNDS
 
 
 def default_rt_parameter_ranges(
@@ -153,7 +153,7 @@ def default_rt_parameter_ranges(
     ``passive_water_storage`` of ``(0, 0)``, and -- when the zone performs
     reactions -- one bound per mineral (counted from
     ``network.num_minerals``) and per auxiliary field in
-    :data:`_MINERAL_FIELDS`. Subsurface zones (subclasses of
+    :data:`MINERAL_FIELDS`. Subsurface zones (subclasses of
     :class:`SubsurfaceZone` / :class:`SubsurfaceZoneB`) use degenerate
     bounds that fix the soil-moisture and temperature dependencies, so
     only ``k_a`` varies; all other zones use free bounds.
@@ -182,11 +182,11 @@ def default_rt_parameter_ranges(
         bounds[f"{zone_name}.passive_water_storage"] = (0.0, 0.0)
 
         if cfg.do_reactions:
-            field_bounds: dict[str, tuple[float, float]] = _mineral_bounds_for_zone(
+            field_bounds: dict[str, tuple[float, float]] = mineral_bounds_for_zone(
                 model_type, zone_name
             )
             for mineral_id in range(num_minerals):
-                for field_name in _MINERAL_FIELDS:
+                for field_name in MINERAL_FIELDS:
                     bounds[f"{zone_name}.{field_name}[{mineral_id}]"] = field_bounds[field_name]
 
     # River zone (parameters go at end of array, per `from_array`)
@@ -196,8 +196,8 @@ def default_rt_parameter_ranges(
         bounds["river.passive_water_storage"] = (0.0, 0.0)
         if river_cfg.do_reactions:
             for mineral_id in range(num_minerals):
-                for field_name in _MINERAL_FIELDS:
-                    bounds[f"river.{field_name}[{mineral_id}]"] = _SURFACE_MINERAL_BOUNDS[
+                for field_name in MINERAL_FIELDS:
+                    bounds[f"river.{field_name}[{mineral_id}]"] = SURFACE_MINERAL_BOUNDS[
                         field_name
                     ]
 
@@ -233,7 +233,7 @@ def build_rt_bounds(
     return bounds
 
 
-def _build_init_states(data: RtCalibrationData) -> dict[str, ChemicalState]:
+def build_init_states(data: RtCalibrationData) -> dict[str, ChemicalState]:
     """Build the initial chemical state for every non-river zone."""
     init_states: dict[str, ChemicalState] = {}
     mean_target: float = (
@@ -280,7 +280,7 @@ def arr_to_results(arr: NDArray, data: RtCalibrationData) -> ModelResults:
         ModelResults: The complete simulation outcome.
     """
     model: Model = data.model_type.from_array(arr, data.network, data.zone_configs)  # type: ignore[arg-type]
-    init_states: dict[str, ChemicalState] = _build_init_states(data)
+    init_states: dict[str, ChemicalState] = build_init_states(data)
 
     return model.run_both_models(
         forc=data.forc,
@@ -366,7 +366,7 @@ def make_objective(
 ) -> RtObjective:
     """Return a picklable ``arr -> float`` objective suitable for
     :func:`scipy.optimize.differential_evolution` and for
-    :func:`_map_objectives`' forkserver pool.
+    :func:`map_objectives`' forkserver pool.
 
     Args:
         data: The calibration data object.
@@ -441,21 +441,21 @@ def calibrate(
 
 
 #: The objective one forkserver worker initialized itself with, set by
-#: :func:`_init_objective` in each worker process.
-_OBJECTIVE: Optional[RtObjective] = None
+#: :func:`init_objective` in each worker process.
+OBJECTIVE: Optional[RtObjective] = None
 
 
-def _init_objective(objective: RtObjective) -> None:
+def init_objective(objective: RtObjective) -> None:
     """Store ``objective`` in the worker process's module globals.
 
     Args:
         objective: The objective every batch point is scored against.
     """
-    global _OBJECTIVE
-    _OBJECTIVE = objective
+    global OBJECTIVE
+    OBJECTIVE = objective
 
 
-def _evaluate_objective(arr: NDArray) -> float:
+def evaluate_objective(arr: NDArray) -> float:
     """Score one parameter array against the worker's initialized objective.
 
     Args:
@@ -469,18 +469,18 @@ def _evaluate_objective(arr: NDArray) -> float:
         RuntimeError: Raised when the worker was never initialized
             with an objective.
     """
-    if _OBJECTIVE is None:
+    if OBJECTIVE is None:
         raise RuntimeError(
-            "_evaluate_objective ran in a worker that _init_objective "
+            "evaluate_objective ran in a worker that init_objective "
             "never initialized with an objective."
         )
     try:
-        return float(_OBJECTIVE(np.asarray(arr, dtype=np.float64)))
+        return float(OBJECTIVE(np.asarray(arr, dtype=np.float64)))
     except Exception:
         return float("nan")
 
 
-def _map_objectives(
+def map_objectives(
     objective: RtObjective,
     points: Sequence[NDArray],
     workers: Optional[int] = None,
@@ -504,13 +504,13 @@ def _map_objectives(
     context = get_context("forkserver")
     with context.Pool(
         processes=workers or os.cpu_count() or 1,
-        initializer=_init_objective,
+        initializer=init_objective,
         initargs=(objective,),
     ) as pool:
-        return pool.map(_evaluate_objective, [np.asarray(p, dtype=np.float64) for p in points])
+        return pool.map(evaluate_objective, [np.asarray(p, dtype=np.float64) for p in points])
 
 
-def _polish_unchanged(
+def polish_unchanged(
     start: CalibrationResults,
     x0: NDArray,
     evaluations: int,
@@ -610,7 +610,7 @@ def polish(
     def evaluate(points: Sequence[np.ndarray]) -> list[float]:
         nonlocal evaluation_count
         evaluation_count += len(points)
-        return _map_objectives(objective, points)
+        return map_objectives(objective, points)
 
     # The start point's finished DE evaluation seeds both phases'
     # memos, so it is never re-run.
@@ -630,7 +630,7 @@ def polish(
     gradient: np.ndarray = forward_gradient(evaluate, x0, offsets, positions, initial_values)
     norm: float = float(np.linalg.norm(gradient))
     if norm == 0.0 or not np.isfinite(norm):
-        return _polish_unchanged(
+        return polish_unchanged(
             start, x0, evaluation_count, "no descent direction: flat objective"
         )
     direction: np.ndarray = -gradient / norm
@@ -639,7 +639,7 @@ def polish(
         x0, direction, positions, bound_pairs
     )
     if interval is None:
-        return _polish_unchanged(start, x0, evaluation_count, "no feasible descent step")
+        return polish_unchanged(start, x0, evaluation_count, "no feasible descent step")
     t_lo, t_hi = interval
 
     result: LineSearchResult = wave_search(

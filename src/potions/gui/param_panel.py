@@ -83,25 +83,25 @@ from potions.gui.data import (
 
 # ==== Constants ==== #
 # The arrows of a group's collapse button, expanded or not.
-_ARROW_EXPANDED: Final[str] = "▾"
-_ARROW_COLLAPSED: Final[str] = "▸"
+ARROW_EXPANDED: Final[str] = "▾"
+ARROW_COLLAPSED: Final[str] = "▸"
 
 # The color chip left of a zone subheader, tinted with the zone's
 # color from the figure palette.
-_ZONE_CHIP: Final[str] = "■"
+ZONE_CHIP: Final[str] = "■"
 
 # The range of the bound-edit dialog's spin boxes: wide enough for
 # any of the model's bounds (a few thousands at most), with the
 # decimals of the saved parameters.csv files.
-_BOUND_RANGE_MIN: Final[float] = -1e6
-_BOUND_RANGE_MAX: Final[float] = 1e6
-_BOUND_DECIMALS: Final[int] = 6
+BOUND_RANGE_MIN: Final[float] = -1e6
+BOUND_RANGE_MAX: Final[float] = 1e6
+BOUND_DECIMALS: Final[int] = 6
 
 # The number of columns in the parameter groups' cell grids: each
 # parameter cell takes one column (a row holds five, the most any
 # zone carries), and a full-width header (a zone or mineral name)
 # spans all of them.
-_GRID_COLUMNS: Final[int] = 5
+GRID_COLUMNS: Final[int] = 5
 
 # The decoration of a themed group's cell grid, keyed by the
 # theme's name: (the band of the even cell rows, the band of the
@@ -111,7 +111,7 @@ _GRID_COLUMNS: Final[int] = 5
 # tinted to match the group (blue-gray for the hydro groups, warm
 # for the reactive-transport groups).  A new `Theme` must be
 # registered here.
-_GRID_STYLES: Final[dict[str, tuple[str, str, str]]] = {
+GRID_STYLES: Final[dict[str, tuple[str, str, str]]] = {
     HYDRO_THEME.name: ("#F7FAFC", "#E2EBF5", "#C6D5E4"),
     RT_THEME.name: ("#FEF9F8", "#F6E1DD", "#E2C6C1"),
 }
@@ -121,7 +121,7 @@ _GRID_STYLES: Final[dict[str, tuple[str, str, str]]] = {
 
 
 # ==== Widgets ==== #
-class _FreeCell(QWidget):
+class FreeCell(QWidget):
     """
     A single free-parameter cell: the parameter's symbol to the
     left of a spin box holding its value.
@@ -294,7 +294,7 @@ class _FreeCell(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
-def _compact_value(value: float) -> str:
+def compact_value(value: float) -> str:
     """
     A compact rendering of a pinned value: four decimals (the
     saved ``parameters.csv`` precision) with the trailing zeros
@@ -310,7 +310,7 @@ def _compact_value(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
 
 
-class _PinnedCell(QWidget):
+class PinnedCell(QWidget):
     """
     A read-only cell for a pinned parameter, whose bounds are
     identical so there is nothing to adjust.
@@ -319,7 +319,7 @@ class _PinnedCell(QWidget):
     the right of the symbol, rather than in a spin box: a
     disabled spin box's frame and buttons take up most of a narrow
     grid cell, so the fixed value is plain text (see
-    `_compact_value`).  The symbol carries the parameter's full
+    `compact_value`).  The symbol carries the parameter's full
     label as its tooltip.  Double-clicking the cell emits
     `unlock_requested`, which the panel answers by opening the
     range dialog and converting the cell into a free cell.
@@ -367,7 +367,7 @@ class _PinnedCell(QWidget):
         # disabled children.  The label takes the cell's remaining
         # width, and its right alignment keeps the value at the
         # cell's right edge, as in a free cell.
-        self._value: QLabel = QLabel(_compact_value(value))
+        self._value: QLabel = QLabel(compact_value(value))
         self._value.setStyleSheet("color: gray;")
         self._value.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -391,7 +391,7 @@ class _PinnedCell(QWidget):
 
 
 
-class _BoldHeader(QLabel):
+class BoldHeader(QLabel):
     """
     A bold subheader inside a group: the name of a mineral or of a
     plot-selection section.
@@ -413,7 +413,7 @@ class _BoldHeader(QLabel):
         self.setContentsMargins(4, top_margin, 4, 0)
 
 
-def _labeled_date_edit(
+def labeled_date_edit(
     label: str,
     value: str,
     minimum: str,
@@ -453,7 +453,7 @@ def _labeled_date_edit(
     return row, edit
 
 
-class _ZoneHeader(QLabel):
+class ZoneHeader(QLabel):
     """
     The bold subheader of a zone's parameters: the zone's color chip
     (the zone's color from the model spec) followed by its display
@@ -476,13 +476,13 @@ class _ZoneHeader(QLabel):
         super().__init__(parent)
         self._zone: str = zone
         self.setText(
-            f'<span style="color: {color};">{_ZONE_CHIP}</span> '
+            f'<span style="color: {color};">{ZONE_CHIP}</span> '
             f"<b>{label}</b>"
         )
         self.setContentsMargins(4, 4, 0, 0)
 
 
-class _BoundsDialog(QDialog):
+class BoundsDialog(QDialog):
     """
     The range-edit dialog: two spin boxes prefilled with the
     current lower and upper bounds, an optional hint line, a "make
@@ -542,8 +542,8 @@ class _BoundsDialog(QDialog):
             row.setSpacing(6)
             caption_label: QLabel = QLabel(caption)
             spin: QDoubleSpinBox = QDoubleSpinBox()
-            spin.setRange(_BOUND_RANGE_MIN, _BOUND_RANGE_MAX)
-            spin.setDecimals(_BOUND_DECIMALS)
+            spin.setRange(BOUND_RANGE_MIN, BOUND_RANGE_MAX)
+            spin.setDecimals(BOUND_DECIMALS)
             spin.setValue(bound)
             row.addWidget(caption_label)
             row.addWidget(spin)
@@ -655,7 +655,7 @@ class ThemedGroup(QWidget):
 
     In a themed grid group, every cell is drawn as part of a
     visible grid: a thin border and an alternating row shading,
-    tinted by the theme (see `_GRID_STYLES`), while the full-width
+    tinted by the theme (see `GRID_STYLES`), while the full-width
     headers stay undecorated.  A neutral group's cells keep the
     default look.
 
@@ -868,7 +868,7 @@ class ThemedGroup(QWidget):
     def _style_grid_cell(self, widget: QWidget, row: int) -> None:
         """
         Draw a cell of a themed grid: a 1px border and the band of
-        its cell row (see `_GRID_STYLES`).
+        its cell row (see `GRID_STYLES`).
 
         The rule is scoped to the cell's object name, so it does
         not cascade into the cell's children (the symbol label and
@@ -881,7 +881,7 @@ class ThemedGroup(QWidget):
         """
         if self._theme is None:
             return
-        band_a, band_b, line = _GRID_STYLES[self._theme.name]
+        band_a, band_b, line = GRID_STYLES[self._theme.name]
         band: str = band_a if self._cell_row_parity(row) == 0 else band_b
         object_name: str = f"grid_cell_{id(widget)}"
         widget.setObjectName(object_name)
@@ -946,7 +946,7 @@ class ThemedGroup(QWidget):
     def _set_header_text(self) -> None:
         """Restate the header with the arrow of the current state."""
         arrow: str = (
-            _ARROW_EXPANDED if self._toggle.isChecked() else _ARROW_COLLAPSED
+            ARROW_EXPANDED if self._toggle.isChecked() else ARROW_COLLAPSED
         )
         self._toggle.setText(f"{arrow} {self._title}")
 
@@ -1049,7 +1049,7 @@ class ParamPanel(QScrollArea):
             key: (lo if lo == hi else 0.5 * (lo + hi))
             for key, (lo, hi) in input_data.bounds.items()
         }
-        self._rows: dict[str, _FreeCell | _PinnedCell] = {}
+        self._rows: dict[str, FreeCell | PinnedCell] = {}
         self._groups: dict[str, ThemedGroup] = {}
         # Hydrology-only mode: the reactive-transport groups and
         # checkboxes are hidden (`set_hydro_only`).
@@ -1264,6 +1264,34 @@ class ParamPanel(QScrollArea):
         self._container_layout.addStretch()
         self.set_hydro_only(self._hydro_only)
 
+    def set_values(self, values: dict[str, float]) -> None:
+        """
+        Update the panel's parameter values in place, keeping the bounds.
+
+        Unlike `restore_state`, the bounds are left exactly as they
+        are and the groups are not rebuilt: each value is clamped
+        into the current bounds, recorded, and pushed into its free
+        cell's spin box.  A pinned cell (degenerate bounds) needs no
+        touch — its value is its bound, and the clamped value the
+        panel records equals it.  Skipping the rebuild keeps the
+        scroll area's position and the cells themselves, so adopting
+        a line search's best point leaves the panel where the user
+        left it.  No signals are emitted: this is a state set, not a
+        user change.
+
+        Args:
+            values: The new parameter values, keyed by bounds key.
+                Names not in the current bounds are ignored.
+        """
+        for key, value in values.items():
+            if key not in self._bounds:
+                continue
+            lo, hi = self._bounds[key]
+            self._values[key] = min(max(float(value), lo), hi)
+            cell: FreeCell | PinnedCell | None = self._rows.get(key)
+            if cell is not None and isinstance(cell, FreeCell):
+                cell.set_value(self._values[key])
+
     def restore_state(
         self,
         values: dict[str, float],
@@ -1349,12 +1377,12 @@ class ParamPanel(QScrollArea):
     def _populate_hydrology(self) -> ThemedGroup:
         """The blue-themed hydrology group: one cell per zone parameter."""
         group: ThemedGroup = ThemedGroup(
-            "Hydrology", HYDRO_THEME, grid_columns=_GRID_COLUMNS
+            "Hydrology", HYDRO_THEME, grid_columns=GRID_COLUMNS
         )
         spec = self._input_data.spec
         for zone in spec.zones:
             group.add_header(
-                _ZoneHeader(
+                ZoneHeader(
                     zone, spec.zone_labels[zone], spec.zone_colors[zone]
                 )
             )
@@ -1373,7 +1401,7 @@ class ParamPanel(QScrollArea):
         if "proportion.1" not in self._bounds:
             return None
         group: ThemedGroup = ThemedGroup(
-            "Catchment proportion", HYDRO_THEME, grid_columns=_GRID_COLUMNS
+            "Catchment proportion", HYDRO_THEME, grid_columns=GRID_COLUMNS
         )
         self._add_param_cell(group, "proportion.1")
         caption: QLabel = QLabel(
@@ -1393,13 +1421,13 @@ class ParamPanel(QScrollArea):
         reactive zone.
         """
         group: ThemedGroup = ThemedGroup(
-            "Reactive transport", RT_THEME, grid_columns=_GRID_COLUMNS
+            "Reactive transport", RT_THEME, grid_columns=GRID_COLUMNS
         )
         spec = self._input_data.spec
         mineral_names: list[str] = self._input_data.network.mineral_names
         for zone in spec.zones:
             group.add_header(
-                _ZoneHeader(
+                ZoneHeader(
                     zone, spec.zone_labels[zone], spec.zone_colors[zone]
                 )
             )
@@ -1407,7 +1435,7 @@ class ParamPanel(QScrollArea):
                 self._add_param_cell(group, f"{zone}.{param}")
             if spec.zone_configs[zone].do_reactions:
                 for mineral_id, mineral_name in enumerate(mineral_names):
-                    group.add_header(_BoldHeader(mineral_name, top_margin=4))
+                    group.add_header(BoldHeader(mineral_name, top_margin=4))
                     for field in MINERAL_PARAMS:
                         self._add_param_cell(
                             group, f"{zone}.{field}[{mineral_id}]"
@@ -1427,7 +1455,7 @@ class ParamPanel(QScrollArea):
         if not self._input_data.network.has_exchange:
             return None
         group: ThemedGroup = ThemedGroup(
-            "Initial state", RT_THEME, grid_columns=_GRID_COLUMNS
+            "Initial state", RT_THEME, grid_columns=GRID_COLUMNS
         )
         for zone in self._input_data.spec.speciation_zones:
             self._add_param_cell(group, f"initial_state.{zone}_x")
@@ -1446,13 +1474,13 @@ class ParamPanel(QScrollArea):
         )
         lo, hi = self._bounds[key]
         if lo == hi:
-            pinned_cell: _PinnedCell = _PinnedCell(
+            pinned_cell: PinnedCell = PinnedCell(
                 key, symbol, label, self._values[key]
             )
             pinned_cell.unlock_requested.connect(self._on_unlock_requested)
             self._rows[key] = pinned_cell
         else:
-            free_cell: _FreeCell = _FreeCell(
+            free_cell: FreeCell = FreeCell(
                 key, symbol, label, (lo, hi), self._values[key], group.theme
             )
             free_cell.value_changed.connect(self._on_value_changed)
@@ -1480,7 +1508,7 @@ class ParamPanel(QScrollArea):
         """
         group: ThemedGroup = ThemedGroup("Plots", None, grid_columns=2)
 
-        self._streamflow_header: QWidget = _BoldHeader(
+        self._streamflow_header: QWidget = BoldHeader(
             "Streamflow (river-concentration figure)"
         )
         group.add_header(self._streamflow_header)
@@ -1490,7 +1518,7 @@ class ParamPanel(QScrollArea):
         self._streamflow_box.toggled.connect(self._on_selection_changed)
         group.add_widget(self._streamflow_box)
 
-        self._species_header: QWidget = _BoldHeader(
+        self._species_header: QWidget = BoldHeader(
             "River species (river- and zone-concentration figures)"
         )
         group.add_header(self._species_header)
@@ -1501,7 +1529,7 @@ class ParamPanel(QScrollArea):
             self._species_boxes[name] = box
             group.add_widget(box)
 
-        self._zone_header: QWidget = _BoldHeader(
+        self._zone_header: QWidget = BoldHeader(
             "Zones (storage and zone-concentration figures)"
         )
         group.add_header(self._zone_header)
@@ -1513,7 +1541,7 @@ class ParamPanel(QScrollArea):
             self._zone_boxes[zone] = box
             group.add_widget(box)
 
-        self._mineral_header: QWidget = _BoldHeader(
+        self._mineral_header: QWidget = BoldHeader(
             "Mineral (reaction-rate figure)"
         )
         group.add_header(self._mineral_header)
@@ -1525,7 +1553,7 @@ class ParamPanel(QScrollArea):
         )
         group.add_widget(self._mineral_combo)
 
-        self._window_header: QWidget = _BoldHeader(
+        self._window_header: QWidget = BoldHeader(
             "Plotting period (all figures, dates)"
         )
         group.add_header(self._window_header)
@@ -1535,7 +1563,7 @@ class ParamPanel(QScrollArea):
         window_end: str = self._input_data.window[1].strftime("%Y-%m-%d")
         self._window_from_row: QWidget
         self._window_from_edit: QDateEdit
-        self._window_from_row, self._window_from_edit = _labeled_date_edit(
+        self._window_from_row, self._window_from_edit = labeled_date_edit(
             "From",
             DEFAULT_WINDOW_START,
             window_start,
@@ -1547,7 +1575,7 @@ class ParamPanel(QScrollArea):
         group.add_widget(self._window_from_row)
         self._window_to_row: QWidget
         self._window_to_edit: QDateEdit
-        self._window_to_row, self._window_to_edit = _labeled_date_edit(
+        self._window_to_row, self._window_to_edit = labeled_date_edit(
             "To",
             DEFAULT_WINDOW_END,
             window_start,
@@ -1643,8 +1671,8 @@ class ParamPanel(QScrollArea):
 
     def _on_value_changed(self, key: str) -> None:
         """Record a free cell's new value and re-emit it to the window."""
-        cell: _FreeCell | _PinnedCell = self._rows[key]
-        if isinstance(cell, _FreeCell):
+        cell: FreeCell | PinnedCell = self._rows[key]
+        if isinstance(cell, FreeCell):
             self._values[key] = cell.value()
         self.value_changed.emit(key)
 
@@ -1662,15 +1690,15 @@ class ParamPanel(QScrollArea):
         lo, hi = self._bounds[key]
         decimals: int = bound_decimals(lo, hi)
         hint: str = f"Current range: {lo:.{decimals}f} to {hi:.{decimals}f}."
-        result: tuple[float, float] | None = _BoundsDialog(
+        result: tuple[float, float] | None = BoundsDialog(
             f"Edit range — {label}", lo, hi, hint, self._values[key], self
         ).run()
         if result is None:
             return
         new_lo, new_hi = result
 
-        cell: _FreeCell | _PinnedCell = self._rows[key]
-        if not isinstance(cell, _FreeCell):
+        cell: FreeCell | PinnedCell = self._rows[key]
+        if not isinstance(cell, FreeCell):
             return
         if new_lo == new_hi:
             # Static value: pin the parameter at the displayed value.
@@ -1679,7 +1707,7 @@ class ParamPanel(QScrollArea):
             self._values[key] = v
             # Convert exactly as the group builder does.
             group: ThemedGroup = self._group_of(key)
-            pinned: _PinnedCell = _PinnedCell(
+            pinned: PinnedCell = PinnedCell(
                 key, param_symbol(key), label, v
             )
             group.replace_widget(cell, pinned)
@@ -1715,7 +1743,7 @@ class ParamPanel(QScrollArea):
             f"{label} is pinned to {value:.4f}.  Choose a range to make "
             "it adjustable; the current value is kept."
         )
-        result: tuple[float, float] | None = _BoundsDialog(
+        result: tuple[float, float] | None = BoundsDialog(
             f"Edit range — {label}", lo, hi, hint, value, self
         ).run()
         if result is None:
@@ -1727,7 +1755,7 @@ class ParamPanel(QScrollArea):
         self._values[key] = min(max(self._values[key], new_lo), new_hi)
 
         group: ThemedGroup = self._group_of(key)
-        free_cell: _FreeCell = _FreeCell(
+        free_cell: FreeCell = FreeCell(
             key,
             param_symbol(key),
             label,
@@ -1806,7 +1834,7 @@ class ParamPanel(QScrollArea):
         Raises:
             KeyError: Raised when no group contains the cell.
         """
-        cell: _FreeCell | _PinnedCell = self._rows[key]
+        cell: FreeCell | PinnedCell = self._rows[key]
         for group in self._groups.values():
             if cell.parentWidget() is group.content():
                 return group

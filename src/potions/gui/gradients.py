@@ -40,20 +40,20 @@ from .state import objectives_from_results
 #: The perturbation step as a fraction of a free parameter's current
 #: range: the ± points of the central difference bracket the base
 #: point by this amount of the range on each side.
-_STEP_FRACTION: Final[float] = 0.01
+STEP_FRACTION: Final[float] = 0.01
 
 
 # ==== Perturbations ==== #
 
 
 @dataclass(frozen=True, slots=True)
-class _Perturbation:
+class Perturbation:
     """
     One free parameter's perturbation: its ± points and the
     effective step of each side.
 
     The points are fresh copies of the base parameter vector with
-    this parameter's entry moved by `_STEP_FRACTION` of the current
+    this parameter's entry moved by `STEP_FRACTION` of the current
     range, clamped to the range's ends; the effective step is the
     actual distance from the base point, so a parameter sitting at a
     bound has a zero step on the out-of-range side and the
@@ -78,7 +78,7 @@ class _Perturbation:
 def free_parameter_steps(
     x: np.ndarray,
     bounds: dict[str, tuple[float, float]],
-) -> list[_Perturbation]:
+) -> list[Perturbation]:
     """
     The ± perturbation of every free parameter around `x`.
 
@@ -95,12 +95,12 @@ def free_parameter_steps(
     Returns:
         One perturbation per free parameter.
     """
-    steps: list[_Perturbation] = []
+    steps: list[Perturbation] = []
     for position, (key, (low, high)) in enumerate(bounds.items()):
         if high <= low:
             continue
         base: float = float(x[position])
-        step: float = _STEP_FRACTION * (high - low)
+        step: float = STEP_FRACTION * (high - low)
         up: float = min(base + step, high)
         down: float = max(base - step, low)
         x_plus: np.ndarray = np.array(x, dtype=np.float64, copy=True)
@@ -108,7 +108,7 @@ def free_parameter_steps(
         x_minus: np.ndarray = np.array(x, dtype=np.float64, copy=True)
         x_minus[position] = down
         steps.append(
-            _Perturbation(
+            Perturbation(
                 key=key,
                 x_plus=x_plus,
                 x_minus=x_minus,
@@ -161,7 +161,7 @@ def objective_vector(
 def gradient_matrix(
     f_plus: list[np.ndarray],
     f_minus: list[np.ndarray],
-    steps: list[_Perturbation],
+    steps: list[Perturbation],
 ) -> np.ndarray:
     """
     The central-difference gradient matrix of a perturbation batch.

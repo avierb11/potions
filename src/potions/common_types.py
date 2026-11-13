@@ -168,7 +168,7 @@ class HydroSimulation:
 # column prefixes the flat frame uses for them. The layout's single
 # source of truth is `HydrologicalModel.get_hydro_column_names`; these
 # pairs must track it.
-_HYDRO_QUANTITY_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
+HYDRO_QUANTITY_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
     ("storage", "s_"),
     ("precip_flux", "q_forc_"),
     ("evaporation", "q_vap_"),
@@ -180,9 +180,9 @@ _HYDRO_QUANTITY_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
 )
 # Must track `hydro_model.SIM_Q_NAME` and the measured-streamflow column
 # name used by `run_hydro_model`'s output assembly.
-_STREAMFLOW_SIM_COLUMN: Final[str] = "streamflow_sim"
-_MEAS_STREAMFLOW_COLUMN: Final[str] = "meas_streamflow_mmd"
-_PROP_Q_PREFIX: Final[str] = "prop_q_"
+STREAMFLOW_SIM_COLUMN: Final[str] = "streamflow_sim"
+MEAS_STREAMFLOW_COLUMN: Final[str] = "meas_streamflow_mmd"
+PROP_Q_PREFIX: Final[str] = "prop_q_"
 
 
 @dataclass(frozen=True)
@@ -296,7 +296,7 @@ class HydroModelResults:
         """The frame of one per-zone quantity, relabeled to zone names.
 
         Args:
-            quantity: A quantity name of `_HYDRO_QUANTITY_PREFIXES`,
+            quantity: A quantity name of `HYDRO_QUANTITY_PREFIXES`,
                 e.g. `"lateral"`.
 
         Returns:
@@ -308,7 +308,7 @@ class HydroModelResults:
                 Raised when a recorded zone name has no corresponding
                 `{prefix}_{zone}` column in the frame.
         """
-        prefix = dict(_HYDRO_QUANTITY_PREFIXES)[quantity]
+        prefix = dict(HYDRO_QUANTITY_PREFIXES)[quantity]
         zone_names = self._effective_zone_names()
         columns = [f"{prefix}{zone}" for zone in zone_names]
         missing = [c for c in columns if c not in self.simulation.columns]
@@ -364,7 +364,7 @@ class HydroModelResults:
     @property
     def simulated_streamflow(self) -> Series:
         """The simulated streamflow: the `streamflow_sim` column."""
-        return self.simulation[_STREAMFLOW_SIM_COLUMN]
+        return self.simulation[STREAMFLOW_SIM_COLUMN]
 
     @property
     def measured_streamflow(self) -> Series | None:
@@ -375,9 +375,9 @@ class HydroModelResults:
             measured-streamflow column (the run was not scored against
             a measured streamflow).
         """
-        if _MEAS_STREAMFLOW_COLUMN not in self.simulation.columns:
+        if MEAS_STREAMFLOW_COLUMN not in self.simulation.columns:
             return None
-        return self.simulation[_MEAS_STREAMFLOW_COLUMN]
+        return self.simulation[MEAS_STREAMFLOW_COLUMN]
 
     @property
     def river_zone_fractions(self) -> DataFrame:
@@ -390,10 +390,10 @@ class HydroModelResults:
         columns = [
             c
             for c in self.simulation.columns
-            if c.startswith(_PROP_Q_PREFIX)
+            if c.startswith(PROP_Q_PREFIX)
         ]
         return self.simulation[columns].rename(
-            columns={c: c[len(_PROP_Q_PREFIX):] for c in columns}
+            columns={c: c[len(PROP_Q_PREFIX):] for c in columns}
         )
 
     def to_dataframe(self) -> DataFrame:
@@ -433,7 +433,7 @@ class HydroModelResults:
             )
         missing = [
             f"{prefix}{name}"
-            for _quantity, prefix in _HYDRO_QUANTITY_PREFIXES
+            for _quantity, prefix in HYDRO_QUANTITY_PREFIXES
             if f"{prefix}{name}" not in self.simulation.columns
         ]
         if missing:
@@ -441,10 +441,10 @@ class HydroModelResults:
                 f"Column(s) {missing} not found in the hydrology "
                 f"simulation frame for zone '{name}'."
             )
-        # HydroZoneResults' fields follow _HYDRO_QUANTITY_PREFIXES' order.
+        # HydroZoneResults' fields follow HYDRO_QUANTITY_PREFIXES' order.
         series: list[Series] = [
             self.simulation[f"{prefix}{name}"].rename(quantity)
-            for quantity, prefix in _HYDRO_QUANTITY_PREFIXES
+            for quantity, prefix in HYDRO_QUANTITY_PREFIXES
         ]
         return HydroZoneResults(name, *series)
 

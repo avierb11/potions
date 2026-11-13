@@ -97,7 +97,7 @@ def make_run_dir(
 # ==== Helpers ==== #
 
 
-def _json_safe(value: Any) -> Any:
+def json_safe(value: Any) -> Any:
     """Make a scalar value safe for strict JSON serialization."""
     if isinstance(value, np.bool_):
         return bool(value)
@@ -109,18 +109,18 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _package_version() -> str:
+def package_version() -> str:
     try:
         return importlib.metadata.version("potions-model")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
 
 
-def _python_version() -> str:
+def python_version() -> str:
     return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 
 
-def _num_zones(model: Any) -> int:
+def num_zones(model: Any) -> int:
     try:
         return int(model.get_num_zones())
     except Exception:
@@ -128,7 +128,7 @@ def _num_zones(model: Any) -> int:
         return len(zones) if zones is not None else 0
 
 
-def _parameter_table(model: Any) -> DataFrame | None:
+def parameter_table(model: Any) -> DataFrame | None:
     """Fetch the model's parameter table (``describe_parameters``), if any."""
     fn: Any = getattr(model, "describe_parameters", None)
     if not callable(fn):
@@ -136,20 +136,20 @@ def _parameter_table(model: Any) -> DataFrame | None:
     return fn()
 
 
-def _objective_dict(obj: Series | DataFrame | None) -> dict[str, Any] | None:
+def objective_dict(obj: Series | DataFrame | None) -> dict[str, Any] | None:
     """Convert objective metrics (Series or DataFrame) to a JSON-safe dict."""
     if obj is None:
         return None
     if isinstance(obj, Series):
-        return {str(key): _json_safe(val) for key, val in obj.items()}
+        return {str(key): json_safe(val) for key, val in obj.items()}
     out: dict[str, dict[str, Any]] = {}
     data = obj.to_dict(orient="index")
     for row_name, row_vals in data.items():
-        out[str(row_name)] = {str(k): _json_safe(v) for k, v in row_vals.items()}
+        out[str(row_name)] = {str(k): json_safe(v) for k, v in row_vals.items()}
     return out
 
 
-def _try_pickle(path: Path, obj: Any) -> bool:
+def try_pickle(path: Path, obj: Any) -> bool:
     """Pickle `obj` to `path`; record a text note instead of raising on failure."""
     try:
         with path.open("wb") as fh:
@@ -163,7 +163,7 @@ def _try_pickle(path: Path, obj: Any) -> bool:
         return False
 
 
-def _write_bundle(
+def write_bundle(
     out_dir: Path,
     *,
     run_id: str,
@@ -175,11 +175,11 @@ def _write_bundle(
     """Write the standard file set for one model's results into `out_dir`."""
     simulation.to_csv(out_dir / "simulation.csv")
 
-    params_df: DataFrame | None = _parameter_table(model)
+    params_df: DataFrame | None = parameter_table(model)
     if params_df is not None and len(params_df) > 0:
         params_df.to_csv(out_dir / "parameters.csv", index=False)
 
-    obj_dict: dict[str, Any] | None = _objective_dict(objective_functions)
+    obj_dict: dict[str, Any] | None = objective_dict(objective_functions)
     if objective_functions is not None and len(objective_functions) > 0:
         if isinstance(objective_functions, Series):
             out_df = objective_functions.to_frame(name="value")
@@ -189,16 +189,16 @@ def _write_bundle(
 
     pickle_saved: bool | None = None
     if pickle_obj is not None:
-        pickle_saved = _try_pickle(out_dir / "results.pkl", pickle_obj)
+        pickle_saved = try_pickle(out_dir / "results.pkl", pickle_obj)
 
     index = simulation.index
     info: dict[str, Any] = {
         "run_id": run_id,
         "timestamp": datetime.now().astimezone().isoformat(),
         "model_class": f"{type(model).__module__}.{type(model).__qualname__}",
-        "potions_version": _package_version(),
-        "python_version": _python_version(),
-        "num_zones": _num_zones(model),
+        "potions_version": package_version(),
+        "python_version": python_version(),
+        "num_zones": num_zones(model),
         "num_time_steps": len(index),
         "start_time": str(index.min()) if len(index) else None,
         "end_time": str(index.max()) if len(index) else None,
@@ -222,7 +222,7 @@ def save_hydro_run(
 ) -> Path:
     """Save a `HydroModelResults` (plus the model parameters) to a fresh run dir."""
     out_dir: Path = make_run_dir(resolve_results_dir(results_dir))
-    _write_bundle(
+    write_bundle(
         out_dir,
         run_id=out_dir.name,
         model=model,
@@ -239,7 +239,7 @@ def save_rt_run(
 ) -> Path:
     """Save an `RtModelResults` (plus parameters and a full pickle) to a run dir."""
     out_dir = make_run_dir(resolve_results_dir(results_dir))
-    _write_bundle(
+    write_bundle(
         out_dir,
         run_id=out_dir.name,
         model=model,
@@ -269,14 +269,14 @@ def save_model_run(
     rt_dir: Path = out_dir / "rt"
     hydro_dir.mkdir()
     rt_dir.mkdir()
-    _write_bundle(
+    write_bundle(
         hydro_dir,
         run_id=out_dir.name,
         model=model,
         simulation=hydro_results.simulation,
         objective_functions=hydro_results.objective_functions,
     )
-    _write_bundle(
+    write_bundle(
         rt_dir,
         run_id=out_dir.name,
         model=model,
@@ -301,8 +301,8 @@ def write_batch_info(
         "kind": "batch",
         "timestamp": datetime.now().astimezone().isoformat(),
         "model_class": None,
-        "potions_version": _package_version(),
-        "python_version": _python_version(),
+        "potions_version": package_version(),
+        "python_version": python_version(),
         "num_runs": num_runs,
         "num_threads": num_threads,
         "threshold_function_applied": has_threshold,

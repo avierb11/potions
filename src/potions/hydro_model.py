@@ -20,7 +20,7 @@ from .core import HydroForcing, HydrologicZone, HydroStep, ScalarRootFindingErro
 from .model_components import Layer, is_bottom_zone
 from .objective_functions import DEFAULT_OBJECTIVE_FUNCTIONS
 from .reactive_transport.parameter_docs import (
-    _fmt,
+    fmt,
     render_describe,
     zone_parameter_rows,
 )
@@ -43,7 +43,7 @@ SIM_Q_NAME: Final[str] = "streamflow_sim"
 # ============================= #
 
 
-def _expand_free_parameters(
+def expand_free_parameters(
     x: NDArray[f64],
     free_names: tuple[str, ...],
     base_params: Optional[dict[str, float]],
@@ -754,7 +754,7 @@ class HydrologicalModel:
                 {
                     "zone": "model",
                     "name": f"proportion.{i + 1}",
-                    "value": _fmt(self.__scales[i]),
+                    "value": fmt(self.__scales[i]),
                     "unit": "",
                     "description": "Fractional area contribution of the surface zone.",
                 }
@@ -1912,7 +1912,7 @@ class HydrologicalModel:
         )
 
         # Now, run the model and return the optimum results
-        best_x: NDArray[f64] = _expand_free_parameters(
+        best_x: NDArray[f64] = expand_free_parameters(
             opt_res.x, free_names, frozen, all_names
         )
         best_results = cls.hydro_from_array(best_x).run_hydro_model(

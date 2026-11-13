@@ -30,7 +30,7 @@ class HydroTestModel(Model):
     ]
 
 
-def _hydro_zones() -> dict[str, HydrologicZone]:
+def hydro_zones() -> dict[str, HydrologicZone]:
     # Pass explicit zones so that the stored zone instances keep the names
     # declared in `structure` (a zone's compiled `default()` constructor may
     # use a different internal name).
@@ -43,7 +43,7 @@ def _hydro_zones() -> dict[str, HydrologicZone]:
 
 @pytest.fixture(scope="module")
 def hydro_model() -> HydroTestModel:
-    return HydroTestModel(scales=[1.0], zones=_hydro_zones())
+    return HydroTestModel(scales=[1.0], zones=hydro_zones())
 
 
 def test_hydro_describe_parameters_columns(hydro_model) -> None:
@@ -106,7 +106,7 @@ def network():
     return get_carbon_network()
 
 
-def _rt_zone(network, name: str, do_reactions: bool) -> RtZone:
+def rt_zone(network, name: str, do_reactions: bool) -> RtZone:
     dim = ZoneDimensions(20.0, 10.0)
     if do_reactions:
         mp = MineralParameters(
@@ -123,7 +123,7 @@ def _rt_zone(network, name: str, do_reactions: bool) -> RtZone:
     )
 
 
-def _river_zone(network, do_reactions: bool) -> RiverZone:
+def river_zone(network, do_reactions: bool) -> RiverZone:
     dim = RiverDimensions(1.0, 5.0)
     if do_reactions:
         mp = MineralParameters(
@@ -148,15 +148,15 @@ class RtTestModel(ReactiveTransportModel):
     ]
 
 
-def _model(network, do_reactions: bool, with_river: bool) -> RtTestModel:
+def make_model(network, do_reactions: bool, with_river: bool) -> RtTestModel:
     zones = {
-        "snow": _rt_zone(network, "snow", do_reactions),
-        "surface": _rt_zone(network, "surface", do_reactions),
-        "ground": _rt_zone(network, "ground", do_reactions),
+        "snow": rt_zone(network, "snow", do_reactions),
+        "surface": rt_zone(network, "surface", do_reactions),
+        "ground": rt_zone(network, "ground", do_reactions),
     }
-    river = _river_zone(network, do_reactions) if with_river else None
+    river = river_zone(network, do_reactions) if with_river else None
     return RtTestModel(
-        zones=_hydro_zones(),
+        zones=hydro_zones(),
         scales=[1.0],
         network=network,
         rt_zones=zones,
@@ -165,13 +165,13 @@ def _model(network, do_reactions: bool, with_river: bool) -> RtTestModel:
 
 
 def test_rt_describe_columns(network) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     df = model.describe_parameters()
     assert list(df.columns) == ["zone", "name", "value", "unit", "description"]
 
 
 def test_rt_describe_contains_hydro_zones(network, hydro_model) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     df = model.describe_parameters()
     # Hydro zone parameters are still present (RT rows reuse the same zone
     # name, so they share the group with the hydro rows).
@@ -182,7 +182,7 @@ def test_rt_describe_contains_hydro_zones(network, hydro_model) -> None:
 
 
 def test_rt_describe_rt_dimensions(network) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     df = model.describe_parameters()
     snow = df[df["zone"] == "snow"]
     dims = {"max_water", "passive_water_storage"}
@@ -194,7 +194,7 @@ def test_rt_describe_rt_dimensions(network) -> None:
 
 
 def test_rt_describe_mineral_params_present(network) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     df = model.describe_parameters()
     snow = df[df["zone"] == "snow"]
     # One mineral in the network -> four per-mineral rows.
@@ -207,7 +207,7 @@ def test_rt_describe_mineral_params_present(network) -> None:
 
 
 def test_rt_describe_no_reactions_omits_mineral_rows(network) -> None:
-    model = _model(network, False, False)
+    model = make_model(network, False, False)
     df = model.describe_parameters()
     ground = df[df["zone"] == "ground"]
     # Dimensions still reported.
@@ -219,7 +219,7 @@ def test_rt_describe_no_reactions_omits_mineral_rows(network) -> None:
 
 
 def test_rt_describe_river_zone(network) -> None:
-    model = _model(network, True, True)
+    model = make_model(network, True, True)
     assert model.has_river_zone
     df = model.describe_parameters()
     river = df[df["zone"] == "river"]
@@ -231,14 +231,14 @@ def test_rt_describe_river_zone(network) -> None:
 
 
 def test_rt_describe_no_river_zone(network) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     assert not model.has_river_zone
     df = model.describe_parameters()
     assert "river" not in set(df["zone"])
 
 
 def test_rt_describe_string(network) -> None:
-    model = _model(network, True, True)
+    model = make_model(network, True, True)
     text = model.describe()
     assert "Model parameters" in text
     for zone_name in ("snow", "surface", "ground", "river"):
@@ -248,7 +248,7 @@ def test_rt_describe_string(network) -> None:
 
 
 def test_rt_describe_string_no_river(network) -> None:
-    model = _model(network, True, False)
+    model = make_model(network, True, False)
     text = model.describe()
     assert "Model parameters" in text
     assert "max_water" in text

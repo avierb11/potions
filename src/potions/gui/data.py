@@ -72,14 +72,14 @@ from potions.hydro_model import HydrologicalModel
 from scipy.optimize import root_scalar
 
 # ==== Constants ==== #
-_PACKAGE_DIR: Final[Path] = Path(__file__).resolve().parent
+PACKAGE_DIR: Final[Path] = Path(__file__).resolve().parent
 
 # The East River forcing-and-chemistry series record, shipped with
 # the package (a copy of the site record in the repo's ``input``
 # directory) so the GUI works out of the box from an installed copy
 # of potions.
 DEFAULT_CSV_PATH: Final[Path] = (
-    _PACKAGE_DIR / "data" / "east_river_series.csv"
+    PACKAGE_DIR / "data" / "east_river_series.csv"
 )
 
 # The number of days of the two-year spin-up prepended to the record
@@ -114,11 +114,11 @@ BASE_COLUMN_ROLES: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
 
 # The default plotting window: the first and last day of the site
 # record's water years, as ISO dates.
-_DEFAULT_WINDOW: Final[tuple[pd.Timestamp, pd.Timestamp]] = (
+DEFAULT_WINDOW: Final[tuple[pd.Timestamp, pd.Timestamp]] = (
     water_year_window(WATER_YEARS[0], WATER_YEARS[-1])
 )
-DEFAULT_WINDOW_START: Final[str] = _DEFAULT_WINDOW[0].strftime("%Y-%m-%d")
-DEFAULT_WINDOW_END: Final[str] = _DEFAULT_WINDOW[1].strftime("%Y-%m-%d")
+DEFAULT_WINDOW_START: Final[str] = DEFAULT_WINDOW[0].strftime("%Y-%m-%d")
+DEFAULT_WINDOW_END: Final[str] = DEFAULT_WINDOW[1].strftime("%Y-%m-%d")
 # =================== #
 
 
@@ -241,7 +241,7 @@ class GuiRunResults:
 
 
 # ==== Functions ==== #
-def _max_water_bounds(zone_class: type) -> tuple[float, float]:
+def max_water_bounds(zone_class: type) -> tuple[float, float]:
     """
     The reactive water-storage bounds of a zone class.
 
@@ -269,7 +269,7 @@ def _max_water_bounds(zone_class: type) -> tuple[float, float]:
     )
 
 
-def _initial_state_bounds(zone_class: type) -> tuple[float, float]:
+def initial_state_bounds(zone_class: type) -> tuple[float, float]:
     """
     The exchange-site bounds of a speciation zone class.
 
@@ -288,7 +288,7 @@ def _initial_state_bounds(zone_class: type) -> tuple[float, float]:
     return (-5.0, -1.0)
 
 
-def _bounds(
+def parameter_bounds(
     spec: ModelSpec, network: pt.ReactionNetwork
 ) -> dict[str, tuple[float, float]]:
     """
@@ -326,7 +326,7 @@ def _bounds(
     }
 
     for zone in spec.zones:
-        bounds[f"{zone}.max_water"] = _max_water_bounds(zone_classes[zone])
+        bounds[f"{zone}.max_water"] = max_water_bounds(zone_classes[zone])
 
     # A model with more than one surface column splits the catchment
     # between them, and pins the per-column drainage-fraction alphas.
@@ -342,14 +342,14 @@ def _bounds(
 
     if network.has_exchange:
         for zone in spec.speciation_zones:
-            bounds[f"initial_state.{zone}_x"] = _initial_state_bounds(
+            bounds[f"initial_state.{zone}_x"] = initial_state_bounds(
                 zone_classes[zone]
             )
 
     return bounds
 
 
-def _measured_columns(
+def measured_columns(
     network: pt.ReactionNetwork, df: pd.DataFrame
 ) -> list[str]:
     """
@@ -380,7 +380,7 @@ def _measured_columns(
     return columns
 
 
-def _species_alias(species: str) -> str:
+def species_alias(species: str) -> str:
     """
     The spreadsheet column alias for a measured-species record role.
 
@@ -399,13 +399,13 @@ def _species_alias(species: str) -> str:
     return stem + "_molL"
 
 
-def _role_names(role: str) -> tuple[str, ...]:
+def role_names(role: str) -> tuple[str, ...]:
     """
     The column names that resolve a record role, in priority order.
 
     The canonical name first, then the aliases in table order (the
     canonical name wins a tie).  A measured-species role's names are
-    the species name itself, then its `_species_alias` form.
+    the species name itself, then its `species_alias` form.
 
     Args:
         role: A record role key: a key of `BASE_COLUMN_ROLES` or a
@@ -417,10 +417,10 @@ def _role_names(role: str) -> tuple[str, ...]:
     if role in BASE_COLUMN_ROLES:
         canonical, aliases = BASE_COLUMN_ROLES[role]
         return (canonical, *aliases)
-    return (role, _species_alias(role))
+    return (role, species_alias(role))
 
 
-def _auto_match(lowered: dict[str, str], role: str) -> str | None:
+def auto_match(lowered: dict[str, str], role: str) -> str | None:
     """
     The record column matching a role's names, or None.
 
@@ -439,7 +439,7 @@ def _auto_match(lowered: dict[str, str], role: str) -> str | None:
         The matched column's actual name, or None when the role
         matches no column.
     """
-    for candidate in _role_names(role):
+    for candidate in role_names(role):
         match: str | None = lowered.get(candidate.strip().lower())
         if match is not None:
             return match
@@ -539,10 +539,10 @@ def resolve_columns(
                 )
             resolved[role] = name
             continue
-        match: str | None = _auto_match(lowered, role)
+        match: str | None = auto_match(lowered, role)
         if match is not None:
             resolved[role] = match
-    for column, role_names in _roles_by_column(resolved).items():
+    for column, role_names in roles_by_column(resolved).items():
         if len(role_names) > 1:
             raise ValueError(
                 f"Two record roles resolve to the same column {column!r}: "
@@ -560,7 +560,7 @@ def resolve_columns(
     return resolved
 
 
-def _roles_by_column(
+def roles_by_column(
     resolved: dict[str, str],
 ) -> dict[str, list[str]]:
     """
@@ -578,7 +578,7 @@ def _roles_by_column(
     return by_column
 
 
-def _datetime_column(
+def datetime_column(
     df: pd.DataFrame,
     column_map: dict[str, str | None] | None = None,
 ) -> str:
@@ -623,7 +623,7 @@ def _datetime_column(
     lowered: dict[str, str] = {
         str(name).strip().lower(): str(name) for name in df.columns
     }
-    for candidate in _role_names("date"):
+    for candidate in role_names("date"):
         match: str | None = lowered.get(candidate.strip().lower())
         if match is not None:
             return match
@@ -633,7 +633,7 @@ def _datetime_column(
     )
 
 
-def _float_frame(df: pd.DataFrame) -> pd.DataFrame:
+def float_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert every column of a record frame to float64.
 
@@ -663,7 +663,7 @@ def _float_frame(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(converted, index=df.index)
 
 
-def _read_raw(path: Path) -> pd.DataFrame:
+def read_raw(path: Path) -> pd.DataFrame:
     """
     Read a record spreadsheet into a raw frame by its suffix.
 
@@ -716,10 +716,10 @@ def read_spreadsheet(
     """
     Read a CSV or XLSX record into an indexed frame.
 
-    The file is read by `_read_raw` (``.csv`` → `pandas.read_csv`,
+    The file is read by `read_raw` (``.csv`` → `pandas.read_csv`,
     ``.xlsx`` → `pandas.read_excel` with the openpyxl engine).  The
     record's date column — the map's ``date`` value when present,
-    otherwise auto-detected by `_datetime_column` — is parsed with
+    otherwise auto-detected by `datetime_column` — is parsed with
     `pandas.to_datetime` (real date cells and text dates alike
     become timestamps) and set as the index; the rows come back in
     date order and the remaining columns as float64.
@@ -745,8 +745,8 @@ def read_spreadsheet(
             not numeric (the message names the column and the
             offending value).
     """
-    raw: pd.DataFrame = _read_raw(path)
-    date_column: str = _datetime_column(raw, column_map)
+    raw: pd.DataFrame = read_raw(path)
+    date_column: str = datetime_column(raw, column_map)
     dates: pd.Series = pd.to_datetime(raw[date_column])
     if dates.duplicated().any():
         first_duplicate: pd.Timestamp = dates[
@@ -758,7 +758,7 @@ def read_spreadsheet(
         )
     out: pd.DataFrame = raw.drop(columns=[date_column]).set_index(dates)
     out.index.name = "date"
-    return _float_frame(out.sort_index())
+    return float_frame(out.sort_index())
 
 
 def trim_record(df: pd.DataFrame) -> pd.DataFrame:
@@ -887,9 +887,9 @@ def prefill_mapping(
     The dialog prefill of the Load data flow: the record's columns
     and the auto-detected role → column mapping.
 
-    The file is read by `_read_raw` (file-level errors — an
+    The file is read by `read_raw` (file-level errors — an
     unsupported suffix, an unreadable file — propagate to the
-    caller), its date column is auto-detected by `_datetime_column`
+    caller), its date column is auto-detected by `datetime_column`
     (a missing date column is a file-level error, reported before
     the dialog opens), and the data roles — streamflow and the
     network's measured species — are resolved leniently: each
@@ -920,19 +920,19 @@ def prefill_mapping(
         OSError:
             Raised when the file cannot be read.
     """
-    raw: pd.DataFrame = _read_raw(path)
-    date_column: str = _datetime_column(raw)
+    raw: pd.DataFrame = read_raw(path)
+    date_column: str = datetime_column(raw)
     columns: list[str] = [str(name) for name in raw.columns]
     lowered: dict[str, str] = {
         str(name).strip().lower(): str(name) for name in raw.columns
     }
     prefill: dict[str, str | None] = {"date": date_column}
     for role in ("precip", "temp", "pet", "q_meas", *measured_roles(network)):
-        prefill[role] = _auto_match(lowered, role)
+        prefill[role] = auto_match(lowered, role)
     return columns, prefill
 
 
-def _with_spinup(
+def with_spinup(
     df: pd.DataFrame,
     measured_columns: list[str],
     spinup_days: int = NUM_SPINUP_DAYS,
@@ -950,7 +950,7 @@ def _with_spinup(
     Args:
         df: The record indexed by daily dates, sorted ascending.
         measured_columns: The run's measured concentration columns
-            (from `_measured_columns` or the resolved species
+            (from `measured_columns` or the resolved species
             roles).
         spinup_days: The spin-up length in days; the caller caps it
             to at most half the record (`load_input_data`).
@@ -1019,7 +1019,7 @@ def load_input_data(
     """
     spec: ModelSpec = get_model_spec(model_key)
     network = network if network is not None else default_network()
-    bounds: dict[str, tuple[float, float]] = _bounds(spec, network)
+    bounds: dict[str, tuple[float, float]] = parameter_bounds(spec, network)
 
     df: pd.DataFrame = read_record(path, network, column_map)
     window: tuple[pd.Timestamp, pd.Timestamp] = (df.index[0], df.index[-1])
@@ -1028,7 +1028,7 @@ def load_input_data(
         for column in df.columns
         if column not in ("precip", "temp", "pet", "q_meas")
     ]
-    df = _with_spinup(df, measured, max(0, min(spinup_days, len(df) // 2)))
+    df = with_spinup(df, measured, max(0, min(spinup_days, len(df) // 2)))
 
     precip_conc: np.ndarray = np.full(
         (
@@ -1067,7 +1067,7 @@ def load_input_data(
     )
 
 
-def _split_arr(
+def split_arr(
     arr: np.ndarray, input_data: GuiInputData
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -1120,7 +1120,7 @@ def arr_to_model(arr: np.ndarray, input_data: GuiInputData) -> tuple[pt.Model, n
         The constructed model and the initial-state parameter array.
     """
     arr = arr.copy()
-    model_params, init_state_params = _split_arr(arr, input_data)
+    model_params, init_state_params = split_arr(arr, input_data)
 
     # DIC is not a species of the network: it is the sum of the
     # aqueous carbonate species, so it is declared as a derived
@@ -1143,7 +1143,7 @@ def arr_to_model(arr: np.ndarray, input_data: GuiInputData) -> tuple[pt.Model, n
 
 
 @dataclass(frozen=True)
-class _ExchangeProduct:
+class ExchangeProduct:
     """
     One adsorbed exchange product and its equilibrium terms.
 
@@ -1169,7 +1169,7 @@ class _ExchangeProduct:
     log10_k_eq: float
 
 
-def _exchange_product_terms(reaction: pt.core.ExchangeReaction) -> _ExchangeProduct:
+def exchange_product_terms(reaction: pt.core.ExchangeReaction) -> ExchangeProduct:
     """
     Parse an exchange reaction into its equilibrium-product terms.
 
@@ -1195,7 +1195,7 @@ def _exchange_product_terms(reaction: pt.core.ExchangeReaction) -> _ExchangeProd
         for name, coeff in stoich.items()
         if name != "X-" and name != product_name and coeff > 0.0
     )
-    return _ExchangeProduct(
+    return ExchangeProduct(
         name=product_name,
         x_coeff=stoich.get("X-", 0.0),
         reactants=reactants,
@@ -1204,8 +1204,8 @@ def _exchange_product_terms(reaction: pt.core.ExchangeReaction) -> _ExchangeProd
     )
 
 
-def _exchange_product_concentration(
-    x: float, product: _ExchangeProduct, species_init: dict[str, float]
+def exchange_product_concentration(
+    x: float, product: ExchangeProduct, species_init: dict[str, float]
 ) -> float:
     """
     The equilibrium concentration of one exchange product.
@@ -1241,7 +1241,7 @@ def _exchange_product_concentration(
     return concentration
 
 
-def _solve_exchange_initial_state(
+def solve_exchange_initial_state(
     tot: float,
     exchange_species: list[pt.core.ExchangeReaction],
     species_init: dict[str, float],
@@ -1263,13 +1263,13 @@ def _solve_exchange_initial_state(
     Returns:
         A mapping ``{"X-": x, <product>: [product], ...}``.
     """
-    products: list[_ExchangeProduct] = [
-        _exchange_product_terms(r) for r in exchange_species
+    products: list[ExchangeProduct] = [
+        exchange_product_terms(r) for r in exchange_species
     ]
 
     def residual(x: float) -> float:
         return x + sum(
-            _exchange_product_concentration(x, p, species_init) for p in products
+            exchange_product_concentration(x, p, species_init) for p in products
         ) - tot
 
     if tot <= 0.0 or residual(0.0) >= 0.0:
@@ -1283,13 +1283,13 @@ def _solve_exchange_initial_state(
     return {
         "X-": x,
         **{
-            p.name: _exchange_product_concentration(x, p, species_init)
+            p.name: exchange_product_concentration(x, p, species_init)
             for p in products
         },
     }
 
 
-def _primary_initial_concentrations(
+def primary_initial_concentrations(
     network: pt.ReactionNetwork,
     conc_df: pd.DataFrame,
     init_aq_conc: float,
@@ -1398,7 +1398,7 @@ def arr_to_results(
     model, init_state_params = arr_to_model(arr, input_data)
 
     network: pt.ReactionNetwork = input_data.network
-    primary_init: dict[str, float] = _primary_initial_concentrations(
+    primary_init: dict[str, float] = primary_initial_concentrations(
         network, input_data.conc_df, init_aq_conc
     )
     species_init: dict[str, float] = {
@@ -1428,7 +1428,7 @@ def arr_to_results(
             # A small rootfinding step finds the exchange-site
             # partition of the aqueous species at initialization.
             init_i.exchange.update(
-                _solve_exchange_initial_state(
+                solve_exchange_initial_state(
                     tot_exchange_sites,
                     network.exchange_species,
                     species_init,

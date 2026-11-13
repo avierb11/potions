@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMainWindow,
     QPushButton,
+    QScrollBar,
     QSizePolicy,
     QStatusBar,
     QTabBar,
@@ -104,14 +105,17 @@ from ..gui.common import (
     HYDRO_THEME,
     METRIC_LABELS,
     METRIC_NAMES,
+    MINERAL_PARAMS,
     RIVER_SPECIES,
+    RT_DIM_PARAMS,
     RT_THEME,
     SPECIATION_ZONES,
+    bound_decimals,
     param_label,
 )
 from ..gui.data import PlotSelection
 from ..gui.gradients import (
-    _Perturbation,
+    Perturbation,
     free_parameter_steps,
     gradient_matrix,
     objective_vector,
@@ -129,12 +133,12 @@ from ..gui.state import (
     read_gui_state,
 )
 from .test_gui import (
-    _alpha,
-    _full_state,
-    _lines,
-    _midpoint_vector,
-    _synthetic_results,
-    _write_saved_run,
+    alpha,
+    full_state,
+    line_artists,
+    midpoint_vector,
+    synthetic_results,
+    write_saved_run,
     input_data,
     model_inputs,
 )
@@ -157,7 +161,7 @@ def qapp() -> QApplication:
     return instance
 
 
-def _wait_until(predicate: Callable[[], bool], timeout: float = 15.0) -> None:
+def wait_until(predicate: Callable[[], bool], timeout: float = 15.0) -> None:
     """
     Pump the Qt event loop until `predicate` holds.
 
@@ -176,7 +180,7 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 15.0) -> None:
     pytest.fail(f"Timed out after {timeout} s: {predicate}")
 
 
-def _pump(iterations: int = 50) -> None:
+def pump(iterations: int = 50) -> None:
     """Run a few event-loop ticks (lets deferred deletions land)."""
     app = QApplication.instance()
     assert isinstance(app, QApplication)
@@ -185,23 +189,23 @@ def _pump(iterations: int = 50) -> None:
         time.sleep(0.002)
 
 
-def _key_press(widget: QWidget, key: Qt.Key) -> None:
+def key_press(widget: QWidget, key: Qt.Key) -> None:
     """Deliver one synthetic key press and pump the event loop."""
     QApplication.sendEvent(
         widget, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
     )
-    _pump(5)
+    pump(5)
 
 
-def _key_release(widget: QWidget, key: Qt.Key) -> None:
+def key_release(widget: QWidget, key: Qt.Key) -> None:
     """Deliver one synthetic key release and pump the event loop."""
     QApplication.sendEvent(
         widget, QKeyEvent(QEvent.Type.KeyRelease, key, Qt.KeyboardModifier.NoModifier)
     )
-    _pump(5)
+    pump(5)
 
 
-def _fake_results_factory(
+def fake_results_factory(
     calls: list[np.ndarray] | None,
     input_data: gui_data.GuiInputData,
     hydro_only: bool = False,
@@ -219,11 +223,11 @@ def _fake_results_factory(
     """
 
     def fake(
-        x: np.ndarray, _input_data: gui_data.GuiInputData
+        x: np.ndarray, input_data: gui_data.GuiInputData
     ) -> gui_data.GuiRunResults:
         if calls is not None:
             calls.append(np.array(x))
-        hydro, rt = _synthetic_results(_input_data)
+        hydro, rt = synthetic_results(input_data)
         if hydro_only:
             return gui_data.GuiRunResults(hydro, None)
         return gui_data.GuiRunResults(hydro, rt)
@@ -231,7 +235,7 @@ def _fake_results_factory(
     return fake
 
 
-def _make_window(
+def make_window(
     input_data: gui_data.GuiInputData,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,14 +250,14 @@ def _make_window(
     return gui_window.MainWindow(input_data)
 
 
-def _close_window(win: gui_window.MainWindow) -> None:
+def close_window(win: gui_window.MainWindow) -> None:
     """Stop the window's timers and drop it."""
     win._debounce_timer.stop()
     win.deleteLater()
-    _pump()
+    pump()
 
 
-def _assert_restored_dir(win: gui_window.MainWindow, expected: Path) -> None:
+def assert_restored_dir(win: gui_window.MainWindow, expected: Path) -> None:
     """
     Assert that `win` holds results restored from `expected`.
 
@@ -268,7 +272,7 @@ def _assert_restored_dir(win: gui_window.MainWindow, expected: Path) -> None:
     assert Path(saved_dir).resolve() == expected
 
 
-def _install_bounds_stub(
+def install_bounds_stub(
     monkeypatch: pytest.MonkeyPatch,
     answer: tuple[float, float] | None,
 ) -> list[dict[str, object]]:
@@ -284,7 +288,7 @@ def _install_bounds_stub(
     """
     records: list[dict[str, object]] = []
 
-    class _StubDialog:
+    class StubDialog:
         def __init__(
             self,
             title: str,
@@ -307,11 +311,11 @@ def _install_bounds_stub(
         def run(self) -> tuple[float, float] | None:
             return answer
 
-    monkeypatch.setattr(gui_param_panel, "_BoundsDialog", _StubDialog)
+    monkeypatch.setattr(gui_param_panel, "BoundsDialog", StubDialog)
     return records
 
 
-def _double_click_event() -> QMouseEvent:
+def double_click_event() -> QMouseEvent:
     """A plain left-button double-click mouse event."""
     return QMouseEvent(
         QEvent.Type.MouseButtonDblClick,
@@ -322,7 +326,7 @@ def _double_click_event() -> QMouseEvent:
     )
 
 
-def _band_of(cell: QWidget) -> str:
+def band_of(cell: QWidget) -> str:
     """
     The row band a grid cell's stylesheet asks for (its
     background-color).
@@ -332,7 +336,7 @@ def _band_of(cell: QWidget) -> str:
     return match.group(1)
 
 
-def _app_font_12pt() -> QFont:
+def app_font_12pt() -> QFont:
     """The app's 12 pt base font, as `main` sets it on the app.
 
     The test windows never pass through `main`, so the tests that
@@ -344,7 +348,7 @@ def _app_font_12pt() -> QFont:
     return font
 
 
-def _objective_test_table() -> pd.DataFrame:
+def objective_test_table() -> pd.DataFrame:
     """A four-target objective table crafted for the panel tests.
 
     The three species' values format to eight-character scientific
@@ -364,7 +368,7 @@ def _objective_test_table() -> pd.DataFrame:
     return pd.DataFrame(values, index=list(METRIC_LABELS.values()))
 
 
-class _FakeMessageBox:
+class FakeMessageBox:
     """
     Stands in for `QMessageBox`; the window calls `question`
     (which returns the class-level `answer`), `critical`, and
@@ -386,7 +390,7 @@ class _FakeMessageBox:
         text: str,
         buttons: int = 0,
     ) -> int:
-        return _FakeMessageBox.answer
+        return FakeMessageBox.answer
 
     @staticmethod
     def critical(
@@ -395,7 +399,7 @@ class _FakeMessageBox:
         text: str,
         *buttons: object,
     ) -> None:
-        _FakeMessageBox.critical_calls.append((title, text))
+        FakeMessageBox.critical_calls.append((title, text))
 
     @staticmethod
     def information(
@@ -404,7 +408,7 @@ class _FakeMessageBox:
         text: str,
         *buttons: object,
     ) -> None:
-        _FakeMessageBox.information_calls.append((title, text))
+        FakeMessageBox.information_calls.append((title, text))
 
 
 # ------------------------------------------------------------------ #
@@ -416,20 +420,20 @@ class TestWindowGeometryClamp:
     """`_clamped_geometry` keeps a requested geometry inside the screen."""
 
     def test_geometry_inside_is_untouched(self) -> None:
-        assert gui_window._clamped_geometry(
+        assert gui_window.clamped_geometry(
             QRect(10, 20, 1100, 800), QRect(0, 0, 1920, 1168)
         ) == QRect(10, 20, 1100, 800)
 
     def test_oversized_geometry_is_capped(self) -> None:
         # The real bug's shape: a maximized client rect saved on a
         # 1920×1200 screen, restored on a smaller available area.
-        assert gui_window._clamped_geometry(
+        assert gui_window.clamped_geometry(
             QRect(0, 0, 1914, 1135), QRect(0, 64, 1024, 700)
         ) == QRect(0, 64, 1024, 700)
 
     def test_far_edge_position_is_pulled_back(self) -> None:
         # Full-size window pushed fully inside the available area.
-        assert gui_window._clamped_geometry(
+        assert gui_window.clamped_geometry(
             QRect(1500, 1500, 800, 600), QRect(0, 0, 1920, 1200)
         ) == QRect(1120, 600, 800, 600)
 
@@ -440,7 +444,7 @@ class TestWindowGeometryClamp:
         # that is no display to fit; the helper must call it headless
         # so windows keep their intended geometry there.
         assert qapp.platformName() == "offscreen"  # the suite's platform
-        assert gui_window._available_screen_geometry() is None
+        assert gui_window.available_screen_geometry() is None
 
 
 class TestMainWindowStartup:
@@ -455,21 +459,21 @@ class TestMainWindowStartup:
     ) -> None:
         """With no saved run, run the models once at the defaults."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             # Exactly one run was started, at the default (midpoint)
             # vector, and the results are on screen.
             assert len(calls) == 1
-            assert np.array_equal(calls[0], _midpoint_vector(input_data))
+            assert np.array_equal(calls[0], midpoint_vector(input_data))
             # The finished worker's reference was dropped and its
             # deferred deletion has landed: a later "maybe start"
             # must neither touch the deleted object nor re-run.
@@ -506,11 +510,11 @@ class TestMainWindowStartup:
             # per measured target (the streamflow and the species).
             assert win._objective_model.rowCount() == 7
             assert win._objective_model.columnCount() == 4
-            assert win.windowTitle() == gui_window._title_for(
+            assert win.windowTitle() == gui_window.title_for(
                 model_specs.DEFAULT_MODEL_SPEC
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_starts_with_tabbed_figure_docks(
         self,
@@ -521,19 +525,19 @@ class TestMainWindowStartup:
     ) -> None:
         """The first run's eight figures open as tabbed dock panels."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             win.show()
-            _pump()
+            pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
             assert panel.page_count() == 8
             titles: list[str] = [
@@ -558,7 +562,7 @@ class TestMainWindowStartup:
                 for index in range(tab_bars[0].count())
             ] == titles
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_objective_panel_fits_content_without_scrollbars(
         self,
@@ -569,17 +573,17 @@ class TestMainWindowStartup:
     ) -> None:
         """The objective table needs no scrollbars and sits top-aligned."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             # Both scrollbars are off: the view never needs to scroll.
             assert (
                 win._objective_table.horizontalScrollBarPolicy()
@@ -609,7 +613,7 @@ class TestMainWindowStartup:
             table = win._objective_table
             table.horizontalHeader().resizeSections()
             table.verticalHeader().resizeSections()
-            width, height = gui_window._objective_panel_size(
+            width, height = gui_window.objective_panel_size(
                 win._objective_heading.sizeHint(),
                 [
                     table.horizontalHeader().sectionSize(c)
@@ -622,8 +626,8 @@ class TestMainWindowStartup:
                 table.verticalHeader().sizeHint().width(),
                 table.horizontalHeader().sizeHint().height(),
                 table.frameWidth(),
-                gui_window._OBJECTIVE_PANEL_MARGINS,
-                gui_window._OBJECTIVE_PANEL_SPACING,
+                gui_window.OBJECTIVE_PANEL_MARGINS,
+                gui_window.OBJECTIVE_PANEL_SPACING,
             )
             assert (
                 win._objective_panel.width(),
@@ -638,7 +642,7 @@ class TestMainWindowStartup:
             # does).
             assert not win._objective_heading.isHidden()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_objective_panel_width_uses_rendered_section_sizes(
         self,
@@ -657,21 +661,21 @@ class TestMainWindowStartup:
         to clip the last column.
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
-            font: QFont = _app_font_12pt()
+            pump(50)
+            font: QFont = app_font_12pt()
             win._objective_table.setFont(font)
             win._objective_heading.setFont(font)
-            win._objective_model.set_table(_objective_test_table())
+            win._objective_model.set_table(objective_test_table())
             win._fit_objective_panel()
             table = win._objective_table
             h: QHeaderView = table.horizontalHeader()
@@ -682,7 +686,7 @@ class TestMainWindowStartup:
             # wider than the header-text-only formula.
             assert any(
                 h.sectionSize(c)
-                > h.sectionSizeHint(c) + gui_window._CHECKBOX_INSET
+                > h.sectionSizeHint(c) + gui_window.CHECKBOX_INSET
                 for c in range(win._objective_model.columnCount())
             )
             # Every rendered column fits its widest cell.
@@ -695,7 +699,7 @@ class TestMainWindowStartup:
                     )
                     widest = max(widest, hint.width())
                 assert h.sectionSize(c) >= widest
-            width, height = gui_window._objective_panel_size(
+            width, height = gui_window.objective_panel_size(
                 win._objective_heading.sizeHint(),
                 [
                     h.sectionSize(c)
@@ -708,15 +712,15 @@ class TestMainWindowStartup:
                 v.sizeHint().width(),
                 h.sizeHint().height(),
                 table.frameWidth(),
-                gui_window._OBJECTIVE_PANEL_MARGINS,
-                gui_window._OBJECTIVE_PANEL_SPACING,
+                gui_window.OBJECTIVE_PANEL_MARGINS,
+                gui_window.OBJECTIVE_PANEL_SPACING,
             )
             assert (
                 win._objective_panel.width(),
                 win._objective_panel.height(),
             ) == (width, height)
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_objective_cell_value_clears_the_checkbox_inset(
         self,
@@ -735,21 +739,21 @@ class TestMainWindowStartup:
         end would shorten the visible span).
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
-            font: QFont = _app_font_12pt()
+            pump(50)
+            font: QFont = app_font_12pt()
             win._objective_table.setFont(font)
             win._objective_heading.setFont(font)
-            win._objective_model.set_table(_objective_test_table())
+            win._objective_model.set_table(objective_test_table())
             win._fit_objective_panel()
             table = win._objective_table
             h: QHeaderView = table.horizontalHeader()
@@ -817,7 +821,7 @@ class TestMainWindowStartup:
             # The text starts to the right of the checkbox's inset
             # (a little slack for antialiasing): it is not covered
             # at its beginning.
-            assert first_dark >= gui_window._CHECKBOX_INSET - 2
+            assert first_dark >= gui_window.CHECKBOX_INSET - 2
             # The full text is visible: the ink span matches the
             # font-metrics width of the display string.
             assert abs((last_dark - first_dark) - tw) <= 8
@@ -825,7 +829,7 @@ class TestMainWindowStartup:
             # plus the style's 2 px text margin plus the full width
             # (the ink trail ends a pixel or two short of the
             # advance width): it is not clipped at the cell edge.
-            assert abs(last_dark - (gui_window._CHECKBOX_INSET + 2 + tw)) <= 10
+            assert abs(last_dark - (gui_window.CHECKBOX_INSET + 2 + tw)) <= 10
             # Guard: the checkbox itself is still drawn in the
             # inset: its white fill (well above the cell background)
             # at the cell's vertical middle.
@@ -837,7 +841,7 @@ class TestMainWindowStartup:
             )
             assert fill, "the checkbox's white fill is missing from the inset"
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restores_full_state(
         self,
@@ -847,21 +851,21 @@ class TestMainWindowStartup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A complete gui_state restores everything without a re-run."""
-        run_dir: Path = _write_saved_run(
+        run_dir: Path = write_saved_run(
             tmp_path,
             input_data,
-            _full_state(input_data, save_history=True),
+            full_state(input_data, save_history=True),
         )
         calls: list[np.ndarray] = []
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         available: QRect = QRect(40, 30, 760, 560)
         monkeypatch.setattr(
-            gui_window, "_available_screen_geometry", lambda: available
+            gui_window, "available_screen_geometry", lambda: available
         )
         win = gui_window.MainWindow(input_data)
         try:
@@ -870,7 +874,7 @@ class TestMainWindowStartup:
             # lookup returned, so resolve it against the cwd).
             assert calls == []
             assert win._worker is None
-            _assert_restored_dir(win, run_dir)
+            assert_restored_dir(win, run_dir)
             assert win._status_label.text() == (
                 "Restored the most recent saved run; the figures were "
                 "built from its saved output."
@@ -889,7 +893,7 @@ class TestMainWindowStartup:
             # The saved 1100×800 at (10, 20) is clamped to the
             # patched screen area: the size caps to it and the
             # origin pulls back to its corner.
-            assert win.geometry() == gui_window._clamped_geometry(
+            assert win.geometry() == gui_window.clamped_geometry(
                 QRect(10, 20, 1100, 800),
                 available,
             )
@@ -898,7 +902,7 @@ class TestMainWindowStartup:
             # assertion retired with the splitter).
             assert win._figure_panel.page_count() == 8
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restores_maximized_run(
         self,
@@ -908,32 +912,32 @@ class TestMainWindowStartup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A run saved maximized reopens maximized, not oversized."""
-        run_dir: Path = _write_saved_run(
+        run_dir: Path = write_saved_run(
             tmp_path,
             input_data,
-            _full_state(input_data, window_maximized=True),
+            full_state(input_data, window_maximized=True),
         )
         calls: list[np.ndarray] = []
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         available: QRect = QRect(40, 30, 760, 560)
         monkeypatch.setattr(
-            gui_window, "_available_screen_geometry", lambda: available
+            gui_window, "available_screen_geometry", lambda: available
         )
         win = gui_window.MainWindow(input_data)
         try:
             # The saved normal geometry is applied clamped to the
             # patched screen area, before the window is shown.
-            clamped: QRect = gui_window._clamped_geometry(
+            clamped: QRect = gui_window.clamped_geometry(
                 QRect(10, 20, 1100, 800), available
             )
             assert win.geometry() == clamped
             win.show()
-            _pump()
+            pump()
             # The deferred maximize (the showEvent hand-off) landed:
             # the window is genuinely maximized, not a normal window
             # wearing a screen-sized geometry.
@@ -949,15 +953,15 @@ class TestMainWindowStartup:
             assert normal is not None
             assert normal.height() == clamped.height()
             assert win.geometry() != normal
-            _assert_restored_dir(win, run_dir)
+            assert_restored_dir(win, run_dir)
             # Un-maximizing returns to the tracked normal geometry:
             # what a later save records, not the maximized client.
             win.showNormal()
-            _pump()
+            pump()
             assert not win.isMaximized()
             assert win.geometry() == normal
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restores_legacy_run(
         self,
@@ -967,17 +971,17 @@ class TestMainWindowStartup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A run saved before gui_state exists restores from CSVs only."""
-        run_dir: Path = _write_saved_run(tmp_path, input_data)
+        run_dir: Path = write_saved_run(tmp_path, input_data)
         calls: list[np.ndarray] = []
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         available: QRect = QRect(40, 30, 760, 560)
         monkeypatch.setattr(
-            gui_window, "_available_screen_geometry", lambda: available
+            gui_window, "available_screen_geometry", lambda: available
         )
         win = gui_window.MainWindow(input_data)
         try:
@@ -1001,18 +1005,18 @@ class TestMainWindowStartup:
             # Geometry keeps its default (the default size clamped
             # to the patched screen area).
             assert win.width() == min(
-                gui_window._INITIAL_SIZE[0], available.width()
+                gui_window.INITIAL_SIZE[0], available.width()
             )
             assert win.height() == min(
-                gui_window._INITIAL_SIZE[1], available.height()
+                gui_window.INITIAL_SIZE[1], available.height()
             )
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
             # No saved state carried the toggle: it restores off.
             assert not win._save_history_action.isChecked()
-            _assert_restored_dir(win, run_dir)
+            assert_restored_dir(win, run_dir)
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restores_hydro_only(
         self,
@@ -1022,8 +1026,8 @@ class TestMainWindowStartup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A hydrology-only saved run restores its mode, no re-run."""
-        state = _full_state(input_data, mode=MODE_HYDRO)
-        run_dir: Path = _write_saved_run(
+        state = full_state(input_data, mode=MODE_HYDRO)
+        run_dir: Path = write_saved_run(
             tmp_path, input_data, state, hydro_only=True
         )
         calls: list[np.ndarray] = []
@@ -1032,12 +1036,12 @@ class TestMainWindowStartup:
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         monkeypatch.setattr(
             gui_window,
             "arr_to_hydro_results",
-            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+            fake_results_factory(hydro_calls, input_data, hydro_only=True),
         )
         win = gui_window.MainWindow(input_data)
         try:
@@ -1049,7 +1053,7 @@ class TestMainWindowStartup:
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert panel.param_values()["proportion.1"] == pytest.approx(0.7)
             win.show()
-            _pump()
+            pump()
             # The reactive-transport parts of the panel are hidden.
             assert panel._groups["reactive"].isHidden()
             assert panel._groups["initial"].isHidden()
@@ -1076,9 +1080,9 @@ class TestMainWindowStartup:
                 "Restored the most recent saved run; the figures were "
                 "built from its saved output."
             )
-            _assert_restored_dir(win, run_dir)
+            assert_restored_dir(win, run_dir)
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -1098,11 +1102,11 @@ class TestWindowMenus:
     ) -> None:
         """The File menu holds the four data/network actions, in order, with tooltips."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             texts = [
@@ -1119,7 +1123,7 @@ class TestWindowMenus:
                 action.toolTip() for action in win._file_menu.actions()
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_options_menu_carries_the_settings_actions(
         self,
@@ -1130,11 +1134,11 @@ class TestWindowMenus:
     ) -> None:
         """The Options menu holds the settings toggles, Reset bounds, and Quit."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             texts = [
@@ -1156,7 +1160,7 @@ class TestWindowMenus:
                 "Reset bounds"
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_menu_bar_lists_the_menus_in_order(
         self,
@@ -1167,18 +1171,18 @@ class TestWindowMenus:
     ) -> None:
         """The menu bar carries File, Options, and View, in that order."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             assert [
                 action.text() for action in win.menuBar().actions()
             ] == ["&File", "&Options", "&View"]
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -1206,11 +1210,11 @@ class TestWindowToolbar:
     ) -> None:
         """The toolbar cannot be dragged, floated, or shown as icons."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             assert not win._toolbar.isMovable()
@@ -1220,7 +1224,7 @@ class TestWindowToolbar:
                 == Qt.ToolButtonStyle.ToolButtonTextOnly
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_toolbar_carries_the_combos_spinner_and_job_actions_in_order(
         self,
@@ -1231,11 +1235,11 @@ class TestWindowToolbar:
     ) -> None:
         """The toolbar's items are the combos, the job actions, and the mode toggle."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             # `actions()` also contains the `QWidgetAction` wrappers
@@ -1262,7 +1266,7 @@ class TestWindowToolbar:
             for widget in (win._model_combo, win._network_combo, win._job_spinner):
                 assert isinstance(widget.parent(), QToolBar)
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_status_label_lives_in_the_status_bar(
         self,
@@ -1273,17 +1277,17 @@ class TestWindowToolbar:
     ) -> None:
         """The status label moved from the header row to the status bar."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             assert isinstance(win._status_label.parent(), QStatusBar)
-            assert win._status_label.maximumWidth() == gui_window._STATUS_MAX_WIDTH
+            assert win._status_label.maximumWidth() == gui_window.STATUS_MAX_WIDTH
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_narrow_window_elides_the_toolbar(
         self,
@@ -1294,11 +1298,11 @@ class TestWindowToolbar:
     ) -> None:
         """A window narrower than the toolbar shows the extension button (»)."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             # Qt's private extension button (») is a child tool
@@ -1312,18 +1316,18 @@ class TestWindowToolbar:
             )
             assert extension is not None
             win.show()
-            _pump(50)
+            pump(50)
             win.resize(1600, 700)
-            _pump(50)
+            pump(50)
             assert not extension.isVisible()
             win.resize(600, 700)
-            _pump(50)
+            pump(50)
             assert extension.isVisible()
             win.resize(1600, 700)
-            _pump(50)
+            pump(50)
             assert not extension.isVisible()
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -1354,21 +1358,21 @@ class TestWindowMinimumSize:
     ) -> None:
         """A default-state window reports a minimum no larger than _INITIAL_SIZE."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             minimum: QSize = win.minimumSizeHint()
-            assert minimum.width() <= gui_window._INITIAL_SIZE[0]
-            assert minimum.height() <= gui_window._INITIAL_SIZE[1]
+            assert minimum.width() <= gui_window.INITIAL_SIZE[0]
+            assert minimum.height() <= gui_window.INITIAL_SIZE[1]
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -1376,24 +1380,23 @@ class TestWindowMinimumSize:
 # ------------------------------------------------------------------ #
 
 
-def _figure_toggle_actions(win: gui_window.MainWindow) -> list[QAction]:
+def figure_toggle_actions(win: gui_window.MainWindow) -> list[QAction]:
     """The *View* menu's checkable per-figure toggles, in menu order."""
     return [
         action for action in win._view_menu.actions() if action.isCheckable()
     ]
 
 
-def _figure_tab_texts(win: gui_window.MainWindow) -> list[str]:
+def figure_tab_bar(win: gui_window.MainWindow) -> QTabBar:
     """
-    The figure strip's tab texts.
+    The laid-out tab bar the figure docks share.
 
-    The figure docks share one laid-out tab bar, so exactly one
-    visible bar sits inside the window's own rect.  A restored dock
-    layout (a ``restoreState`` application) can leave the pre-restore
-    area's bar orphaned: never laid out, parked at its default
-    geometry far outside the window, so the window clips it and it is
-    invisible to the user — the geometry filter drops it here for the
-    same reason.
+    Exactly one visible bar sits inside the window's own rect.  A
+    restored dock layout (a ``restoreState`` application) can leave
+    the pre-restore area's bar orphaned: never laid out, parked at
+    its default geometry far outside the window, so the window clips
+    it and it is invisible to the user — the geometry filter drops
+    it here for the same reason.
     """
     window_rect: QRect = QRect(0, 0, win.width(), win.height())
     tab_bars: list[QTabBar] = [
@@ -1402,9 +1405,28 @@ def _figure_tab_texts(win: gui_window.MainWindow) -> list[str]:
         if bar.isVisible() and bar.geometry().intersects(window_rect)
     ]
     assert len(tab_bars) == 1, "Expected exactly one visible tab bar."
-    return [
-        tab_bars[0].tabText(index) for index in range(tab_bars[0].count())
-    ]
+    return tab_bars[0]
+
+
+def figure_tab_texts(win: gui_window.MainWindow) -> list[str]:
+    """The figure strip's tab texts."""
+    bar: QTabBar = figure_tab_bar(win)
+    return [bar.tabText(index) for index in range(bar.count())]
+
+
+def visible_tab(win: gui_window.MainWindow) -> tuple[int, str]:
+    """
+    The figure strip's raised tab as its (index, title).
+
+    The panel's `current_page()` is its own tracker, which a dock's
+    `visibilityChanged` handler rewrites whenever Qt's dock layout
+    raises that dock; the laid-out tab bar's current index is what
+    the user actually sees, so tests about which figure is on screen
+    read it here.
+    """
+    bar: QTabBar = figure_tab_bar(win)
+    index: int = bar.currentIndex()
+    return index, bar.tabText(index)
 
 
 class TestViewMenu:
@@ -1428,19 +1450,19 @@ class TestViewMenu:
     ) -> None:
         """One checked, checkable toggle per figure page, in page order."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             panel: gui_figure_panel.FigurePanel = win._figure_panel
             assert win._view_menu.title() == "&View"
-            toggles: list[QAction] = _figure_toggle_actions(win)
+            toggles: list[QAction] = figure_toggle_actions(win)
             assert [action.text() for action in toggles] == panel._titles
             assert len(toggles) == panel.page_count() == 8
             assert all(
@@ -1457,7 +1479,7 @@ class TestViewMenu:
             assert not win._reset_dock_action.isCheckable()
             assert win._reset_dock_action.toolTip()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_closing_a_dock_unchecks_its_action(
         self,
@@ -1475,35 +1497,35 @@ class TestViewMenu:
         shows the dock and puts the tab back.
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win.show()
-            _pump()
+            pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
             dock: gui_figure_panel.FigureDock = panel.docks()[0]
-            action: QAction = _figure_toggle_actions(win)[0]
+            action: QAction = figure_toggle_actions(win)[0]
             assert action.text() == "Hydrology"
             assert action.isChecked()
             dock.close()
-            _pump()
+            pump()
             assert not action.isChecked()
             assert not dock.isVisible()
-            assert _figure_tab_texts(win) == panel._titles[1:]
+            assert figure_tab_texts(win) == panel._titles[1:]
             action.setChecked(True)
-            _pump()
+            pump()
             assert action.isChecked()
             assert dock.isVisible()
-            assert _figure_tab_texts(win) == panel._titles
+            assert figure_tab_texts(win) == panel._titles
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_reset_dock_layout_retabs_everything(
         self,
@@ -1514,35 +1536,35 @@ class TestViewMenu:
     ) -> None:
         """Floated docks return to one page-ordered tab strip."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win.show()
-            _pump()
+            pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
             panel.docks()[1].setFloating(True)
             panel.docks()[4].setFloating(True)
-            _pump()
+            pump()
             win._reset_dock_action.trigger()
-            _pump()
+            pump()
             docks: list[gui_figure_panel.FigureDock] = panel.docks()
             assert all(not dock.isFloating() for dock in docks)
             assert all(
                 win.dockWidgetArea(dock) == gui_figure_panel.DOCK_AREA
                 for dock in docks
             )
-            assert _figure_tab_texts(win) == panel._titles
+            assert figure_tab_texts(win) == panel._titles
             assert panel.current_page() == 0
             assert win._status_label.text() == "Dock layout reset."
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_view_menu_tracks_mode_switch(
         self,
@@ -1554,31 +1576,31 @@ class TestViewMenu:
         """Switching to hydrology-only re-lists the menu for three figures."""
         full_calls: list[np.ndarray] = []
         hydro_calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(full_calls, input_data),
+            fake_results_factory(full_calls, input_data),
         )
         monkeypatch.setattr(
             gui_window,
             "arr_to_hydro_results",
-            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+            fake_results_factory(hydro_calls, input_data, hydro_only=True),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win.show()
-            _pump()
+            pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert len(_figure_toggle_actions(win)) == 8
+            assert len(figure_toggle_actions(win)) == 8
             win._mode_action.setChecked(True)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
-            _pump(50)
-            toggles: list[QAction] = _figure_toggle_actions(win)
+            pump(50)
+            toggles: list[QAction] = figure_toggle_actions(win)
             assert [action.text() for action in toggles] == [
                 "Hydrology",
                 "Storage",
@@ -1591,7 +1613,7 @@ class TestViewMenu:
             ]
             assert all(action.isCheckable() and action.isChecked() for action in toggles)
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -1611,24 +1633,24 @@ class TestMainWindowRuns:
     ) -> None:
         """Editing a value after the first run starts a second one."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             win._maybe_start_run()  # nothing to do: the deleted-worker case
             assert len(calls) == 1
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
             assert len(calls) == 2
@@ -1639,7 +1661,7 @@ class TestMainWindowRuns:
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_run_history_toggle(
         self,
@@ -1650,17 +1672,17 @@ class TestMainWindowRuns:
     ) -> None:
         """The run-history toggle gates the abbreviated history file."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             history_file: Path = (
                 tmp_path / "results" / RUN_HISTORY_FILENAME
             )
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             # The startup run finished with the toggle off: no
@@ -1669,12 +1691,12 @@ class TestMainWindowRuns:
 
             win._save_history_action.setChecked(True)
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             assert history_file.is_file()
             lines: list[str] = history_file.read_text(
                 encoding="utf-8"
@@ -1707,14 +1729,14 @@ class TestMainWindowRuns:
             # With the toggle off again the history stays put.
             win._save_history_action.setChecked(False)
             row._spin.setValue(0.825)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 3 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             lines = history_file.read_text(encoding="utf-8").splitlines()
             assert len(lines) == 1
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_failed_run(
         self,
@@ -1734,7 +1756,7 @@ class TestMainWindowRuns:
         monkeypatch.setattr(gui_window, "arr_to_results", fake)
         win = gui_window.MainWindow(input_data)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._status_label.text() == "Run failed: ValueError: boom"
             )
@@ -1753,7 +1775,7 @@ class TestMainWindowRuns:
                 "Nothing to save yet: the model has not run."
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_water_volume_error_modal(
         self,
@@ -1770,26 +1792,26 @@ class TestMainWindowRuns:
         ) -> gui_data.GuiRunResults:
             raise WaterVolumeError(message)
 
-        monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-        _FakeMessageBox.critical_calls.clear()
+        monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+        FakeMessageBox.critical_calls.clear()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", fake)
         win = gui_window.MainWindow(input_data)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._status_label.text()
                 == f"Run failed: WaterVolumeError: {message}"
             )
-            _pump()
-            assert _FakeMessageBox.critical_calls == [
+            pump()
+            assert FakeMessageBox.critical_calls == [
                 ("Water volume error", message)
             ]
             assert win._results is None
             assert not win._save_action.isEnabled()
             assert win._run_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_save_run(
         self,
@@ -1800,14 +1822,14 @@ class TestMainWindowRuns:
     ) -> None:
         """Save writes the run output plus the session state."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             run_dir: Path = tmp_path / "results" / "run_fake"
@@ -1834,14 +1856,14 @@ class TestMainWindowRuns:
             # geometry Qt has actually applied, which only settles
             # once the window is laid out against a screen.
             win.show()
-            _pump()
+            pump()
             # Showing an offscreen window moves it off the origin;
             # restore the intended client geometry so the saved state
             # is exactly the geometry the constructor asked for.
             # Qt can still apply a different size, so record the
             # geometry it actually applied.
-            win.setGeometry(0, 0, *gui_window._INITIAL_SIZE)
-            _pump()
+            win.setGeometry(0, 0, *gui_window.INITIAL_SIZE)
+            pump()
             applied: QRect = win.geometry()
             expected_geometry: dict[str, int] = {
                 "x": applied.x(),
@@ -1905,7 +1927,7 @@ class TestMainWindowRuns:
             # A parameter change after the run blocks the save (the
             # results on screen would be stale).
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
             win._debounce_timer.stop()
             win._on_save_run()
@@ -1915,7 +1937,7 @@ class TestMainWindowRuns:
             )
             assert len(saves) == 2
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_save_run_while_maximized(
         self,
@@ -1926,14 +1948,14 @@ class TestMainWindowRuns:
     ) -> None:
         """A maximized save records the flag and the normal geometry."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             run_dir: Path = tmp_path / "results" / "run_fake"
@@ -1950,7 +1972,7 @@ class TestMainWindowRuns:
                 return run_dir
 
             win.show()
-            _pump()
+            pump()
             # Record the geometry Qt actually applied after show (the
             # offscreen plugin offsets the origin by its fake frame and
             # expands the window to its content's minimum size hint,
@@ -1959,10 +1981,10 @@ class TestMainWindowRuns:
             # save must record is the tracked normal geometry, never
             # the maximized client rect).
             win.setGeometry(10, 10, 500, 400)
-            _pump()
+            pump()
             normal: QRect = win.geometry()
             win.showMaximized()
-            _pump()
+            pump()
             assert win.isMaximized()
             assert win.geometry() != normal  # sanity: truly maximized
 
@@ -1979,7 +2001,7 @@ class TestMainWindowRuns:
                 "height": normal.height(),
             }
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_close_with_run_in_flight(
         self,
@@ -1992,23 +2014,23 @@ class TestMainWindowRuns:
         releases: list[threading.Event] = []
 
         def blocking_fake(
-            x: np.ndarray, _input_data: gui_data.GuiInputData
+            x: np.ndarray, input_data: gui_data.GuiInputData
         ) -> gui_data.GuiRunResults:
             release: threading.Event = threading.Event()
             releases.append(release)
             release.wait()
-            return gui_data.GuiRunResults(*_synthetic_results(_input_data))
+            return gui_data.GuiRunResults(*synthetic_results(input_data))
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", blocking_fake)
-        monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
+        monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
         win = gui_window.MainWindow(input_data)
         try:
             # First run in flight: declining cancels the close.
-            _wait_until(
+            wait_until(
                 lambda: win._worker is not None and win._worker.isRunning()
             )
-            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
+            FakeMessageBox.answer = FakeMessageBox.StandardButton.No
             event: QCloseEvent = QCloseEvent()
             win.closeEvent(event)
             assert not event.isAccepted()
@@ -2016,30 +2038,30 @@ class TestMainWindowRuns:
 
             # Let the run finish: the results come up as usual.
             releases[0].set()
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and "Run 1 finished" in win._status_label.text()
             )
 
             # Second run in flight: accepting waits it out.
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and len(releases) == 2
             )
             threading.Timer(0.3, releases[1].set).start()
-            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.Yes
+            FakeMessageBox.answer = FakeMessageBox.StandardButton.Yes
             event2: QCloseEvent = QCloseEvent()
             win.closeEvent(event2)
             assert event2.isAccepted()
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._results is not None
             )
             assert win._run_generation == 2
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_arrow_actions_flip_figure_pages(
         self,
@@ -2050,14 +2072,14 @@ class TestMainWindowRuns:
     ) -> None:
         """The Left / Right actions cycle through the three figures."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             # The window now carries menu and toolbar actions too;
@@ -2090,7 +2112,7 @@ class TestMainWindowRuns:
             assert panel.current_page() == 7
             assert docks[7].windowTitle() == "Reaction rates (SOC(s))"
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_hydro_only_mode(
         self,
@@ -2106,23 +2128,23 @@ class TestMainWindowRuns:
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(full_calls, input_data),
+            fake_results_factory(full_calls, input_data),
         )
         monkeypatch.setattr(
             gui_window,
             "arr_to_hydro_results",
-            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+            fake_results_factory(hydro_calls, input_data, hydro_only=True),
         )
         win = gui_window.MainWindow(input_data)
         try:
             # The startup run is in full mode (the checkbox is off).
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             assert len(full_calls) == 1
             assert hydro_calls == []
             win.show()
-            _pump()
+            pump()
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert not panel._groups["reactive"].isHidden()
             assert not panel._groups["initial"].isHidden()
@@ -2132,14 +2154,14 @@ class TestMainWindowRuns:
             # Switching to hydrology-only re-runs in that mode and
             # hides the reactive-transport parts of the panel.
             win._mode_action.setChecked(True)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             assert len(hydro_calls) == 1
             assert len(full_calls) == 1
             assert np.array_equal(
-                hydro_calls[0], _midpoint_vector(input_data)
+                hydro_calls[0], midpoint_vector(input_data)
             )
             assert panel._groups["reactive"].isHidden()
             assert panel._groups["initial"].isHidden()
@@ -2162,12 +2184,12 @@ class TestMainWindowRuns:
             # the run history (Streamflow is the only target).
             win._save_history_action.setChecked(True)
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 3 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             assert len(hydro_calls) == 2
             history_file: Path = (
                 tmp_path / "results" / RUN_HISTORY_FILENAME
@@ -2222,10 +2244,10 @@ class TestMainWindowRuns:
             # Switching back to full mode re-runs with the edited
             # value and restores the full layout.
             win._mode_action.setChecked(False)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 4 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             assert len(full_calls) == 2
             index: int = list(input_data.bounds).index("proportion.1")
             assert full_calls[1][index] == pytest.approx(0.775)
@@ -2236,7 +2258,7 @@ class TestMainWindowRuns:
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -2255,45 +2277,45 @@ class TestMaximizeChord:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win.show()
-            _pump()
+            pump()
             normal_geometry: QRect = win.geometry()
 
             # Home held, then Up: maximize.
-            _key_press(win, Qt.Key.Key_Home)
-            _key_press(win, Qt.Key.Key_Up)
-            _key_release(win, Qt.Key.Key_Home)
-            _key_release(win, Qt.Key.Key_Up)
+            key_press(win, Qt.Key.Key_Home)
+            key_press(win, Qt.Key.Key_Up)
+            key_release(win, Qt.Key.Key_Home)
+            key_release(win, Qt.Key.Key_Up)
             assert win.isMaximized()
 
             # Up held, then Home (either order works): un-maximize,
             # back to the previous normal geometry.
-            _key_press(win, Qt.Key.Key_Up)
-            _key_press(win, Qt.Key.Key_Home)
-            _key_release(win, Qt.Key.Key_Up)
-            _key_release(win, Qt.Key.Key_Home)
+            key_press(win, Qt.Key.Key_Up)
+            key_press(win, Qt.Key.Key_Home)
+            key_release(win, Qt.Key.Key_Up)
+            key_release(win, Qt.Key.Key_Home)
             assert not win.isMaximized()
             assert win.geometry() == normal_geometry
 
             # A lone Home and a lone Up never maximize, even when the
             # one follows the other with the key released in between.
-            _key_press(win, Qt.Key.Key_Home)
-            _key_release(win, Qt.Key.Key_Home)
-            _key_press(win, Qt.Key.Key_Up)
-            _key_release(win, Qt.Key.Key_Up)
+            key_press(win, Qt.Key.Key_Home)
+            key_release(win, Qt.Key.Key_Home)
+            key_press(win, Qt.Key.Key_Up)
+            key_release(win, Qt.Key.Key_Up)
             assert not win.isMaximized()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_single_up_keeps_spinbox_behavior(
         self,
@@ -2303,30 +2325,30 @@ class TestMaximizeChord:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win.show()
-            _pump()
+            pump()
             spin: QDoubleSpinBox | None = win._param_panel.findChild(
                 QDoubleSpinBox
             )
             assert spin is not None
             spin.setFocus()
-            _pump()
+            pump()
 
             # A lone Up still steps the spin box (the chord filter
             # only ever consumes the *second* key of the pair).
             before: float = spin.value()
-            _key_press(spin, Qt.Key.Key_Up)
-            _key_release(spin, Qt.Key.Key_Up)
+            key_press(spin, Qt.Key.Key_Up)
+            key_release(spin, Qt.Key.Key_Up)
             assert spin.value() == pytest.approx(before + spin.singleStep())
             assert not win.isMaximized()
 
@@ -2334,16 +2356,16 @@ class TestMaximizeChord:
             # and is consumed (the spin box does not step on it).  The
             # lone Home itself is not the chord and reaches the spin
             # box, which Qt moves to its minimum.
-            _key_press(spin, Qt.Key.Key_Home)
+            key_press(spin, Qt.Key.Key_Home)
             value_after_home: float = spin.value()
-            _key_press(spin, Qt.Key.Key_Up)
-            _key_release(spin, Qt.Key.Key_Home)
-            _key_release(spin, Qt.Key.Key_Up)
+            key_press(spin, Qt.Key.Key_Up)
+            key_release(spin, Qt.Key.Key_Home)
+            key_release(spin, Qt.Key.Key_Up)
             assert win.isMaximized()
             assert spin.value() == value_after_home
         finally:
             win._debounce_timer.stop()
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -2363,28 +2385,28 @@ class TestAutoRunToggle:
     ) -> None:
         """With auto-run off, edits wait for the *Run model* action."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             assert win._auto_run_action.isChecked()
             assert not win._run_action.isEnabled()
             win._auto_run_action.setChecked(False)
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
             # The results on screen are stale, so the run button is
             # enabled; no auto-run is armed, so nothing else happens.
             assert win._run_action.isEnabled()
-            _pump(200)
+            pump(200)
             assert len(calls) == 1
             assert win._run_action.isEnabled()
             win._run_action.trigger()
@@ -2394,14 +2416,14 @@ class TestAutoRunToggle:
             # values).
             assert win._run_generation == 2
             assert not win._run_action.isEnabled()
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._run_generation == 2
             )
             assert len(calls) == 2
             assert calls[1][index] == pytest.approx(0.775)
             assert not win._run_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_auto_run_off_suppresses_debounced_rerun(
         self,
@@ -2412,38 +2434,38 @@ class TestAutoRunToggle:
     ) -> None:
         """Turning auto-run off before a debounce fires stops the run."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             # Auto-run is on, so the edit arms the debounce; turning
             # the checkbox off before it fires must still stop the
             # run (the gate is checked when the timer fires).
             row._spin.setValue(0.775)
             win._auto_run_action.setChecked(False)
-            _wait_until(lambda: not win._debounce_timer.isActive())
+            wait_until(lambda: not win._debounce_timer.isActive())
             assert len(calls) == 1
             # Re-checking auto-run and editing again starts the run
             # with the latest value as usual.
             win._auto_run_action.setChecked(True)
             row._spin.setValue(0.78)
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._run_generation == 2
             )
             assert len(calls) == 2
             assert calls[1][index] == pytest.approx(0.78)
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -2463,17 +2485,17 @@ class TestModeTint:
     ) -> None:
         """Toggling the mode checkbox tints the window background."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump(50)
+            pump(50)
             # The startup run finished in the default full mode, so
             # the window carries the warm reactive-transport tint.
             assert win.styleSheet() == "background-color: #FBEEDB;"
@@ -2486,7 +2508,7 @@ class TestModeTint:
             assert win.styleSheet() == "background-color: #FBEEDB;"
             assert len(calls) == 1
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -2506,18 +2528,18 @@ class TestHistory:
     ) -> None:
         """Each finished run becomes the newest dropdown entry."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             combo = win._param_panel._history_combo
             # No saved run on disk: the dropdown stays empty until
             # the startup run has finished.
             assert combo.count() == 0
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             assert combo.count() == 1
@@ -2527,9 +2549,9 @@ class TestHistory:
             )
 
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
             assert combo.count() == 2
@@ -2542,7 +2564,7 @@ class TestHistory:
                 combo.itemText(1),
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restore_does_not_rerun(
         self,
@@ -2553,22 +2575,22 @@ class TestHistory:
     ) -> None:
         """Restoring a session run replaces values and results, without a re-run."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
 
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
             assert len(calls) == 2
@@ -2582,13 +2604,13 @@ class TestHistory:
             # The restore rebuilds the panel's cells; the fresh one
             # for this parameter carries the restored value.
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             assert row.value() == pytest.approx(0.6)
             assert len(calls) == 2
             assert win._run_generation == 2
             last_x: np.ndarray | None = win._last_run_x
             assert last_x is not None
-            assert np.array_equal(last_x, _midpoint_vector(input_data))
+            assert np.array_equal(last_x, midpoint_vector(input_data))
             assert last_x[index] == pytest.approx(0.6)
             assert win._last_run_mode == MODE_FULL
             results: gui_data.GuiRunResults | None = win._results
@@ -2599,7 +2621,7 @@ class TestHistory:
                 f"Restored the previous run {combo.itemText(1)}."
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restore_switches_mode(
         self,
@@ -2615,25 +2637,25 @@ class TestHistory:
         monkeypatch.setattr(
             gui_window,
             "arr_to_results",
-            _fake_results_factory(full_calls, input_data),
+            fake_results_factory(full_calls, input_data),
         )
         monkeypatch.setattr(
             gui_window,
             "arr_to_hydro_results",
-            _fake_results_factory(hydro_calls, input_data, hydro_only=True),
+            fake_results_factory(hydro_calls, input_data, hydro_only=True),
         )
         win = gui_window.MainWindow(input_data)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             assert len(full_calls) == 1
 
             win._mode_action.setChecked(True)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
-            _pump(50)
+            pump(50)
             assert len(hydro_calls) == 1
 
             # Restore the first (full) run.
@@ -2641,7 +2663,7 @@ class TestHistory:
             combo.setCurrentIndex(1)
             win._on_history_restore()
             win.show()
-            _pump()
+            pump()
             assert not win._mode_action.isChecked()
             assert win._last_run_mode == MODE_FULL
             results: gui_data.GuiRunResults | None = win._results
@@ -2657,7 +2679,7 @@ class TestHistory:
             # Restore the second (hydrology-only) run.
             combo.setCurrentIndex(0)
             win._on_history_restore()
-            _pump()
+            pump()
             assert win._mode_action.isChecked()
             assert win._last_run_mode == MODE_HYDRO
             results = win._results
@@ -2670,7 +2692,7 @@ class TestHistory:
             assert len(full_calls) == 1
             assert len(hydro_calls) == 1
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_overlay_no_rerun(
         self,
@@ -2681,14 +2703,14 @@ class TestHistory:
     ) -> None:
         """The overlay checkbox redraws the figures from the selected run, without a re-run."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             assert len(calls) == 1
@@ -2700,15 +2722,15 @@ class TestHistory:
 
             assert not panel._history_overlay_checkbox.isChecked()
             panel._history_overlay_checkbox.setChecked(True)
-            _pump()
+            pump()
 
             # Page 0 is the hydrology figure: the previous run's
             # line sits behind the current one, half transparent.
             figure: Figure = win._figure_panel._canvases[0].figure
-            hydro_lines = _lines(figure.axes[0])
+            hydro_lines = line_artists(figure.axes[0])
             assert len(hydro_lines) == 2
             assert hydro_lines[0].get_alpha() == 0.5
-            assert _alpha(hydro_lines[1]) == 1.0
+            assert alpha(hydro_lines[1]) == 1.0
             # Both lines draw in the simulated-discharge color; the
             # alpha is what sets the previous run's apart.
             assert np.array_equal(
@@ -2722,12 +2744,12 @@ class TestHistory:
 
             # Unchecking the overlay removes the previous run's lines.
             panel._history_overlay_checkbox.setChecked(False)
-            _pump()
+            pump()
             figure = win._figure_panel._canvases[0].figure
-            assert len(_lines(figure.axes[0])) == 1
+            assert len(line_artists(figure.axes[0])) == 1
             assert len(calls) == 1
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_restore_empty_history(
         self,
@@ -2738,11 +2760,11 @@ class TestHistory:
     ) -> None:
         """A restore with an empty dropdown reports that there is nothing to restore."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             # The startup run is still in flight: no history yet, and
@@ -2752,12 +2774,12 @@ class TestHistory:
             assert win._status_label.text() == (
                 "No previous run selected: the history is empty."
             )
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             assert win._param_panel._history_combo.count() == 1
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_saved_dir_restore(
         self,
@@ -2768,22 +2790,22 @@ class TestHistory:
     ) -> None:
         """A saved run directory joins the dropdown and restores from disk, without a re-run."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             index: int = list(input_data.bounds).index("proportion.1")
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
 
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             row._spin.setValue(0.775)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
             )
             assert len(calls) == 2
@@ -2809,7 +2831,7 @@ class TestHistory:
 
             # A third run, then restore the saved directory from disk.
             row._spin.setValue(0.825)
-            _wait_until(
+            wait_until(
                 lambda: win._run_generation == 3 and win._worker is None
             )
             saved_index = combo.findText(run_dir.name)
@@ -2820,7 +2842,7 @@ class TestHistory:
             # The restore rebuilds the panel's cells; the fresh one
             # for this parameter carries the restored value.
             row = win._param_panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             assert row.value() == pytest.approx(0.775)
             last_x: np.ndarray | None = win._last_run_x
             assert last_x is not None
@@ -2836,7 +2858,7 @@ class TestHistory:
                 f"Restored the previous run {run_dir.name}."
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -2844,7 +2866,7 @@ class TestHistory:
 # ------------------------------------------------------------------ #
 
 
-def _figure(title: str) -> tuple[str, Figure]:
+def figure(title: str) -> tuple[str, Figure]:
     """A trivial single-axis figure under the given title."""
     fig: Figure = Figure()
     fig.suptitle(title)
@@ -2852,7 +2874,7 @@ def _figure(title: str) -> tuple[str, Figure]:
     return title, fig
 
 
-def _docks_window() -> tuple[QMainWindow, QMenu]:
+def docks_window() -> tuple[QMainWindow, QMenu]:
     """
     A bare shown main window and an empty menu for the standalone
     figure-dock tests.
@@ -2863,7 +2885,7 @@ def _docks_window() -> tuple[QMainWindow, QMenu]:
     window: QMainWindow = QMainWindow()
     window.resize(1200, 800)
     window.show()
-    _pump()
+    pump()
     return window, QMenu("View")
 
 
@@ -2871,7 +2893,7 @@ class TestFigureDocks:
     """The figure panel's one-dock-per-figure tabbing and paging."""
 
     def test_empty_panel(self, qapp: QApplication) -> None:
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
             assert panel.page_count() == 0
@@ -2879,18 +2901,18 @@ class TestFigureDocks:
             assert panel.docks() == []
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_tabs_and_titles(self, qapp: QApplication) -> None:
         """One tabbed dock per figure, titled and named in page order."""
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
-            panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
+            panel.set_figures([figure("A"), figure("B"), figure("C")])
             # The dock area's tab bar fills its tabs on the next
             # event-loop pass (Qt defers the tab layout), so pump
             # before reading the tab texts.
-            _pump()
+            pump()
             docks: list[gui_figure_panel.FigureDock] = panel.docks()
             assert [dock.windowTitle() for dock in docks] == ["A", "B", "C"]
             assert [dock.objectName() for dock in docks] == [
@@ -2911,17 +2933,17 @@ class TestFigureDocks:
             assert panel.current_page() == 0
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_paging_and_wrap_around(self, qapp: QApplication) -> None:
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures(
                 [
-                    _figure("A"),
-                    _figure("B"),
-                    _figure("C"),
+                    figure("A"),
+                    figure("B"),
+                    figure("C"),
                 ]
             )
             assert panel.page_count() == 3
@@ -2943,20 +2965,20 @@ class TestFigureDocks:
             assert panel.current_page() == 0
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_set_figures_clamps_the_current_page(
         self, qapp: QApplication
     ) -> None:
         """Shrinking the figure list keeps the index valid."""
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
-            panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
+            panel.set_figures([figure("A"), figure("B"), figure("C")])
             panel.show_page(1)
-            panel.set_figures([_figure("A"), _figure("B")])
+            panel.set_figures([figure("A"), figure("B")])
             assert panel.current_page() == 1
-            panel.set_figures([_figure("A")])
+            panel.set_figures([figure("A")])
             assert panel.current_page() == 0
             panel.set_figures(())
             assert panel.page_count() == 0
@@ -2964,16 +2986,16 @@ class TestFigureDocks:
             assert panel.docks() == []
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_set_figures_replaces_docks(self, qapp: QApplication) -> None:
         """A new figure list retires the old docks."""
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
-            panel.set_figures([_figure("A"), _figure("B"), _figure("C")])
+            panel.set_figures([figure("A"), figure("B"), figure("C")])
             old_docks: list[gui_figure_panel.FigureDock] = panel.docks()
-            panel.set_figures([_figure("D")])
+            panel.set_figures([figure("D")])
             docks: list[gui_figure_panel.FigureDock] = panel.docks()
             assert [dock.windowTitle() for dock in docks] == ["D"]
             assert panel.current_page() == 0
@@ -2984,7 +3006,7 @@ class TestFigureDocks:
             # it the way a running application does — so the test
             # checks the dock-area membership Qt actually maintains,
             # not the deferred deletion.
-            _pump()
+            pump()
             for dock in old_docks:
                 assert (
                     window.dockWidgetArea(dock)
@@ -2996,20 +3018,20 @@ class TestFigureDocks:
             )
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_save_pages(
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         """Every page is saved as a PNG named after its title."""
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
             panel.set_figures(
                 [
-                    _figure("Streamflow and river concentrations"),
-                    _figure("Mineral reaction rates"),
-                    _figure("!!!"),
+                    figure("Streamflow and river concentrations"),
+                    figure("Mineral reaction rates"),
+                    figure("!!!"),
                 ]
             )
             out_dir: Path = tmp_path / "nested" / "figures"
@@ -3028,7 +3050,7 @@ class TestFigureDocks:
                 assert path.is_file()
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_hidpi_scaling_uses_the_canvas_dpi(
         self, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
@@ -3048,10 +3070,10 @@ class TestFigureDocks:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
-            panel.set_figures([_figure("A"), _figure("B")])
+            panel.set_figures([figure("A"), figure("B")])
             for canvas in panel._canvases:
                 canvas._set_device_pixel_ratio(dpr)
             for canvas in panel._canvases:
@@ -3060,7 +3082,7 @@ class TestFigureDocks:
                 )
         finally:
             window.close()
-            _pump()
+            pump()
 
     def test_hidpi_legend_text_stays_at_canvas_scale(
         self, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
@@ -3078,7 +3100,7 @@ class TestFigureDocks:
         monkeypatch.setitem(rcParams, "figure.dpi", 300)
         monkeypatch.setitem(rcParams, "font.size", 12)
         dpr: float = 4 / 3
-        window, view_menu = _docks_window()
+        window, view_menu = docks_window()
         try:
             panel = gui_figure_panel.FigurePanel(window, view_menu)
             fig: Figure = Figure(figsize=(15, 7))
@@ -3104,7 +3126,7 @@ class TestFigureDocks:
             assert max_height <= 1.5 * em
         finally:
             window.close()
-            _pump()
+            pump()
 
 
 # ------------------------------------------------------------------ #
@@ -3112,7 +3134,7 @@ class TestFigureDocks:
 # ------------------------------------------------------------------ #
 
 
-def _objective_table() -> pd.DataFrame:
+def objective_table() -> pd.DataFrame:
     """A two-column objective table with NaNs in the second column."""
     values: dict[str, list[float]] = {
         "Streamflow": [0.9, 0.5, 0.8, 0.4, 0.01, 0.7, 0.6],
@@ -3125,7 +3147,7 @@ class TestObjectiveTableModel:
     """The model behind the table panel left of the parameter panel."""
 
     def test_empty_model(self, qapp: QApplication) -> None:
-        model = gui_window._ObjectiveTableModel()
+        model = gui_window.ObjectiveTableModel()
         try:
             # With no objectives yet the table keeps its metric rows
             # but carries no target columns.
@@ -3138,12 +3160,12 @@ class TestObjectiveTableModel:
             assert headers == list(METRIC_LABELS.values())
         finally:
             model.deleteLater()
-            _pump()
+            pump()
 
     def test_set_table(self, qapp: QApplication) -> None:
-        model = gui_window._ObjectiveTableModel()
+        model = gui_window.ObjectiveTableModel()
         try:
-            model.set_table(_objective_table())
+            model.set_table(objective_table())
             assert model.rowCount() == 7
             assert model.columnCount() == 2
             column_headers = [
@@ -3168,7 +3190,7 @@ class TestObjectiveTableModel:
             )
         finally:
             model.deleteLater()
-            _pump()
+            pump()
 
     def test_cell_formats_three_visible_digits(
         self, qapp: QApplication
@@ -3177,7 +3199,7 @@ class TestObjectiveTableModel:
         values: dict[str, list[float]] = {
             "Streamflow": [0.9, 0.876, 1234.5, 0.0000123, 0.0009, 99.9, 100.0],
         }
-        model = gui_window._ObjectiveTableModel()
+        model = gui_window.ObjectiveTableModel()
         try:
             model.set_table(
                 pd.DataFrame(values, index=list(METRIC_LABELS.values()))
@@ -3199,7 +3221,7 @@ class TestObjectiveTableModel:
             ]
         finally:
             model.deleteLater()
-            _pump()
+            pump()
 
 
 # ------------------------------------------------------------------ #
@@ -3242,7 +3264,7 @@ class TestParamPanel:
             )
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_free_cell_value(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3250,7 +3272,7 @@ class TestParamPanel:
         panel = self._make_panel(input_data)
         try:
             row = panel._rows["proportion.1"]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             values: list[str] = []
             panel.value_changed.connect(values.append)
             row._spin.setValue(0.775)
@@ -3265,7 +3287,7 @@ class TestParamPanel:
             assert panel.param_values()["proportion.1"] == pytest.approx(0.775)
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_cell_layout(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3274,7 +3296,7 @@ class TestParamPanel:
         panel = self._make_panel(input_data)
         try:
             free = panel._rows["proportion.1"]
-            assert isinstance(free, gui_param_panel._FreeCell)
+            assert isinstance(free, gui_param_panel.FreeCell)
             layout = free.layout()
             assert isinstance(layout, QHBoxLayout)
             assert layout.count() == 3
@@ -3293,7 +3315,7 @@ class TestParamPanel:
             assert "border: none" in free._spin.styleSheet()
 
             pinned = panel._rows["ground_hs.alpha"]
-            assert isinstance(pinned, gui_param_panel._PinnedCell)
+            assert isinstance(pinned, gui_param_panel.PinnedCell)
             pinned_layout = pinned.layout()
             assert isinstance(pinned_layout, QHBoxLayout)
             assert pinned_layout.count() == 3
@@ -3308,7 +3330,7 @@ class TestParamPanel:
             assert value_item.widget() is pinned._value
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_grid_cell_banding(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3322,14 +3344,14 @@ class TestParamPanel:
             ):
                 group: gui_param_panel.ThemedGroup = panel._groups[name]
                 assert group.theme == theme
-                band_a, band_b, line = gui_param_panel._GRID_STYLES[
+                band_a, band_b, line = gui_param_panel.GRID_STYLES[
                     theme.name
                 ]
 
                 cells: list[QWidget] = group.content().findChildren(
-                    gui_param_panel._FreeCell
+                    gui_param_panel.FreeCell
                 ) + group.content().findChildren(
-                    gui_param_panel._PinnedCell
+                    gui_param_panel.PinnedCell
                 )
                 cells_by_row: dict[int, list[QWidget]] = {}
                 for cell in cells:
@@ -3345,8 +3367,8 @@ class TestParamPanel:
                             Qt.WidgetAttribute.WA_StyledBackground
                         )
                         assert f"border: 1px solid {line}" in cell.styleSheet()
-                        assert _band_of(cell) == _band_of(row_cells[0])
-                    row_bands.append(_band_of(row_cells[0]))
+                        assert band_of(cell) == band_of(row_cells[0])
+                    row_bands.append(band_of(row_cells[0]))
 
                 # The cell rows alternate between the theme's two
                 # bands and repeat every two rows; the zone and
@@ -3361,7 +3383,7 @@ class TestParamPanel:
 
                 # The full-width zone headers stay undecorated.
                 headers: list[QLabel] = group.content().findChildren(
-                    gui_param_panel._ZoneHeader
+                    gui_param_panel.ZoneHeader
                 )
                 assert len(headers) >= 2
                 for header in headers:
@@ -3374,20 +3396,20 @@ class TestParamPanel:
                     name
                 ]
                 assert single_group.theme is not None
-                expected_band: str = gui_param_panel._GRID_STYLES[
+                expected_band: str = gui_param_panel.GRID_STYLES[
                     single_group.theme.name
                 ][0]
                 single_cells: list[QWidget] = (
                     single_group.content().findChildren(
-                        gui_param_panel._FreeCell
+                        gui_param_panel.FreeCell
                     )
                     + single_group.content().findChildren(
-                        gui_param_panel._PinnedCell
+                        gui_param_panel.PinnedCell
                     )
                 )
                 assert single_cells
                 for single_cell in single_cells:
-                    assert _band_of(single_cell) == expected_band
+                    assert band_of(single_cell) == expected_band
 
             # The neutral group's widgets keep the default look.
             box: QCheckBox = panel._streamflow_box
@@ -3395,7 +3417,7 @@ class TestParamPanel:
             assert box.objectName() == ""
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_unlock_restyles_cell(
         self,
@@ -3408,20 +3430,20 @@ class TestParamPanel:
         try:
             key: str = "ground_hs.alpha"
             old = panel._rows[key]
-            assert isinstance(old, gui_param_panel._PinnedCell)
-            old_band: str = _band_of(old)
-            _install_bounds_stub(monkeypatch, (0.25, 1.75))
-            qapp.sendEvent(old._value, _double_click_event())
+            assert isinstance(old, gui_param_panel.PinnedCell)
+            old_band: str = band_of(old)
+            install_bounds_stub(monkeypatch, (0.25, 1.75))
+            qapp.sendEvent(old._value, double_click_event())
             new_cell = panel._rows[key]
-            assert isinstance(new_cell, gui_param_panel._FreeCell)
+            assert isinstance(new_cell, gui_param_panel.FreeCell)
             assert new_cell.objectName().startswith("grid_cell_")
             assert new_cell.testAttribute(
                 Qt.WidgetAttribute.WA_StyledBackground
             )
-            assert _band_of(new_cell) == old_band
+            assert band_of(new_cell) == old_band
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_unlock_pinned_parameter(
         self,
@@ -3434,15 +3456,15 @@ class TestParamPanel:
         try:
             key: str = "ground_hs.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._PinnedCell)
-            records = _install_bounds_stub(monkeypatch, (0.25, 1.75))
+            assert isinstance(row, gui_param_panel.PinnedCell)
+            records = install_bounds_stub(monkeypatch, (0.25, 1.75))
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
             panel.bounds_changed.connect(
                 lambda k, lo, hi: bounds.append((k, lo, hi))
             )
             panel.value_changed.connect(values.append)
-            qapp.sendEvent(row._value, _double_click_event())
+            qapp.sendEvent(row._value, double_click_event())
             assert len(records) == 1
             label: str = param_label(key, input_data.network.mineral_names)
             assert records[0]["title"] == f"Edit range — {label}"
@@ -3454,7 +3476,7 @@ class TestParamPanel:
             assert records[0]["lo"] == pytest.approx(0.5)
             assert records[0]["hi"] == pytest.approx(1.5)
             new_cell = panel._rows[key]
-            assert isinstance(new_cell, gui_param_panel._FreeCell)
+            assert isinstance(new_cell, gui_param_panel.FreeCell)
             assert new_cell._symbol.text() == "alpha"
             assert new_cell._symbol.toolTip() == label
             assert new_cell.value() == pytest.approx(1.0)
@@ -3464,7 +3486,7 @@ class TestParamPanel:
             assert values == [key]
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_unlock_pinned_parameter_cancelled(
         self,
@@ -3477,22 +3499,22 @@ class TestParamPanel:
         try:
             key: str = "ground_rp.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._PinnedCell)
-            records = _install_bounds_stub(monkeypatch, None)
+            assert isinstance(row, gui_param_panel.PinnedCell)
+            records = install_bounds_stub(monkeypatch, None)
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
             panel.bounds_changed.connect(
                 lambda k, lo, hi: bounds.append((k, lo, hi))
             )
             panel.value_changed.connect(values.append)
-            row.mouseDoubleClickEvent(_double_click_event())
+            row.mouseDoubleClickEvent(double_click_event())
             assert len(records) == 1
-            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
+            assert isinstance(panel._rows[key], gui_param_panel.PinnedCell)
             assert bounds == []
             assert values == []
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_edit_bounds(
         self,
@@ -3505,7 +3527,7 @@ class TestParamPanel:
         try:
             key: str = "proportion.1"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             bounds: list[tuple[str, float, float]] = []
             values: list[str] = []
             panel.bounds_changed.connect(
@@ -3513,10 +3535,10 @@ class TestParamPanel:
             )
             panel.value_changed.connect(values.append)
 
-            records = _install_bounds_stub(monkeypatch, (0.5, 0.95))
+            records = install_bounds_stub(monkeypatch, (0.5, 0.95))
             line_edit = row._spin.lineEdit()
             assert line_edit is not None
-            qapp.sendEvent(line_edit, _double_click_event())
+            qapp.sendEvent(line_edit, double_click_event())
             assert len(records) == 1
             assert records[0]["title"] == (
                 "Edit range — Distal proportion of catchment"
@@ -3525,26 +3547,26 @@ class TestParamPanel:
             assert records[0]["lo"] == pytest.approx(0.25)
             assert records[0]["hi"] == pytest.approx(0.95)
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             assert row._bounds == (0.5, 0.95)
             assert row.value() == pytest.approx(0.6)  # the value is kept
             assert bounds == [(key, 0.5, 0.95)]
             assert values == [key]
 
             # The same for the edited range.
-            records = _install_bounds_stub(monkeypatch, (0.5, 0.8))
+            records = install_bounds_stub(monkeypatch, (0.5, 0.8))
             line_edit = row._spin.lineEdit()
             assert line_edit is not None
-            qapp.sendEvent(line_edit, _double_click_event())
+            qapp.sendEvent(line_edit, double_click_event())
             assert records[0]["hint"] == "Current range: 0.50000 to 0.95000."
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             assert row._bounds == (0.5, 0.8)
             assert bounds == [(key, 0.5, 0.95), (key, 0.5, 0.8)]
             assert values == [key, key]
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_symbol_double_click_requests_edit(
         self,
@@ -3562,16 +3584,16 @@ class TestParamPanel:
         try:
             key: str = "proportion.1"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
 
-            records = _install_bounds_stub(monkeypatch, (0.5, 0.95))
-            qapp.sendEvent(row._symbol, _double_click_event())
+            records = install_bounds_stub(monkeypatch, (0.5, 0.95))
+            qapp.sendEvent(row._symbol, double_click_event())
             assert len(records) == 1
             assert records[0]["lo"] == pytest.approx(0.25)
             assert records[0]["hi"] == pytest.approx(0.95)
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_bounds_dialog_static_option_pins_parameter(
         self,
@@ -3588,7 +3610,7 @@ class TestParamPanel:
         try:
             key: str = "proportion.1"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             v: float = panel._values[key]
             lo, hi = panel._bounds[key]
             bounds: list[tuple[str, float, float]] = []
@@ -3600,16 +3622,16 @@ class TestParamPanel:
 
             # 1. A degenerate (equal) result from the range dialog
             #    pins the parameter at its displayed value.
-            records = _install_bounds_stub(monkeypatch, (v, v))
+            records = install_bounds_stub(monkeypatch, (v, v))
             line_edit = row._spin.lineEdit()
             assert line_edit is not None
-            qapp.sendEvent(line_edit, _double_click_event())
+            qapp.sendEvent(line_edit, double_click_event())
             assert len(records) == 1
             assert records[0]["value"] == pytest.approx(v)
             assert records[0]["lo"] == pytest.approx(lo)
             assert records[0]["hi"] == pytest.approx(hi)
             pinned = panel._rows[key]
-            assert isinstance(pinned, gui_param_panel._PinnedCell)
+            assert isinstance(pinned, gui_param_panel.PinnedCell)
             assert panel._bounds[key] == (v, v)
             assert panel._values[key] == pytest.approx(v)
             assert bounds == [(key, v, v)]
@@ -3618,10 +3640,10 @@ class TestParamPanel:
             # 2. A degenerate result from the pinned cell's unlock
             #    dialog is a no-op: the row stays pinned at the
             #    same value.
-            records = _install_bounds_stub(monkeypatch, (v, v))
-            qapp.sendEvent(pinned._value, _double_click_event())
+            records = install_bounds_stub(monkeypatch, (v, v))
+            qapp.sendEvent(pinned._value, double_click_event())
             assert len(records) == 1
-            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
+            assert isinstance(panel._rows[key], gui_param_panel.PinnedCell)
             assert panel._bounds[key] == (v, v)
             assert panel._values[key] == pytest.approx(v)
             assert bounds == [(key, v, v)]
@@ -3631,19 +3653,19 @@ class TestParamPanel:
             #    cell back into a free cell, keeping the value.
             lo2: float = v - 0.2
             hi2: float = v + 0.2
-            records = _install_bounds_stub(monkeypatch, (lo2, hi2))
+            records = install_bounds_stub(monkeypatch, (lo2, hi2))
             pinned = panel._rows[key]
-            qapp.sendEvent(pinned._value, _double_click_event())
+            qapp.sendEvent(pinned._value, double_click_event())
             assert len(records) == 1
             free_cell = panel._rows[key]
-            assert isinstance(free_cell, gui_param_panel._FreeCell)
+            assert isinstance(free_cell, gui_param_panel.FreeCell)
             assert panel._bounds[key] == (lo2, hi2)
             assert panel._values[key] == pytest.approx(v)
             assert bounds == [(key, v, v), (key, lo2, hi2)]
             assert values == [key, key]
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_plot_selection(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3681,7 +3703,7 @@ class TestParamPanel:
             assert panel.selection().window_end == "2020-12-31"
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_species_boxes_follow_measured_columns(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3693,7 +3715,7 @@ class TestParamPanel:
             assert panel.selection().species == ["DOC", "Ca++", "DIC"]
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_plotting_date_window(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3729,7 +3751,7 @@ class TestParamPanel:
             assert selections[2].window_end == "2016-01-01"
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_reset_bounds(
         self,
@@ -3742,20 +3764,20 @@ class TestParamPanel:
         try:
             key: str = "ground_hs.alpha"
             row = panel._rows[key]
-            assert isinstance(row, gui_param_panel._PinnedCell)
-            _install_bounds_stub(monkeypatch, (0.25, 1.75))
-            row.mouseDoubleClickEvent(_double_click_event())
+            assert isinstance(row, gui_param_panel.PinnedCell)
+            install_bounds_stub(monkeypatch, (0.25, 1.75))
+            row.mouseDoubleClickEvent(double_click_event())
             assert isinstance(
-                panel._rows[key], gui_param_panel._FreeCell
+                panel._rows[key], gui_param_panel.FreeCell
             )
             panel._values["proportion.1"] = 1.5  # outside the range
             restored: dict[str, float] = panel.reset_bounds()
             assert panel.current_bounds() == dict(input_data.bounds)
             assert restored["proportion.1"] == pytest.approx(0.95)
-            assert isinstance(panel._rows[key], gui_param_panel._PinnedCell)
+            assert isinstance(panel._rows[key], gui_param_panel.PinnedCell)
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_group_lookup_and_themes(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3773,7 +3795,7 @@ class TestParamPanel:
                 )
                 assert (
                     panel._groups[name]._grid_columns
-                    == gui_param_panel._GRID_COLUMNS
+                    == gui_param_panel.GRID_COLUMNS
                 )
             assert isinstance(
                 panel._plots_group._content_layout, QGridLayout
@@ -3786,7 +3808,7 @@ class TestParamPanel:
             # would center the title) and sits at the left end of a
             # header row, with a 4px left padding matching the
             # cells' left margin.
-            def _assert_fitted_toggle(
+            def assert_fitted_toggle(
                 group: gui_param_panel.ThemedGroup,
             ) -> None:
                 assert (
@@ -3807,11 +3829,11 @@ class TestParamPanel:
                 assert header_row.itemAt(1).spacerItem() is not None
 
             for name in ("hydrology", "proportion", "reactive", "initial"):
-                _assert_fitted_toggle(panel._groups[name])
+                assert_fitted_toggle(panel._groups[name])
                 assert (
                     "padding: 4px 0 4px 4px;" in panel._groups[name].styleSheet()
                 )
-            _assert_fitted_toggle(panel._plots_group)
+            assert_fitted_toggle(panel._plots_group)
             assert (
                 panel._plots_group._toggle.styleSheet()
                 == "QToolButton { padding: 4px 0 4px 4px; }"
@@ -3832,7 +3854,7 @@ class TestParamPanel:
                 panel._plots_group.replace_widget(QWidget(), QWidget())
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_panel_uses_spec_zone_labels(
         self, qapp: QApplication
@@ -3848,7 +3870,7 @@ class TestParamPanel:
                 header.text()
                 for group in panel._groups.values()
                 for header in group.findChildren(
-                    gui_param_panel._ZoneHeader
+                    gui_param_panel.ZoneHeader
                 )
             ]
             assert any("Shallow subsurface" in text for text in labels)
@@ -3856,7 +3878,7 @@ class TestParamPanel:
             assert panel._groups.get("proportion") is None
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_reload_switches_groups_and_defaults(
         self, qapp: QApplication
@@ -3881,7 +3903,7 @@ class TestParamPanel:
             assert panel._groups.get("proportion") is None
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_reload_preserves_hydro_only_visibility(
         self, qapp: QApplication
@@ -3899,7 +3921,7 @@ class TestParamPanel:
             assert not panel._groups["initial"].isVisible()
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
     def test_panel_editor_bounds(
         self, qapp: QApplication, input_data: gui_data.GuiInputData
@@ -3926,7 +3948,7 @@ class TestParamPanel:
             assert panel.selection().window_end == "2020-12-31"
         finally:
             panel.deleteLater()
-            _pump()
+            pump()
 
 
 # ------------------------------------------------------------------ #
@@ -3944,7 +3966,7 @@ class TestBoundsDialog:
         cancelled result after the latter; the button box is wired to
         the dialog explicitly, since it does not do so itself.
         """
-        dialog = gui_param_panel._BoundsDialog(
+        dialog = gui_param_panel.BoundsDialog(
             "Edit range — Test parameter",
             0.25,
             0.95,
@@ -3972,7 +3994,7 @@ class TestBoundsDialog:
             assert events == ["accepted", "rejected"]
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
 
 # ------------------------------------------------------------------ #
@@ -3980,14 +4002,14 @@ class TestBoundsDialog:
 # ------------------------------------------------------------------ #
 
 
-def _free_keys(input_data: gui_data.GuiInputData) -> list[str]:
+def free_keys(input_data: gui_data.GuiInputData) -> list[str]:
     """The keys of the parameters whose loaded range has a width."""
     return [
         key for key, (low, high) in input_data.bounds.items() if high > low
     ]
 
 
-def _gradient_fake_factory(
+def gradient_fake_factory(
     calls: list[np.ndarray] | None,
     input_data: gui_data.GuiInputData,
     hydro_term_key: str,
@@ -4014,12 +4036,12 @@ def _gradient_fake_factory(
 
     def make(
         x: np.ndarray,
-        _input_data: gui_data.GuiInputData,
+        input_data: gui_data.GuiInputData,
         hydro_only: bool,
     ) -> gui_data.GuiRunResults:
         if calls is not None:
             calls.append(np.array(x))
-        hydro, rt = _synthetic_results(_input_data)
+        hydro, rt = synthetic_results(input_data)
         hydro.objective_functions = (
             hydro.objective_functions
             + 2.0 * float(x[hydro_index])
@@ -4034,19 +4056,19 @@ def _gradient_fake_factory(
         return gui_data.GuiRunResults(hydro, rt)
 
     def full_fake(
-        x: np.ndarray, _input_data: gui_data.GuiInputData
+        x: np.ndarray, input_data: gui_data.GuiInputData
     ) -> gui_data.GuiRunResults:
-        return make(x, _input_data, False)
+        return make(x, input_data, False)
 
     def hydro_fake(
-        x: np.ndarray, _input_data: gui_data.GuiInputData
+        x: np.ndarray, input_data: gui_data.GuiInputData
     ) -> gui_data.GuiRunResults:
-        return make(x, _input_data, True)
+        return make(x, input_data, True)
 
     return full_fake, hydro_fake
 
 
-def _mode_evaluate(
+def mode_evaluate(
     full_fake: Callable[
         [np.ndarray, gui_data.GuiInputData], gui_data.GuiRunResults
     ],
@@ -4069,7 +4091,7 @@ def _mode_evaluate(
     return evaluate
 
 
-class _FakeRunSession:
+class FakeRunSession:
     """
     A stand-in for ``proc_pool.ModelRunSession`` that scores each
     batch in this process.
@@ -4141,16 +4163,16 @@ class _FakeRunSession:
         self.closed = True
 
 
-def _patch_pool_sessions(
+def patch_pool_sessions(
     monkeypatch: pytest.MonkeyPatch,
     module: ModuleType,
     evaluate: Callable[[np.ndarray, str], gui_data.GuiRunResults],
-    sessions: list[_FakeRunSession],
+    sessions: list[FakeRunSession],
     gate_path: Path | None = None,
 ) -> None:
     """
     Replace `module`'s ``ModelRunSession`` name with a factory of
-    `_FakeRunSession` s.
+    `FakeRunSession` s.
 
     The factory mirrors ``ModelRunSession``'s constructor
     parameters so the patched call sites construct it exactly as
@@ -4178,8 +4200,8 @@ def _patch_pool_sessions(
         column_map: dict[str, str | None] | None = None,
         workers: int | None = None,
         stall_timeout: float = 0.0,
-    ) -> _FakeRunSession:
-        session: _FakeRunSession = _FakeRunSession(
+    ) -> FakeRunSession:
+        session: FakeRunSession = FakeRunSession(
             csv_path, evaluate=evaluate, gate_path=gate_path
         )
         sessions.append(session)
@@ -4188,7 +4210,7 @@ def _patch_pool_sessions(
     monkeypatch.setattr(module, "ModelRunSession", make_session)
 
 
-def _gradient_window(
+def gradient_window(
     input_data: gui_data.GuiInputData,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4205,7 +4227,7 @@ def _gradient_window(
     `arr_to_hydro_results` on the `window` module, which covers the
     in-process runs: the startup run and any rerun.  A job's pooled
     points are the tests' own patch: each test swaps in the session
-    class the job constructs (see `_patch_pool_sessions`).
+    class the job constructs (see `patch_pool_sessions`).
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
@@ -4213,7 +4235,7 @@ def _gradient_window(
     return gui_window.MainWindow(input_data)
 
 
-def _only_csv(tmp_path: Path) -> Path:
+def only_csv(tmp_path: Path) -> Path:
     """The single ``gradients_*.csv`` in `tmp_path`'s results directory."""
     csvs: list[Path] = list((tmp_path / "results").glob("gradients_*.csv"))
     assert len(csvs) == 1
@@ -4235,15 +4257,15 @@ class TestSpinnerLabel:
         each timer tick, and stopping hides it again and clears the
         frame.
         """
-        label = gui_window._SpinnerLabel()
+        label = gui_window.SpinnerLabel()
         try:
             # Hidden at rest, with the fixed square footprint.
             assert label.isHidden()
             assert label.text() == ""
-            assert label.minimumWidth() == gui_window._SPINNER_SIZE
-            assert label.maximumWidth() == gui_window._SPINNER_SIZE
-            assert label.minimumHeight() == gui_window._SPINNER_SIZE
-            assert label.maximumHeight() == gui_window._SPINNER_SIZE
+            assert label.minimumWidth() == gui_window.SPINNER_SIZE
+            assert label.maximumWidth() == gui_window.SPINNER_SIZE
+            assert label.minimumHeight() == gui_window.SPINNER_SIZE
+            assert label.maximumHeight() == gui_window.SPINNER_SIZE
 
             # Spinning shows the current frame and advances it on
             # each tick; the ~200 ms pump below spans at least two
@@ -4252,10 +4274,10 @@ class TestSpinnerLabel:
             label.set_spinning(True)
             assert not label.isHidden()
             first_frame: str = label.text()
-            assert first_frame in gui_window._SPINNER_FRAMES
-            _pump(gui_window._SPINNER_INTERVAL_MS + 50)
+            assert first_frame in gui_window.SPINNER_FRAMES
+            pump(gui_window.SPINNER_INTERVAL_MS + 50)
             assert label.text() != first_frame
-            assert label.text() in gui_window._SPINNER_FRAMES
+            assert label.text() in gui_window.SPINNER_FRAMES
 
             # Stopping hides the indicator and clears the frame.
             label.set_spinning(False)
@@ -4263,7 +4285,7 @@ class TestSpinnerLabel:
             assert label.text() == ""
         finally:
             label.deleteLater()
-            _pump()
+            pump()
 
 
 class TestGradients:
@@ -4276,16 +4298,16 @@ class TestGradients:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -4293,22 +4315,22 @@ class TestGradients:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -4318,11 +4340,11 @@ class TestGradients:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The job's points ran in the fake session (which
             # scores them without recording): only the in-process
             # startup run is recorded, and the last step completes
@@ -4336,7 +4358,7 @@ class TestGradients:
             assert len(free) <= total <= 2 * len(free)
 
             loaded: pd.DataFrame = pd.read_csv(
-                _only_csv(tmp_path), index_col="objective"
+                only_csv(tmp_path), index_col="objective"
             )
             assert loaded.shape == (4 * len(METRIC_NAMES), len(free))
             assert list(loaded.columns) == free
@@ -4360,7 +4382,7 @@ class TestGradients:
             assert not win._run_action.isEnabled()
             assert win._gradients_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_hydro_mode_job(
         self,
@@ -4369,16 +4391,16 @@ class TestGradients:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -4386,28 +4408,28 @@ class TestGradients:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._mode_action.setChecked(True)
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._last_run_mode == MODE_HYDRO
                 and win._results_are_up_to_date()
             )
-            _pump()
+            pump()
             assert len(calls) == 2
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -4417,11 +4439,11 @@ class TestGradients:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The job's points ran in the fake session (which
             # scores them without recording): the two in-process
             # runs (the startup and the mode change) are the only
@@ -4435,7 +4457,7 @@ class TestGradients:
             assert len(free) <= total <= 2 * len(free)
 
             loaded: pd.DataFrame = pd.read_csv(
-                _only_csv(tmp_path), index_col="objective"
+                only_csv(tmp_path), index_col="objective"
             )
             assert loaded.shape == (len(METRIC_NAMES), len(free))
             assert list(loaded.columns) == free
@@ -4451,7 +4473,7 @@ class TestGradients:
             assert not win._run_action.isEnabled()
             assert win._gradients_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_gradient_job_failed_point_becomes_nan(
         self,
@@ -4465,10 +4487,10 @@ class TestGradients:
         of the difference matrix is all NaN (the missing value),
         and the completion status counts the failure.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        plain_fake = _fake_results_factory(calls, input_data)
-        pool_fake = _fake_results_factory(None, input_data)
+        plain_fake = fake_results_factory(calls, input_data)
+        pool_fake = fake_results_factory(None, input_data)
         failing_index: int = list(input_data.bounds).index(free[0])
 
         monkeypatch.chdir(tmp_path)
@@ -4476,10 +4498,10 @@ class TestGradients:
         win = gui_window.MainWindow(input_data)
         gate = tmp_path / "job_gate"
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
 
             # Only the free[0] "+" perturbation exceeds the base
             # value: the base point is handed in (the results are
@@ -4494,7 +4516,7 @@ class TestGradients:
                     raise ValueError("point failed")
                 return pool_fake(x, input_data)
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
                 pool_evaluate,
@@ -4503,7 +4525,7 @@ class TestGradients:
             )
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -4513,11 +4535,11 @@ class TestGradients:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The job's points ran in the fake session (which
             # scores them without recording): only the in-process
             # startup run is recorded, and the last step completes
@@ -4531,7 +4553,7 @@ class TestGradients:
             assert len(free) <= total <= 2 * len(free)
 
             assert win._gradient_state is not None
-            state: gui_window._GradientSnapshot = win._gradient_state
+            state: gui_window.GradientSnapshot = win._gradient_state
             table: pd.DataFrame = state.table
             # The failed point's column is all NaN (the missing
             # value); every other column is fully finite.
@@ -4554,10 +4576,10 @@ class TestGradients:
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
             assert win._gradients_action.isEnabled()
-            _only_csv(tmp_path)
+            only_csv(tmp_path)
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_gradient_job_fails_when_base_point_fails(
         self,
@@ -4571,20 +4593,20 @@ class TestGradients:
         matrix cannot be built without it, so the job reports
         the failure and writes no matrix.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        plain_fake = _fake_results_factory(calls, input_data)
-        pool_fake = _fake_results_factory(None, input_data)
+        plain_fake = fake_results_factory(calls, input_data)
+        pool_fake = fake_results_factory(None, input_data)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", plain_fake)
         win = gui_window.MainWindow(input_data)
         gate = tmp_path / "job_gate"
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             # Move free[0] to its upper bound, with the auto run
@@ -4596,7 +4618,7 @@ class TestGradients:
             # base fails.
             win._auto_run_action.setChecked(False)
             row = win._param_panel._rows[free[0]]
-            assert isinstance(row, gui_param_panel._FreeCell)
+            assert isinstance(row, gui_param_panel.FreeCell)
             row._spin.setValue(win._param_panel.current_bounds()[free[0]][1])
             assert not win._results_are_up_to_date()
             base_x: np.ndarray = win._current_x()
@@ -4608,7 +4630,7 @@ class TestGradients:
                     raise ValueError("point failed")
                 return pool_fake(x, input_data)
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
                 pool_evaluate,
@@ -4617,14 +4639,14 @@ class TestGradients:
             )
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._status_label.text().startswith("Gradients failed")
             )
-            _pump()
+            pump()
             assert (
                 win._status_label.text()
                 == "Gradients failed: ValueError: point failed"
@@ -4644,7 +4666,7 @@ class TestGradients:
             assert list((tmp_path / "results").glob("gradients_*.csv")) == []
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_no_free_parameters(
         self,
@@ -4654,17 +4676,17 @@ class TestGradients:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
 
             def no_free() -> dict[str, tuple[float, float]]:
                 return {
@@ -4674,7 +4696,7 @@ class TestGradients:
 
             monkeypatch.setattr(win._param_panel, "current_bounds", no_free)
             win._on_gradients_clicked()
-            _pump()
+            pump()
             assert (
                 win._status_label.text()
                 == "No free parameters to differentiate."
@@ -4683,7 +4705,7 @@ class TestGradients:
             assert len(calls) == 1
             assert win._gradients_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_gradient_job_progress_step_counts(
         self,
@@ -4698,22 +4720,22 @@ class TestGradients:
         toolbar's spinner spins while the job runs; both go back to
         their rest state when the job finishes.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data, tmp_path, monkeypatch, full_fake, hydro_fake
         )
         gate = tmp_path / "job_gate"
         try:
             # Let the window's startup run finish first, so the
             # job's base point is handed in rather than rerun.
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert win._results_are_up_to_date()
 
             # The job's session batches block on a file gate until
@@ -4722,20 +4744,20 @@ class TestGradients:
             # cannot be connected in advance, and the gate keeps
             # the session from completing (and emitting a step
             # for) a point before the connection.
-            pool_full, pool_hydro = _gradient_fake_factory(
+            pool_full, pool_hydro = gradient_fake_factory(
                 None, input_data, free[0], free[1]
             )
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
 
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
 
             steps: list[tuple[int, int]] = []
             spinner_up: list[bool] = []
@@ -4747,11 +4769,11 @@ class TestGradients:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
 
             # Every completed point is one step, in order, and the
             # last step completes the bar.
@@ -4777,7 +4799,7 @@ class TestGradients:
             assert win._progress_strip.isHidden()
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -4801,17 +4823,17 @@ class TestObjectiveSelection:
         term is ignored.
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
 
             viewport = win._objective_table.viewport()
             index = win._objective_model.index(0, 0)
@@ -4823,12 +4845,12 @@ class TestObjectiveSelection:
                 Qt.KeyboardModifier.NoModifier,
             )
             qapp.sendEvent(viewport, event)
-            _pump()
+            pump()
             assert win._objective_terms == frozenset({"Streamflow: KGE"})
             assert win._objective_model.is_selected("Streamflow: KGE")
 
             qapp.sendEvent(viewport, event)
-            _pump()
+            pump()
             assert win._objective_terms == frozenset()
             assert not win._objective_model.is_selected("Streamflow: KGE")
 
@@ -4836,7 +4858,7 @@ class TestObjectiveSelection:
             win._on_objective_toggled("DOC: R\u00b2")
             assert win._objective_terms is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_mode_switch_keeps_explicit_selection_intersected(
         self,
@@ -4852,17 +4874,17 @@ class TestObjectiveSelection:
         selected while the dropped term is present but unchecked.
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             win._auto_run_action.setChecked(False)
 
             win._on_objective_toggled("Streamflow: KGE")
@@ -4880,7 +4902,7 @@ class TestObjectiveSelection:
             assert win._objective_terms == frozenset({"Streamflow: KGE"})
             assert not win._objective_model.is_selected("DOC: KGE")
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # ------------------------------------------------------------------ #
@@ -4993,16 +5015,16 @@ class TestLineSearch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A search with no gradient job computes its own direction."""
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -5010,10 +5032,10 @@ class TestLineSearch:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             # The fake shifts the streamflow objectives by 2 * x of
@@ -5023,10 +5045,10 @@ class TestLineSearch:
             mid: float = win._param_panel.param_values()[free[0]]
             high: float = win._param_panel.current_bounds()[free[0]][1]
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
@@ -5035,7 +5057,7 @@ class TestLineSearch:
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
             worker = win._worker
-            assert isinstance(worker, gui_window._LineSearchWorker)
+            assert isinstance(worker, gui_window.LineSearchWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -5045,11 +5067,11 @@ class TestLineSearch:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The base point's results were handed in, the
             # direction came from forward differences over the
             # base point's own perturbations (one session batch),
@@ -5106,7 +5128,7 @@ class TestLineSearch:
             ) is not None
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_line_search_job_failed_point_is_nan_in_profile(
         self,
@@ -5121,16 +5143,16 @@ class TestLineSearch:
         chosen among the finite values, and the completion status
         counts the failure.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "job_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -5138,10 +5160,10 @@ class TestLineSearch:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             # The fake shifts the streamflow objectives by 2 * x of
@@ -5176,7 +5198,7 @@ class TestLineSearch:
                     return pool_hydro(x, input_data)
                 return pool_full(x, input_data)
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
                 pool_evaluate,
@@ -5188,7 +5210,7 @@ class TestLineSearch:
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
             worker = win._worker
-            assert isinstance(worker, gui_window._LineSearchWorker)
+            assert isinstance(worker, gui_window.LineSearchWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -5198,11 +5220,11 @@ class TestLineSearch:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The base point's results were handed in, the
             # direction came from forward differences over the
             # base point's own perturbations (one session batch),
@@ -5219,7 +5241,7 @@ class TestLineSearch:
             assert len(free) + 8 <= total <= len(free) + 16
 
             assert win._line_search_state is not None
-            state: gui_window._LineSearchSnapshot = win._line_search_state
+            state: gui_window.LineSearchSnapshot = win._line_search_state
             profile: pd.DataFrame = state.profile
             assert 8 <= len(profile) <= 16
             values: np.ndarray = profile["value"].to_numpy(dtype=np.float64)
@@ -5274,7 +5296,7 @@ class TestLineSearch:
             assert win._figure_panel._titles[-1] == "Line search (full)"
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_worker_reuses_the_base_results_at_the_zero_step(
         self,
@@ -5291,14 +5313,14 @@ class TestLineSearch:
         """
         monkeypatch.chdir(tmp_path)
         bounds: dict[str, tuple[float, float]] = dict(input_data.bounds)
-        base_x: np.ndarray = _midpoint_vector(input_data)
-        steps: list[_Perturbation] = free_parameter_steps(base_x, bounds)
-        free = _free_keys(input_data)
+        base_x: np.ndarray = midpoint_vector(input_data)
+        steps: list[Perturbation] = free_parameter_steps(base_x, bounds)
+        free = free_keys(input_data)
         keys: list[str] = list(bounds)
         direction: np.ndarray = np.zeros(len(keys))
         direction[keys.index(free[0])] = 0.6
         direction[keys.index(free[1])] = 0.8
-        hydro, rt = _synthetic_results(input_data)
+        hydro, rt = synthetic_results(input_data)
         base_results: gui_data.GuiRunResults = gui_data.GuiRunResults(
             hydro, rt
         )
@@ -5306,15 +5328,15 @@ class TestLineSearch:
         def flat_evaluate(
             _x: np.ndarray, _mode: str
         ) -> gui_data.GuiRunResults:
-            point_hydro, point_rt = _synthetic_results(input_data)
+            point_hydro, point_rt = synthetic_results(input_data)
             point_hydro.objective_functions = (
                 point_hydro.objective_functions + 0.1
             )
             return gui_data.GuiRunResults(point_hydro, point_rt)
 
-        sessions: list[_FakeRunSession] = []
-        _patch_pool_sessions(monkeypatch, gui_window, flat_evaluate, sessions)
-        worker: gui_window._LineSearchWorker = gui_window._LineSearchWorker(
+        sessions: list[FakeRunSession] = []
+        patch_pool_sessions(monkeypatch, gui_window, flat_evaluate, sessions)
+        worker: gui_window.LineSearchWorker = gui_window.LineSearchWorker(
             base_x,
             steps,
             direction,
@@ -5358,7 +5380,7 @@ class TestLineSearch:
             assert sessions[0].closed
         finally:
             worker.deleteLater()
-            _pump()
+            pump()
 
     def test_no_improvement_keeps_the_base_results(
         self,
@@ -5377,17 +5399,17 @@ class TestLineSearch:
         from ..gui.line_search import write_line_search_csv
 
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
 
             before_values: dict[str, float] = (
                 win._param_panel.param_values()
@@ -5408,8 +5430,8 @@ class TestLineSearch:
                 index=t_points,
             )
             csv_path: Path = write_line_search_csv(profile)
-            alt_hydro, alt_rt = _synthetic_results(input_data)
-            outcome = gui_window._LineSearchOutcome(
+            alt_hydro, alt_rt = synthetic_results(input_data)
+            outcome = gui_window.LineSearchOutcome(
                 error=None,
                 profile=profile,
                 x_best=base_x,
@@ -5432,7 +5454,7 @@ class TestLineSearch:
             assert win._last_run_mode == MODE_FULL
 
             assert win._line_search_state is not None
-            state: gui_window._LineSearchSnapshot = win._line_search_state
+            state: gui_window.LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
             assert win._figure_panel.page_count() == 9
@@ -5448,7 +5470,7 @@ class TestLineSearch:
                 f"to {csv_path}."
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_improvement_is_still_adopted(
         self,
@@ -5466,23 +5488,23 @@ class TestLineSearch:
         from ..gui.line_search import write_line_search_csv
 
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
 
             before_values: dict[str, float] = (
                 win._param_panel.param_values()
             )
             base_x: np.ndarray = win._current_x()
-            free = _free_keys(input_data)
+            free = free_keys(input_data)
             keys: list[str] = list(win._param_panel.current_bounds())
             x_best: np.ndarray = np.array(base_x)
             x_best[keys.index(free[0])] += 0.001
@@ -5497,11 +5519,11 @@ class TestLineSearch:
                 index=t_points,
             )
             csv_path: Path = write_line_search_csv(profile)
-            alt_hydro, alt_rt = _synthetic_results(input_data)
+            alt_hydro, alt_rt = synthetic_results(input_data)
             alt_results: gui_data.GuiRunResults = gui_data.GuiRunResults(
                 alt_hydro, alt_rt
             )
-            outcome = gui_window._LineSearchOutcome(
+            outcome = gui_window.LineSearchOutcome(
                 error=None,
                 profile=profile,
                 x_best=x_best,
@@ -5534,7 +5556,7 @@ class TestLineSearch:
             assert win._last_run_mode == MODE_FULL
 
             assert win._line_search_state is not None
-            state: gui_window._LineSearchSnapshot = win._line_search_state
+            state: gui_window.LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
             assert win._figure_panel.page_count() == 9
@@ -5550,7 +5572,207 @@ class TestLineSearch:
                 f"saved to {csv_path}."
             )
         finally:
-            _close_window(win)
+            close_window(win)
+
+    def test_line_search_keeps_the_figure_page(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A finished search adds its profile page without moving the
+        user off the figure they were on: the tab raised before the
+        job is still the raised tab after the figure rebuild, both
+        in the panel's tracker and on the visible bar.  Qt settles
+        the rebuilt tabify chain on a later event-loop pass and
+        raises the first dock there; the rebuild's deferred page
+        re-assertion is what survives it.
+        """
+        from ..gui.line_search import write_line_search_csv
+
+        calls: list[np.ndarray] = []
+        win = make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            fake_results_factory(calls, input_data),
+        )
+        try:
+            wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            pump()
+            win.show()
+            pump()
+            panel: gui_figure_panel.FigurePanel = win._figure_panel
+            assert panel.page_count() == 8
+
+            # The user is on a middle page: a click on its tab.
+            page: int = 5
+            figure_tab_bar(win).setCurrentIndex(page)
+            pump(10)
+            title: str = panel._titles[page]
+            assert panel.current_page() == page
+            assert visible_tab(win) == (page, title)
+
+            # The same rising, adopted profile as in
+            # `test_improvement_is_still_adopted`.
+            base_x: np.ndarray = win._current_x()
+            keys: list[str] = list(win._param_panel.current_bounds())
+            free: list[str] = free_keys(input_data)
+            x_best: np.ndarray = np.array(base_x)
+            x_best[keys.index(free[0])] += 0.001
+            t_points: np.ndarray = np.linspace(-0.5, 0.5, 25)
+            t_points[int(np.argmin(np.abs(t_points)))] = 0.0
+            values: np.ndarray = 0.9 + 0.01 * t_points
+            profile: pd.DataFrame = pd.DataFrame(
+                {"value": values, "Streamflow: KGE": values},
+                index=t_points,
+            )
+            csv_path: Path = write_line_search_csv(profile)
+            alt_hydro, alt_rt = synthetic_results(input_data)
+            outcome = gui_window.LineSearchOutcome(
+                error=None,
+                profile=profile,
+                x_best=x_best,
+                best_results=gui_data.GuiRunResults(alt_hydro, alt_rt),
+                csv_path=csv_path,
+                terms=["Streamflow: KGE"],
+                mode=win._current_mode(),
+                model_key=model_specs.DEFAULT_MODEL_KEY,
+                elapsed_seconds=3.0,
+                failed_points=0,
+                total_points=25,
+            )
+            win._on_finished_line_search(outcome)
+            pump()
+
+            # The profile page was appended, the outcome was adopted...
+            assert panel.page_count() == 9
+            assert "parameters are in the panel" in win._status_label.text()
+            # ...and the user's page survived the rebuild at its title.
+            assert panel._titles[page] == title
+            assert panel.current_page() == page
+            assert visible_tab(win) == (page, title)
+        finally:
+            close_window(win)
+
+    def test_line_search_adoption_keeps_the_param_view(
+        self,
+        qapp: QApplication,
+        input_data: gui_data.GuiInputData,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Adopting a better point updates the panel in place: the
+        scroll area stays scrolled where the user had it (the moved
+        reactive-transport cell stays in the view), every cell
+        widget is the same object as before (no group rebuild), and
+        the moved cell's spin box shows the adopted value.
+        """
+        from ..gui.line_search import write_line_search_csv
+
+        calls: list[np.ndarray] = []
+        win = make_window(
+            input_data,
+            tmp_path,
+            monkeypatch,
+            fake_results_factory(calls, input_data),
+        )
+        try:
+            wait_until(
+                lambda: win._worker is None and win._results is not None
+            )
+            pump()
+            win.show()
+            win.resize(1100, 800)
+            pump()
+
+            panel: gui_param_panel.ParamPanel = win._param_panel
+            scrollbar: QScrollBar = panel.verticalScrollBar()
+            assert scrollbar.maximum() > 0
+            # The user is looking at the bottom of the panel, where
+            # the reactive-transport groups sit.
+            scrollbar.setValue(scrollbar.maximum())
+            assert scrollbar.value() == scrollbar.maximum()
+
+            # The first free reactive-transport parameter: one of
+            # those groups' cells.  The search moves it two spin
+            # steps.
+            rt_fields: frozenset[str] = frozenset(
+                RT_DIM_PARAMS + MINERAL_PARAMS
+            )
+            rt_key: str = next(
+                key
+                for key in free_keys(input_data)
+                if key.partition(".")[2].split("[", 1)[0] in rt_fields
+            )
+            rt_bounds: tuple[float, float] = panel.current_bounds()[rt_key]
+            lo, hi = rt_bounds
+            step: float = 10.0 ** (-bound_decimals(lo, hi))
+            before_cells: dict[str, object] = {
+                key: cell for key, cell in panel._rows.items()
+            }
+            before_values: dict[str, float] = panel.param_values()
+            base_x: np.ndarray = win._current_x()
+            keys: list[str] = list(panel.current_bounds())
+            x_best: np.ndarray = np.array(base_x)
+            x_best[keys.index(rt_key)] += 2.0 * step
+
+            # A rising profile, as in `test_improvement_is_still_adopted`.
+            t_points: np.ndarray = np.linspace(-0.5, 0.5, 25)
+            t_points[int(np.argmin(np.abs(t_points)))] = 0.0
+            values: np.ndarray = 0.9 + 0.01 * t_points
+            profile: pd.DataFrame = pd.DataFrame(
+                {"value": values, "Streamflow: KGE": values},
+                index=t_points,
+            )
+            csv_path: Path = write_line_search_csv(profile)
+            alt_hydro, alt_rt = synthetic_results(input_data)
+            outcome = gui_window.LineSearchOutcome(
+                error=None,
+                profile=profile,
+                x_best=x_best,
+                best_results=gui_data.GuiRunResults(alt_hydro, alt_rt),
+                csv_path=csv_path,
+                terms=["Streamflow: KGE"],
+                mode=win._current_mode(),
+                model_key=model_specs.DEFAULT_MODEL_KEY,
+                elapsed_seconds=3.0,
+                failed_points=0,
+                total_points=25,
+            )
+            win._on_finished_line_search(outcome)
+            pump()
+
+            # The best point's values are adopted...
+            assert "parameters are in the panel" in win._status_label.text()
+            after_values: dict[str, float] = panel.param_values()
+            expected: float = min(
+                max(before_values[rt_key] + 2.0 * step, lo), hi
+            )
+            assert after_values[rt_key] == pytest.approx(expected)
+            for key in before_values:
+                if key != rt_key:
+                    assert after_values[key] == before_values[key]
+
+            # ...on the same cell widgets, so no group rebuild
+            # happened...
+            for key, cell in before_cells.items():
+                assert panel._rows[key] is cell
+            # ...the scroll area kept its position...
+            assert scrollbar.value() > 0
+            # ...and the moved cell's spin box shows the adopted value.
+            spin: QDoubleSpinBox | None = panel._rows[rt_key].findChild(
+                QDoubleSpinBox
+            )
+            assert spin is not None
+            assert spin.value() == pytest.approx(after_values[rt_key], abs=step)
+        finally:
+            close_window(win)
 
     def test_reuses_gradient_snapshot(
         self,
@@ -5560,16 +5782,16 @@ class TestLineSearch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A finished gradient job's row supplies the direction for free."""
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gradient_gate = tmp_path / "gradient_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -5577,22 +5799,22 @@ class TestLineSearch:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 model_pool,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gradient_gate,
             )
             win._on_gradients_clicked()
             worker = win._worker
-            assert isinstance(worker, gui_window._GradientWorker)
+            assert isinstance(worker, gui_window.GradientWorker)
 
             gradient_steps: list[tuple[int, int]] = []
 
@@ -5601,11 +5823,11 @@ class TestLineSearch:
 
             worker.progress_step.connect(on_gradient_step)
             gradient_gate.touch()
-            _wait_until(
+            wait_until(
                 lambda: win._gradient_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The job's points ran in the fake session (which
             # scores them without recording): only the in-process
             # startup run is recorded, and the last step completes
@@ -5629,10 +5851,10 @@ class TestLineSearch:
             # own file so the test can connect to the worker's
             # progress before any point completes.
             search_gate = tmp_path / "search_gate"
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=search_gate,
             )
@@ -5642,7 +5864,7 @@ class TestLineSearch:
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
             search_worker = win._worker
-            assert isinstance(search_worker, gui_window._LineSearchWorker)
+            assert isinstance(search_worker, gui_window.LineSearchWorker)
 
             search_steps: list[tuple[int, int]] = []
 
@@ -5651,11 +5873,11 @@ class TestLineSearch:
 
             search_worker.progress_step.connect(on_search_step)
             search_gate.touch()
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # No direction differences and no base re-run: the
             # snapshot's row supplies the direction and the base
             # point's results are handed in, so the progress total
@@ -5693,7 +5915,7 @@ class TestLineSearch:
                 "Line search (full)",
             ]
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_line_search_sum_of_two_objectives(
         self,
@@ -5708,16 +5930,16 @@ class TestLineSearch:
         the value column, and the page and the status report on
         the sum.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "search_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -5725,10 +5947,10 @@ class TestLineSearch:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             terms: frozenset[str] = frozenset(
@@ -5736,16 +5958,16 @@ class TestLineSearch:
             )
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
             win._start_line_search(terms)
             worker = win._worker
-            assert isinstance(worker, gui_window._LineSearchWorker)
+            assert isinstance(worker, gui_window.LineSearchWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -5755,11 +5977,11 @@ class TestLineSearch:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
             assert steps
             assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
@@ -5787,7 +6009,7 @@ class TestLineSearch:
             assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[-1] == "Line search (full)"
             figure: Figure = win._figure_panel._canvases[-1].figure
-            lines = _lines(figure.axes[0])
+            lines = line_artists(figure.axes[0])
             assert [line.get_label() for line in lines] == [
                 "Streamflow: KGE",
                 "Streamflow: NSE",
@@ -5810,7 +6032,7 @@ class TestLineSearch:
             ) is not None
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_line_search_in_hydro_mode(
         self,
@@ -5824,17 +6046,17 @@ class TestLineSearch:
         session runs the hydro objectives and the page and the
         status report the hydro search.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, _ = _gradient_fake_factory(
+        full_fake, _ = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
-        win = _make_window(input_data, tmp_path, monkeypatch, full_fake)
+        win = make_window(input_data, tmp_path, monkeypatch, full_fake)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             # No auto run after the mode switch: the search's
@@ -5845,7 +6067,7 @@ class TestLineSearch:
             win._auto_run_action.setChecked(False)
             win._mode_action.setChecked(True)
             file_gate = tmp_path / "job_gate"
-            pool_full, pool_hydro = _gradient_fake_factory(
+            pool_full, pool_hydro = gradient_fake_factory(
                 None, input_data, free[0], free[1]
             )
 
@@ -5857,7 +6079,7 @@ class TestLineSearch:
                     return pool_hydro(x, input_data)
                 return pool_full(x, input_data)
 
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
                 marking_evaluate,
@@ -5870,15 +6092,15 @@ class TestLineSearch:
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
             assert isinstance(
-                win._worker, gui_window._LineSearchWorker
+                win._worker, gui_window.LineSearchWorker
             )
 
             file_gate.touch()
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             markers: list[Path] = sorted(tmp_path.glob("hydro_*"))
             assert markers
 
@@ -5902,7 +6124,7 @@ class TestLineSearch:
             ) is not None
         finally:
             file_gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_line_search_recomputes_direction_when_snapshot_lacks_term(
         self,
@@ -5916,16 +6138,16 @@ class TestLineSearch:
         search recomputes the direction from the base point's own
         differences instead of reusing the snapshot's rows.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, hydro_fake = _gradient_fake_factory(
+        full_fake, hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = tmp_path / "search_gate"
-        pool_full, pool_hydro = _gradient_fake_factory(
+        pool_full, pool_hydro = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        win = _gradient_window(
+        win = gradient_window(
             input_data,
             tmp_path,
             monkeypatch,
@@ -5933,10 +6155,10 @@ class TestLineSearch:
             hydro_fake,
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             # A snapshot that lacks the selected term, with a csv
@@ -5945,7 +6167,7 @@ class TestLineSearch:
             results_dir.mkdir(exist_ok=True)
             csv_path: Path = results_dir / "gradients_fake.csv"
             csv_path.touch()
-            win._gradient_state = gui_window._GradientSnapshot(
+            win._gradient_state = gui_window.GradientSnapshot(
                 table=pd.DataFrame(
                     [[0.0] * len(free)],
                     index=["Streamflow: KGE"],
@@ -5961,16 +6183,16 @@ class TestLineSearch:
             terms: frozenset[str] = frozenset({"DOC: KGE"})
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
-            _patch_pool_sessions(
+            patch_pool_sessions(
                 monkeypatch,
                 gui_window,
-                _mode_evaluate(pool_full, pool_hydro, input_data),
+                mode_evaluate(pool_full, pool_hydro, input_data),
                 [],
                 gate_path=gate,
             )
             win._start_line_search(terms)
             worker = win._worker
-            assert isinstance(worker, gui_window._LineSearchWorker)
+            assert isinstance(worker, gui_window.LineSearchWorker)
 
             steps: list[tuple[int, int]] = []
 
@@ -5980,11 +6202,11 @@ class TestLineSearch:
             worker.progress_step.connect(on_step)
             gate.touch()
 
-            _wait_until(
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
             assert steps
             assert all(a[0] < b[0] for a, b in zip(steps, steps[1:]))
@@ -6011,7 +6233,7 @@ class TestLineSearch:
             ) is not None
         finally:
             gate.touch()
-            _close_window(win)
+            close_window(win)
 
     def test_empty_objective_table(
         self,
@@ -6027,13 +6249,13 @@ class TestLineSearch:
         ) -> gui_data.GuiRunResults:
             raise ValueError("boom")
 
-        win = _make_window(input_data, tmp_path, monkeypatch, failing)
+        win = make_window(input_data, tmp_path, monkeypatch, failing)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None
                 and win._status_label.text() == "Run failed: ValueError: boom"
             )
-            _pump()
+            pump()
             win._on_line_search_clicked()
             assert (
                 win._status_label.text()
@@ -6042,7 +6264,7 @@ class TestLineSearch:
             assert win._worker is None
             assert win._line_search_state is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_no_free_parameters(
         self,
@@ -6053,17 +6275,17 @@ class TestLineSearch:
     ) -> None:
         """With every range collapsed, the selection is refused."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert len(calls) == 1
 
             def no_free() -> dict[str, tuple[float, float]]:
@@ -6077,7 +6299,7 @@ class TestLineSearch:
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
-            _pump()
+            pump()
             assert (
                 win._status_label.text() == "No free parameters to search."
             )
@@ -6086,7 +6308,7 @@ class TestLineSearch:
             assert len(calls) == 1
             assert win._line_search_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_line_search_refused_while_a_job_is_in_flight(
         self,
@@ -6101,21 +6323,21 @@ class TestLineSearch:
         in-flight job's outcome stays the final on-screen state;
         with no job in flight, the same call starts the search.
         """
-        free = _free_keys(input_data)
+        free = free_keys(input_data)
         calls: list[np.ndarray] = []
-        full_fake, _hydro_fake = _gradient_fake_factory(
+        full_fake, _hydro_fake = gradient_fake_factory(
             calls, input_data, free[0], free[1]
         )
         gate = threading.Event()
 
         def gated_fake(
-            x: np.ndarray, _input_data: gui_data.GuiInputData
+            x: np.ndarray, input_data: gui_data.GuiInputData
         ) -> gui_data.GuiRunResults:
             # The gate blocks the model calls until the test
             # releases it, so the run stays in flight while the
             # refusal is asserted, and then finishes on demand.
             gate.wait(timeout=60)
-            return full_fake(x, _input_data)
+            return full_fake(x, input_data)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", gated_fake)
@@ -6123,24 +6345,24 @@ class TestLineSearch:
         # The search job's points run in the session it builds:
         # the fake session scores them in-process, so the test's
         # second half does not fork real workers.
-        pool_full, _ = _gradient_fake_factory(
+        pool_full, _ = gradient_fake_factory(
             None, input_data, free[0], free[1]
         )
-        _patch_pool_sessions(
+        patch_pool_sessions(
             monkeypatch,
             gui_window,
-            _mode_evaluate(pool_full, pool_full, input_data),
+            mode_evaluate(pool_full, pool_full, input_data),
             [],
         )
         win = gui_window.MainWindow(input_data)
         try:
             # The window's startup run blocks on the gate: a model
             # run in flight, the only job the window knows.
-            _wait_until(
+            wait_until(
                 lambda: win._worker is not None
                 and win._worker.isRunning()
             )
-            assert isinstance(win._worker, gui_window._RunWorker)
+            assert isinstance(win._worker, gui_window.RunWorker)
             run_id: int = id(win._worker)
 
             # The direct path is guarded against the in-flight run:
@@ -6150,11 +6372,11 @@ class TestLineSearch:
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
-            _pump()
+            pump()
             assert win._worker is not None
             assert id(win._worker) == run_id
             assert win._worker.isRunning()
-            assert not isinstance(win._worker, gui_window._LineSearchWorker)
+            assert not isinstance(win._worker, gui_window.LineSearchWorker)
             assert win._line_search_state is None
             assert win._results is None
             assert win._status_label.text() == (
@@ -6167,10 +6389,10 @@ class TestLineSearch:
             # the final on-screen state (up to date, and no line
             # search was ever started to clobber it).
             gate.set()
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             assert win._results_are_up_to_date()
             assert win._line_search_state is None
             assert win._figure_panel.page_count() == 8
@@ -6178,7 +6400,7 @@ class TestLineSearch:
                 r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
             ) is not None
             assert len(calls) == 1
-            assert np.array_equal(calls[0], _midpoint_vector(input_data))
+            assert np.array_equal(calls[0], midpoint_vector(input_data))
 
             # With no job in flight, the same call starts the
             # search: the base point's results are handed in, and
@@ -6188,19 +6410,19 @@ class TestLineSearch:
             win._objective_terms = terms
             win._objective_model.set_selected(terms)
             win._start_line_search(terms)
-            assert isinstance(win._worker, gui_window._LineSearchWorker)
-            _wait_until(
+            assert isinstance(win._worker, gui_window.LineSearchWorker)
+            wait_until(
                 lambda: win._line_search_state is not None
                 and win._worker is None
             )
-            _pump()
+            pump()
             # The job's points ran in the fake session (which
             # scores them without recording): only the in-process
             # startup run is recorded.
             assert len(calls) == 1
         finally:
             gate.set()
-            _close_window(win)
+            close_window(win)
 
 
 class TestCalibration:
@@ -6222,7 +6444,7 @@ class TestCalibration:
         self, input_data: gui_data.GuiInputData
     ) -> None:
         """The score negates the equal-weighted metric sum."""
-        hydro, _rt = _synthetic_results(input_data)
+        hydro, _rt = synthetic_results(input_data)
         expected: float = -float(
             hydro.objective_functions["kge"]
             + hydro.objective_functions["nse"]
@@ -6249,7 +6471,7 @@ class TestCalibration:
         model_class = input_data.spec.model_class
         num_hydro: int = model_class.get_num_hydro_parameters()
         all_names: tuple[str, ...] = tuple(input_data.bounds)[:num_hydro]
-        x: np.ndarray = _midpoint_vector(input_data)
+        x: np.ndarray = midpoint_vector(input_data)
         free_name: str = all_names[0]
         free_high: float = float(x[0]) + 0.1
         bounds: dict[str, tuple[float, float]] = {
@@ -6258,7 +6480,7 @@ class TestCalibration:
         }
         bounds[free_name] = (float(x[0]) - 0.1, free_high)
 
-        hydro, _rt = _synthetic_results(input_data)
+        hydro, _rt = synthetic_results(input_data)
         records: list[dict[str, object]] = []
 
         def fake_calibration(cls: type, /, **kwargs: object) -> tuple[object, object, object]:
@@ -6283,8 +6505,8 @@ class TestCalibration:
             "simple_calibration",
             classmethod(fake_calibration),
         )
-        worker: gui_calibration._CalibrationWorker = (
-            gui_calibration._CalibrationWorker(
+        worker: gui_calibration.CalibrationWorker = (
+            gui_calibration.CalibrationWorker(
                 x,
                 input_data,
                 bounds,
@@ -6346,8 +6568,8 @@ class TestCalibration:
         the results, and saves the run.
         """
         calls: list[np.ndarray] = []
-        full_fake = _fake_results_factory(calls, input_data)
-        hydro_fake = _fake_results_factory(calls, input_data, hydro_only=True)
+        full_fake = fake_results_factory(calls, input_data)
+        hydro_fake = fake_results_factory(calls, input_data, hydro_only=True)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(gui_window, "arr_to_results", full_fake)
         monkeypatch.setattr(
@@ -6355,10 +6577,10 @@ class TestCalibration:
         )
         win = gui_window.MainWindow(input_data)
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            _pump()
+            pump()
             # Full mode: the action is disabled and the direct call
             # is refused with a message.
             assert not win._calibrate_action.isEnabled()
@@ -6371,13 +6593,13 @@ class TestCalibration:
 
             # Hydrology-only mode: the action comes up after its run.
             win._mode_action.setChecked(True)
-            _wait_until(
+            wait_until(
                 lambda: win._current_mode() == MODE_HYDRO
                 and win._worker is None
                 and win._results is not None
                 and win._results.rt is None
             )
-            _pump()
+            pump()
             assert win._calibrate_action.isEnabled()
 
             terms: frozenset[str] = frozenset({"Streamflow: KGE"})
@@ -6392,7 +6614,7 @@ class TestCalibration:
                 > win._param_panel.current_bounds()[name][0]
             )
             high: float = win._param_panel.current_bounds()[free_name][1]
-            hydro, _rt = _synthetic_results(input_data)
+            hydro, _rt = synthetic_results(input_data)
 
             def fake_calibration(cls: type, /, **kwargs: object) -> tuple[object, object, object]:
                 callback = kwargs["callback"]
@@ -6417,12 +6639,12 @@ class TestCalibration:
                 ),
             )
             win._on_calibrate_clicked()
-            assert isinstance(win._worker, gui_calibration._CalibrationWorker)
-            _wait_until(
+            assert isinstance(win._worker, gui_calibration.CalibrationWorker)
+            wait_until(
                 lambda: win._worker is None
                 and "Calibration finished" in win._status_label.text()
             )
-            _pump()
+            pump()
 
             assert win._param_panel.param_values()[free_name] == pytest.approx(
                 high
@@ -6443,7 +6665,7 @@ class TestCalibration:
             assert saved[0].name in win._status_label.text()
             assert win._calibrate_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 class TestModelSelection:
@@ -6458,11 +6680,11 @@ class TestModelSelection:
     ) -> None:
         """The window opens on the lateral model and names it."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             assert win._model_combo.currentData() == "lateral_three_layer"
@@ -6470,7 +6692,7 @@ class TestModelSelection:
                 "East River calibration — Lateral three-layer"
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_model_combo_lists_the_four_models(
         self,
@@ -6481,11 +6703,11 @@ class TestModelSelection:
     ) -> None:
         """The selector offers exactly the four curated models, in order."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             labels: list[str] = [
@@ -6509,7 +6731,7 @@ class TestModelSelection:
                 "hbv_lateral",
             ]
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_switching_model_resets_panel_and_clears_results(
         self,
@@ -6520,21 +6742,21 @@ class TestModelSelection:
     ) -> None:
         """A switch reloads the panel, clears the figures, and re-titles."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
-            _pump()
+            pump()
 
             assert win._input_data.spec.key == "hbv"
             values: dict[str, float] = win._param_panel.param_values()
@@ -6546,7 +6768,7 @@ class TestModelSelection:
             assert win.windowTitle() == "East River calibration — HBV"
             assert win._status_label.text() == "Switched to HBV."
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_full_run_after_switch_plots_every_page(
         self,
@@ -6562,30 +6784,30 @@ class TestModelSelection:
         species (DIC carries no per-zone column) instead of raising.
         """
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("three_layer")
             )
-            _wait_until(
+            wait_until(
                 lambda: win._input_data.spec.key == "three_layer"
                 and win._worker is None
                 and win._results is not None
             )
-            _pump(50)
+            pump(50)
 
             assert win._figure_panel.page_count() == 8
             assert win._figure_panel._titles[6] == "Zone concentrations"
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_switch_filters_history_to_current_model(
         self,
@@ -6597,29 +6819,29 @@ class TestModelSelection:
     ) -> None:
         """Only the current model's saved runs remain in the history."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             hbv_input: gui_data.GuiInputData = model_inputs["hbv"]
-            _write_saved_run(tmp_path, input_data)
-            _write_saved_run(
+            write_saved_run(tmp_path, input_data)
+            write_saved_run(
                 tmp_path,
                 hbv_input,
-                state=_full_state(hbv_input, model_key="hbv"),
+                state=full_state(hbv_input, model_key="hbv"),
             )
 
             win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
-            _pump()
+            pump()
 
             assert win._history_items
             assert all(
@@ -6632,7 +6854,7 @@ class TestModelSelection:
             assert labels == [item.label for item in win._history_items]
             assert all("lateral" not in label.lower() for label in labels)
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_gradient_outcome_from_another_model_is_discarded(
         self,
@@ -6643,17 +6865,17 @@ class TestModelSelection:
     ) -> None:
         """A gradient outcome from another model never reaches the panel."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
-            outcome = gui_window._GradientOutcome(
+            outcome = gui_window.GradientOutcome(
                 error=None,
                 table=pd.DataFrame({"x": [1.0]}),
                 base_results=None,
@@ -6669,7 +6891,7 @@ class TestModelSelection:
             assert win._gradients_action.isEnabled()
             assert win._line_search_action.isEnabled()
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_saves_the_selected_model(
         self,
@@ -6680,24 +6902,24 @@ class TestModelSelection:
     ) -> None:
         """Saving under HBV writes an HBV model and records the key."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("hbv")
             )
-            _pump()
+            pump()
             # Run once so there are results to save for the new model.
             win._start_run(win._current_x())
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
 
@@ -6723,11 +6945,11 @@ class TestModelSelection:
             assert saved is not None
             assert saved.model_key == "hbv"
         finally:
-            _close_window(win)
+            close_window(win)
 
 
 # Pinned W1 finding line (Task 2's implementation notes).
-_W1_LINE: str = (
+W1_LINE: str = (
     "W1: no H+ primary species: the speciation solve has "
     "no charge-balance row"
 )
@@ -6739,7 +6961,7 @@ class TestNetworkEditorDialog:
     validation bar, the checkbox-driven remove/re-add flow, Apply
     and the resulting fingerprint, and the preset re-seed
     confirmation (the window's Yes/No idiom, faked with
-    `_FakeMessageBox`).
+    `FakeMessageBox`).
     """
 
     @staticmethod
@@ -6778,7 +7000,7 @@ class TestNetworkEditorDialog:
             assert dialog._save_as_button.isEnabled()
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_unchecking_hplus_flags_and_recovering(
         self, qapp: QApplication
@@ -6802,7 +7024,7 @@ class TestNetworkEditorDialog:
                 "V3: stoichiometry of secondary species 'CO3--' "
                 "references unknown species 'H+'"
             )
-            assert dialog._warning_label.text() == _W1_LINE
+            assert dialog._warning_label.text() == W1_LINE
             # The rebuild replaced the list's items: look the (now
             # unchecked) H+ row up again before re-checking it.
             item = self._find_item(primary_list, "H+")
@@ -6817,7 +7039,7 @@ class TestNetworkEditorDialog:
             assert dialog._warning_label.isHidden()
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_apply_accepts_and_preserves_the_fingerprint(
         self, qapp: QApplication
@@ -6838,7 +7060,7 @@ class TestNetworkEditorDialog:
             )
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_preset_reseed_confirms_or_restores(
         self,
@@ -6850,10 +7072,10 @@ class TestNetworkEditorDialog:
             self._make_dialog(seed)
         )
         monkeypatch.setattr(
-            gui_network_editor, "QMessageBox", _FakeMessageBox
+            gui_network_editor, "QMessageBox", FakeMessageBox
         )
         try:
-            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.Yes
+            FakeMessageBox.answer = FakeMessageBox.StandardButton.Yes
             dialog._dirty = True
             dialog._preset_combo.setCurrentIndex(
                 dialog._preset_combo.findData("carbon")
@@ -6863,7 +7085,7 @@ class TestNetworkEditorDialog:
             assert dialog._ok_label.text() == (
                 "OK — 8 species, 1 minerals, 1 exchange"
             )
-            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
+            FakeMessageBox.answer = FakeMessageBox.StandardButton.No
             dialog._dirty = True
             dialog._preset_combo.setCurrentIndex(
                 dialog._preset_combo.findData("chloride")
@@ -6871,9 +7093,9 @@ class TestNetworkEditorDialog:
             assert dialog._dirty
             assert dialog._preset_combo.currentData() == "carbon"
         finally:
-            _FakeMessageBox.answer = _FakeMessageBox.StandardButton.No
+            FakeMessageBox.answer = FakeMessageBox.StandardButton.No
             dialog.deleteLater()
-            _pump()
+            pump()
 
 
 class TestNetworkSelection:
@@ -6893,11 +7115,11 @@ class TestNetworkSelection:
     ) -> None:
         """The selector offers the five presets, in order, on the default."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
             labels: list[str] = [
@@ -6918,7 +7140,7 @@ class TestNetworkSelection:
             )
             assert win._custom_network_name is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_switching_to_carbon_resets_the_window(
         self,
@@ -6929,21 +7151,21 @@ class TestNetworkSelection:
     ) -> None:
         """A switch keeps the model, swaps the network, and clears state."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
-            _pump()
+            pump()
 
             assert win._input_data.spec.key == "lateral_three_layer"
             carbon_fingerprint: str = gui_data.fingerprint_network(
@@ -6961,7 +7183,7 @@ class TestNetworkSelection:
                 "Switched to network Carbon (SOC, no calcite)."
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_loading_a_preset_matching_file_selects_the_preset(
         self,
@@ -6972,14 +7194,14 @@ class TestNetworkSelection:
     ) -> None:
         """A file carrying the carbon preset's network selects it by key."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7001,7 +7223,7 @@ class TestNetworkSelection:
                 gui_window.QFileDialog, "getOpenFileName", fake_open
             )
             win._on_load_network()
-            _pump()
+            pump()
 
             carbon_fingerprint: str = gui_data.fingerprint_network(
                 get_carbon_network()
@@ -7012,7 +7234,7 @@ class TestNetworkSelection:
             assert win._network_combo.currentData() == "carbon"
             assert win._custom_network_name is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_loading_an_invalid_file_keeps_the_network(
         self,
@@ -7023,14 +7245,14 @@ class TestNetworkSelection:
     ) -> None:
         """A file that fails to load or validate is reported and ignored."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7051,20 +7273,20 @@ class TestNetworkSelection:
                 gui_window.QFileDialog, "getOpenFileName", fake_open
             )
             monkeypatch.setattr(
-                gui_window, "QMessageBox", _FakeMessageBox
+                gui_window, "QMessageBox", FakeMessageBox
             )
-            _FakeMessageBox.critical_calls.clear()
+            FakeMessageBox.critical_calls.clear()
             win._on_load_network()
-            _pump()
+            pump()
 
-            assert len(_FakeMessageBox.critical_calls) == 1
-            assert _FakeMessageBox.critical_calls[0][0] == "Load network"
+            assert len(FakeMessageBox.critical_calls) == 1
+            assert FakeMessageBox.critical_calls[0][0] == "Load network"
             assert gui_data.fingerprint_network(win._network) == before
             assert win._network_combo.currentData() == (
                 network_specs.DEFAULT_NETWORK_KEY
             )
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_loading_a_custom_file_adds_a_custom_entry(
         self,
@@ -7075,14 +7297,14 @@ class TestNetworkSelection:
     ) -> None:
         """A non-preset file becomes the selector's `custom: <stem>` entry."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7099,7 +7321,7 @@ class TestNetworkSelection:
             )
             fingerprint: str = gui_data.fingerprint_network(custom)
             assert fingerprint not in (
-                gui_network_editor._preset_fingerprint_map()
+                gui_network_editor.preset_fingerprint_map()
             )
 
             path: Path = tmp_path / "my_net.yaml"
@@ -7117,7 +7339,7 @@ class TestNetworkSelection:
                 gui_window.QFileDialog, "getOpenFileName", fake_open
             )
             win._on_load_network()
-            _pump()
+            pump()
 
             assert gui_data.fingerprint_network(win._network) == (
                 fingerprint
@@ -7128,7 +7350,7 @@ class TestNetworkSelection:
                 win._network_combo.findData(fingerprint)
             ) == "custom: my_net"
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_edit_cancel_keeps_the_network(
         self,
@@ -7139,14 +7361,14 @@ class TestNetworkSelection:
     ) -> None:
         """Cancelling the editor dialog leaves the window untouched."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7161,7 +7383,7 @@ class TestNetworkSelection:
 
             monkeypatch.setattr(gui_window, "edit_network", fake_edit)
             win._on_edit_network()
-            _pump()
+            pump()
 
             assert gui_data.fingerprint_network(win._network) == before
             assert win._network_combo.currentData() == (
@@ -7169,7 +7391,7 @@ class TestNetworkSelection:
             )
             assert win._custom_network_name is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_edit_apply_adds_an_edited_entry(
         self,
@@ -7180,14 +7402,14 @@ class TestNetworkSelection:
     ) -> None:
         """Applying an edit of a preset gets the `custom: edited` entry."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7211,7 +7433,7 @@ class TestNetworkSelection:
 
             monkeypatch.setattr(gui_window, "edit_network", fake_edit)
             win._on_edit_network()
-            _pump()
+            pump()
 
             assert gui_data.fingerprint_network(win._network) == (
                 fingerprint
@@ -7222,7 +7444,7 @@ class TestNetworkSelection:
                 win._network_combo.findData(fingerprint)
             ) == "custom: edited"
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_run_matches_network(
         self,
@@ -7247,11 +7469,11 @@ class TestNetworkSelection:
 
         run_a: Path = Path("run_a")
         run_b: Path = Path("run_b")
-        assert gui_window._run_matches_network(run_a, default_fingerprint)
-        assert not gui_window._run_matches_network(run_a, carbon_fingerprint)
-        assert gui_window._run_matches_network(run_b, "abc123")
-        assert not gui_window._run_matches_network(run_b, default_fingerprint)
-        assert not gui_window._run_matches_network(run_b, carbon_fingerprint)
+        assert gui_window.run_matches_network(run_a, default_fingerprint)
+        assert not gui_window.run_matches_network(run_a, carbon_fingerprint)
+        assert gui_window.run_matches_network(run_b, "abc123")
+        assert not gui_window.run_matches_network(run_b, default_fingerprint)
+        assert not gui_window.run_matches_network(run_b, carbon_fingerprint)
 
     def test_switch_filters_history_by_model_and_network(
         self,
@@ -7262,14 +7484,14 @@ class TestNetworkSelection:
     ) -> None:
         """The history list keeps only runs of the same model and network."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7320,7 +7542,7 @@ class TestNetworkSelection:
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
-            _pump()
+            pump()
             actual: list[str] = [
                 item.run_dir.name
                 for item in win._history_items
@@ -7335,7 +7557,7 @@ class TestNetworkSelection:
                     network_specs.DEFAULT_NETWORK_KEY
                 )
             )
-            _pump()
+            pump()
             actual = [
                 item.run_dir.name
                 for item in win._history_items
@@ -7343,7 +7565,7 @@ class TestNetworkSelection:
             ]
             assert actual == [other_network.name, old_run.name]
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_on_save_network_writes_the_file(
         self,
@@ -7354,14 +7576,14 @@ class TestNetworkSelection:
     ) -> None:
         """Save network as writes the canonical file; the window is untouched."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7380,9 +7602,9 @@ class TestNetworkSelection:
                 gui_window.QFileDialog, "getSaveFileName", fake_save_file
             )
             monkeypatch.setattr(
-                gui_window, "QMessageBox", _FakeMessageBox
+                gui_window, "QMessageBox", FakeMessageBox
             )
-            _FakeMessageBox.information_calls.clear()
+            FakeMessageBox.information_calls.clear()
             win._on_save_network()
 
             assert target.is_file()
@@ -7393,7 +7615,7 @@ class TestNetworkSelection:
             assert saved_fingerprint == gui_data.fingerprint_network(
                 win._network
             )
-            assert _FakeMessageBox.information_calls == [
+            assert FakeMessageBox.information_calls == [
                 ("Save network", f"Network written to {target}.")
             ]
             assert win._network_combo.currentData() == (
@@ -7401,7 +7623,7 @@ class TestNetworkSelection:
             )
             assert win._custom_network_name is None
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_on_save_run_persists_the_network(
         self,
@@ -7412,25 +7634,25 @@ class TestNetworkSelection:
     ) -> None:
         """Saving a run writes network.yaml and the fingerprint to state."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
-            _pump()
+            pump()
             # Run once so there are results to save for the new
             # network.
             win._start_run(win._current_x())
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
 
@@ -7463,7 +7685,7 @@ class TestNetworkSelection:
             assert state is not None
             assert state.network_fingerprint == fingerprint
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_run_network_reads_or_skips_the_file(
         self,
@@ -7476,7 +7698,7 @@ class TestNetworkSelection:
         pt.NetworkFile.from_network(get_carbon_network()).to_file(
             str(good / "network.yaml")
         )
-        loaded: pt.ReactionNetwork | None = gui_window._run_network(good)
+        loaded: pt.ReactionNetwork | None = gui_window.run_network(good)
         assert loaded is not None
         assert gui_data.fingerprint_network(loaded) == (
             gui_data.fingerprint_network(get_carbon_network())
@@ -7484,12 +7706,12 @@ class TestNetworkSelection:
 
         missing: Path = tmp_path / "missing"
         missing.mkdir()
-        assert gui_window._run_network(missing) is None
+        assert gui_window.run_network(missing) is None
 
         broken: Path = tmp_path / "broken"
         broken.mkdir()
         (broken / "network.yaml").write_text(":::")
-        assert gui_window._run_network(broken) is None
+        assert gui_window.run_network(broken) is None
         assert "Could not load" in capsys.readouterr().err
 
 
@@ -7555,7 +7777,7 @@ class TestColumnMappingDialog:
             assert dialog._combos["q_meas"].currentText() == "(none)"
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_required_gates_ok(self, qapp: QApplication) -> None:
         """OK stays disabled while a required row is "(select…)", and
@@ -7569,7 +7791,7 @@ class TestColumnMappingDialog:
             assert dialog._ok_button.isEnabled()
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_none_option(self, qapp: QApplication) -> None:
         """An optional row on "(none)" yields None in the mapping, and
@@ -7582,7 +7804,7 @@ class TestColumnMappingDialog:
             assert mapping["DOC"] == "doc_molL"
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
         prefill: dict[str, str | None] = self._prefill()
         prefill["q_meas"] = None
@@ -7592,7 +7814,7 @@ class TestColumnMappingDialog:
             assert dialog.mapping()["q_meas"] is None
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_mapping_roundtrip(self, qapp: QApplication) -> None:
         """A complete mapping comes back exactly as set, with every
@@ -7602,7 +7824,7 @@ class TestColumnMappingDialog:
             assert dialog.mapping() == self._prefill()
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
     def test_collision_disables_ok(self, qapp: QApplication) -> None:
         """Two rows on the same column disable OK and the status line
@@ -7617,7 +7839,7 @@ class TestColumnMappingDialog:
             assert "Ca++" in status
         finally:
             dialog.deleteLater()
-            _pump()
+            pump()
 
 
 class TestLoadData:
@@ -7685,7 +7907,7 @@ class TestLoadData:
         scripted outcome while recording the mapping the window
         then reads."""
 
-        class _FakeDialog(gui_data_dialog.ColumnMappingDialog):
+        class FakeDialog(gui_data_dialog.ColumnMappingDialog):
             def __init__(
                 self,
                 columns: list[str],
@@ -7703,7 +7925,7 @@ class TestLoadData:
                 mapping_seen.append(self.mapping())
                 return outcome
 
-        return _FakeDialog
+        return FakeDialog
 
     def test_load_data_switches_window(
         self,
@@ -7717,14 +7939,14 @@ class TestLoadData:
         record (new inputs, path, and map), drops the old results
         and session history, and lights up the run buttons."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7759,11 +7981,11 @@ class TestLoadData:
                     mapping_seen,
                 ),
             )
-            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-            _FakeMessageBox.critical_calls.clear()
+            monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+            FakeMessageBox.critical_calls.clear()
 
             win._on_load_data()
-            _pump()
+            pump()
 
             assert opens == [
                 ("Load data", "Data files (*.csv *.xlsx)")
@@ -7807,9 +8029,9 @@ class TestLoadData:
             assert win._gradients_action.isEnabled()
             assert win._line_search_action.isEnabled()
             assert win._status_label.text() == "Loaded record.xlsx."
-            assert _FakeMessageBox.critical_calls == []
+            assert FakeMessageBox.critical_calls == []
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_load_data_cancellation_keeps_session(
         self,
@@ -7822,14 +8044,14 @@ class TestLoadData:
         the inputs, the results, the path, and the map stay as
         they were."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7863,20 +8085,20 @@ class TestLoadData:
                     mapping_seen,
                 ),
             )
-            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-            _FakeMessageBox.critical_calls.clear()
+            monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+            FakeMessageBox.critical_calls.clear()
 
             win._on_load_data()
-            _pump()
+            pump()
 
             assert prefill_seen[0]["date"] == "date"
             assert win._data_path is None
             assert win._column_map is None
             assert win._input_data is before
             assert win._results is before_results
-            assert _FakeMessageBox.critical_calls == []
+            assert FakeMessageBox.critical_calls == []
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_load_data_bad_file_reports_error(
         self,
@@ -7889,14 +8111,14 @@ class TestLoadData:
         opens: the error is reported, the session keeps running,
         and the dialog is never constructed."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7923,21 +8145,21 @@ class TestLoadData:
                 gui_window.QFileDialog, "getOpenFileName", fake_open
             )
             monkeypatch.setattr(gui_window, "ColumnMappingDialog", pytest.fail)
-            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-            _FakeMessageBox.critical_calls.clear()
+            monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+            FakeMessageBox.critical_calls.clear()
 
             win._on_load_data()
-            _pump()
+            pump()
 
-            assert len(_FakeMessageBox.critical_calls) == 1
-            title, message = _FakeMessageBox.critical_calls[0]
+            assert len(FakeMessageBox.critical_calls) == 1
+            title, message = FakeMessageBox.critical_calls[0]
             assert title == "Load data"
             assert "No date column found" in message
             assert win._data_path is None
             assert win._column_map is None
             assert win._input_data is before
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_load_data_corrupt_xlsx_reports_error(
         self,
@@ -7952,14 +8174,14 @@ class TestLoadData:
         the slot reports it, the session keeps running, and the
         dialog is never constructed."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -7980,21 +8202,21 @@ class TestLoadData:
                 gui_window.QFileDialog, "getOpenFileName", fake_open
             )
             monkeypatch.setattr(gui_window, "ColumnMappingDialog", pytest.fail)
-            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-            _FakeMessageBox.critical_calls.clear()
+            monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+            FakeMessageBox.critical_calls.clear()
 
             win._on_load_data()
-            _pump()
+            pump()
 
-            assert len(_FakeMessageBox.critical_calls) == 1
-            title, message = _FakeMessageBox.critical_calls[0]
+            assert len(FakeMessageBox.critical_calls) == 1
+            title, message = FakeMessageBox.critical_calls[0]
             assert title == "Load data"
             assert "Could not read the record spreadsheet" in message
             assert win._data_path is None
             assert win._column_map is None
             assert win._input_data is before
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_load_data_failure_keeps_session(
         self,
@@ -8007,14 +8229,14 @@ class TestLoadData:
         sentinel fails in the loader: the error is reported, the
         session keeps running, and nothing on screen changed."""
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             input_data,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, input_data),
+            fake_results_factory(calls, input_data),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -8054,11 +8276,11 @@ class TestLoadData:
                     mapping_seen,
                 ),
             )
-            monkeypatch.setattr(gui_window, "QMessageBox", _FakeMessageBox)
-            _FakeMessageBox.critical_calls.clear()
+            monkeypatch.setattr(gui_window, "QMessageBox", FakeMessageBox)
+            FakeMessageBox.critical_calls.clear()
 
             win._on_load_data()
-            _pump()
+            pump()
 
             assert mapping_seen[0] == {
                 "date": "date",
@@ -8070,8 +8292,8 @@ class TestLoadData:
                 "Ca++": None,
                 "DIC": None,
             }
-            assert len(_FakeMessageBox.critical_calls) == 1
-            title, message = _FakeMessageBox.critical_calls[0]
+            assert len(FakeMessageBox.critical_calls) == 1
+            title, message = FakeMessageBox.critical_calls[0]
             assert title == "Load data"
             assert (
                 "The column map points the role 'precip' at the column "
@@ -8082,7 +8304,7 @@ class TestLoadData:
             assert win._input_data is before
             assert win._results is before_results
         finally:
-            _close_window(win)
+            close_window(win)
 
     def test_model_and_network_switch_reload_with_map(
         self,
@@ -8107,14 +8329,14 @@ class TestLoadData:
         }
         loaded = gui_data.load_input_data(path, column_map=expected_map)
         calls: list[np.ndarray] = []
-        win = _make_window(
+        win = make_window(
             loaded,
             tmp_path,
             monkeypatch,
-            _fake_results_factory(calls, loaded),
+            fake_results_factory(calls, loaded),
         )
         try:
-            _wait_until(
+            wait_until(
                 lambda: win._worker is None and win._results is not None
             )
             win._auto_run_action.setChecked(False)
@@ -8150,7 +8372,7 @@ class TestLoadData:
             win._model_combo.setCurrentIndex(
                 win._model_combo.findData("three_layer")
             )
-            _pump()
+            pump()
 
             assert len(reloads) == 1
             assert reloads[0]["path"] == path
@@ -8165,7 +8387,7 @@ class TestLoadData:
             win._network_combo.setCurrentIndex(
                 win._network_combo.findData("carbon")
             )
-            _pump()
+            pump()
 
             assert len(reloads) == 1
             assert reloads[0]["model_key"] == "three_layer"
@@ -8179,4 +8401,4 @@ class TestLoadData:
             )
             assert win._network_combo.currentData() == "carbon"
         finally:
-            _close_window(win)
+            close_window(win)

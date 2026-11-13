@@ -43,7 +43,7 @@ from potions.hydro_model import HydrologicalModel
 # ==== Constants ==== #
 # The objective-table metric labels the calibration can optimize, and
 # the keys of the results' objective-function series they name.
-_METRIC_KEYS: Final[dict[str, str]] = {
+METRIC_KEYS: Final[dict[str, str]] = {
     "KGE": "kge",
     "LogKGE": "log_kge",
     "NSE": "nse",
@@ -51,8 +51,8 @@ _METRIC_KEYS: Final[dict[str, str]] = {
 }
 
 # The defaults offered by the calibration dialog.
-_DEFAULT_GENERATIONS: Final[int] = 50
-_DEFAULT_POPULATION_SIZE: Final[int] = 15
+DEFAULT_GENERATIONS: Final[int] = 50
+DEFAULT_POPULATION_SIZE: Final[int] = 15
 # =================== #
 
 
@@ -71,13 +71,13 @@ class CalibrationSettings:
             optimizer.
     """
 
-    generations: int = _DEFAULT_GENERATIONS
-    population_size: int = _DEFAULT_POPULATION_SIZE
+    generations: int = DEFAULT_GENERATIONS
+    population_size: int = DEFAULT_POPULATION_SIZE
     polish: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class _CalibrationOutcome:
+class CalibrationOutcome:
     """
     The outcome of one finished calibration job.
 
@@ -113,7 +113,7 @@ class _CalibrationOutcome:
     model_key: str
 
 
-class _CalibrationWorker(QThread):
+class CalibrationWorker(QThread):
     """
     A worker thread running one differential-evolution calibration.
 
@@ -126,7 +126,7 @@ class _CalibrationWorker(QThread):
 
     Signals:
         finished_calibration: Emitted (on the main thread) with the
-            `_CalibrationOutcome`.
+            `CalibrationOutcome`.
         progress_line: Emitted with each generation's progress line.
         progress_step: Emitted with (done, total) generation counts.
 
@@ -170,7 +170,7 @@ class _CalibrationWorker(QThread):
         """Run the calibration and emit its outcome."""
         self.finished_calibration.emit(self._compute())
 
-    def _compute(self) -> _CalibrationOutcome:
+    def _compute(self) -> CalibrationOutcome:
         """
         Run the optimizer and build the job's outcome.
 
@@ -246,7 +246,7 @@ class _CalibrationWorker(QThread):
                 x_best[index] = float(
                     opt_params.get(name, hydro_values[name])
                 )
-            return _CalibrationOutcome(
+            return CalibrationOutcome(
                 error=None,
                 x_best=x_best,
                 results=GuiRunResults(hydro=best_results, rt=None),
@@ -257,7 +257,7 @@ class _CalibrationWorker(QThread):
                 model_key=self._model_key,
             )
         except Exception as err:
-            return _CalibrationOutcome(
+            return CalibrationOutcome(
                 error=f"{type(err).__name__}: {err}",
                 x_best=None,
                 results=None,
@@ -352,7 +352,7 @@ def metric_keys_for_terms(terms: list[str]) -> tuple[str, ...]:
         parts: list[str] = term.split(": ", 1)
         if len(parts) != 2:
             continue
-        key: Optional[str] = _METRIC_KEYS.get(parts[1])
+        key: Optional[str] = METRIC_KEYS.get(parts[1])
         if key is not None and key not in keys:
             keys.append(key)
     return tuple(keys)

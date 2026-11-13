@@ -131,14 +131,14 @@ def test_aggregation_inflow_matches_weighted_donors() -> None:
     # The bottom zone's incoming vertical flux must equal the area-weighted
     # sum of the donors' vertical fluxes.
     m = AggregatingModel(scales=[0.7, 0.3])
-    res = m.run_hydro_model(_forcing(20), save_results=False)
+    res = m.run_hydro_model(forcing(20), save_results=False)
     sim = res.simulation
     expected = 0.7 * sim["q_vert_a"] + 0.3 * sim["q_vert_b"]
     np.testing.assert_allclose(sim["q_in_g"].to_numpy(), expected.to_numpy())
 
 
 # ===================== Outlet discharge ===================== #
-def _forcing(steps: int) -> ForcingData:
+def forcing(steps: int) -> ForcingData:
     dates = pd.date_range("2020-01-01", periods=steps, freq="D")
     return ForcingData(
         precip=pd.Series(np.full(steps, 3.0), index=dates),
@@ -151,7 +151,7 @@ def test_outlet_is_area_weighted_sum() -> None:
     # Two identical columns with unequal areas: the reported streamflow must be
     # the area-weighted sum of the raw q_lat fluxes at the river zones.
     m = TwoColumnModel(scales=[0.75, 0.25])
-    res = m.run_hydro_model(_forcing(20), save_results=False)
+    res = m.run_hydro_model(forcing(20), save_results=False)
     sim = res.simulation
     names = m.get_zone_names()
     river_names = [names[i] for i in m.get_river_zone_ids()]
@@ -165,7 +165,7 @@ def test_outlet_is_area_weighted_sum() -> None:
 
 def test_outlet_prop_columns_are_area_weighted() -> None:
     m = TwoColumnModel(scales=[0.75, 0.25])
-    res = m.run_hydro_model(_forcing(20), save_results=False)
+    res = m.run_hydro_model(forcing(20), save_results=False)
     sim = res.simulation
     # The area-weighted source proportions sum to 1 at each step.
     prop_cols = [c for c in sim.columns if c.startswith("prop_q_")]
@@ -186,7 +186,7 @@ def test_system_water_balance_invariant_to_area_split() -> None:
     # splits rather than against an analytic precipitation total. Equality here
     # is the guardrail proving the boundary area factors conserve mass.
     steps = 40
-    forc = _forcing(steps)
+    forc = forcing(steps)
 
     def recovered_input(model: HydrologicalModel) -> float:
         res = model.run_hydro_model(forc, save_results=False)
@@ -261,4 +261,4 @@ def test_run_with_check_water_balance() -> None:
     # The conservative model still passes its internal per-zone balance check
     # with the area-weighted lateral transfer enabled.
     m = TwoColumnModel(scales=[0.6, 0.4])
-    m.run_hydro_model(_forcing(20), check_water_balance=True, save_results=False)
+    m.run_hydro_model(forcing(20), check_water_balance=True, save_results=False)

@@ -114,15 +114,15 @@ class ModelSpec:
 
 # Snow zones carry no reactive chemistry beyond water storage; every
 # other zone runs both mineral reactions and aqueous speciation.
-_SNOW: Final[pt.RtZoneConfiguration] = pt.RtZoneConfiguration(
+SNOW: Final[pt.RtZoneConfiguration] = pt.RtZoneConfiguration(
     do_reactions=False, do_speciation=False
 )
-_REACTIVE: Final[pt.RtZoneConfiguration] = pt.RtZoneConfiguration(
+REACTIVE: Final[pt.RtZoneConfiguration] = pt.RtZoneConfiguration(
     do_reactions=True, do_speciation=True
 )
 
 
-def _configs(
+def configs(
     zones: list[str], snow_zones: list[str]
 ) -> dict[str, pt.RtZoneConfiguration]:
     """
@@ -140,16 +140,16 @@ def _configs(
         The configuration of every zone, keyed by zone name.
     """
     return {
-        zone: _SNOW if zone in snow_zones else _REACTIVE
+        zone: SNOW if zone in snow_zones else REACTIVE
         for zone in zones
     }
 
 
-_LATERAL_THREE_LAYER: Final[ModelSpec] = ModelSpec(
+LATERAL_THREE_LAYER: Final[ModelSpec] = ModelSpec(
     key="lateral_three_layer",
     display_name="Lateral three-layer",
     model_class=pt.LateralThreeLayerModel,
-    zone_configs=_configs(
+    zone_configs=configs(
         ["snow_hs", "snow_rp", "surface_hs", "surface_rp",
          "ground_hs", "ground_rp"],
         ["snow_hs", "snow_rp"],
@@ -158,11 +158,11 @@ _LATERAL_THREE_LAYER: Final[ModelSpec] = ModelSpec(
     zone_colors=dict(ZONE_COLORS),
 )
 
-_THREE_LAYER: Final[ModelSpec] = ModelSpec(
+THREE_LAYER: Final[ModelSpec] = ModelSpec(
     key="three_layer",
     display_name="Three-layer",
     model_class=pt.ThreeLayerModel,
-    zone_configs=_configs(
+    zone_configs=configs(
         ["snow", "surface", "ground"],
         ["snow"],
     ),
@@ -178,11 +178,11 @@ _THREE_LAYER: Final[ModelSpec] = ModelSpec(
     },
 )
 
-_HBV: Final[ModelSpec] = ModelSpec(
+HBV: Final[ModelSpec] = ModelSpec(
     key="hbv",
     display_name="HBV",
     model_class=pt.HbvModel,
-    zone_configs=_configs(
+    zone_configs=configs(
         ["snow", "surface", "shallow", "deep"],
         ["snow"],
     ),
@@ -200,11 +200,11 @@ _HBV: Final[ModelSpec] = ModelSpec(
     },
 )
 
-_HBV_LATERAL: Final[ModelSpec] = ModelSpec(
+HBV_LATERAL: Final[ModelSpec] = ModelSpec(
     key="hbv_lateral",
     display_name="HBV lateral",
     model_class=pt.HbvLateralModel,
-    zone_configs=_configs(
+    zone_configs=configs(
         ["snow_hs", "snow_rp", "surface_hs", "surface_rp",
          "shallow_hs", "shallow_rp", "deep_hs", "deep_rp"],
         ["snow_hs", "snow_rp"],
@@ -235,10 +235,10 @@ _HBV_LATERAL: Final[ModelSpec] = ModelSpec(
 MODEL_SPECS: Final[dict[str, ModelSpec]] = {
     spec.key: spec
     for spec in (
-        _LATERAL_THREE_LAYER,
-        _THREE_LAYER,
-        _HBV,
-        _HBV_LATERAL,
+        LATERAL_THREE_LAYER,
+        THREE_LAYER,
+        HBV,
+        HBV_LATERAL,
     )
 }
 

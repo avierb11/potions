@@ -119,13 +119,13 @@ def test_mineral_kinetic_reaction_is_frozen() -> None:
         r.rate_constant = 2.0  # type: ignore[misc]
 
 
-def _is_nonempty_str(s: str) -> bool:
+def is_nonempty_str(s: str) -> bool:
     return isinstance(s, str) and len(s) > 0
 
 
 def test_database_field_types(db: ChemicalDatabase) -> None:
     for mapping in (db.primary_species, db.mineral_species):
-        assert all(_is_nonempty_str(k) for k in mapping)
+        assert all(is_nonempty_str(k) for k in mapping)
 
 
 def test_tst_reaction_is_subclass_of_kinetic_reaction() -> None:

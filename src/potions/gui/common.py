@@ -212,9 +212,9 @@ SPECIES_MEAS_PALETTE: Final[tuple[str, ...]] = (
 # Immutable snapshots of the legacy colors: the session maps above
 # are cleared and refilled by `set_species_colors`, so anything that
 # needs the original DOC / DIC / Ca++ colors reads these instead.
-_LEGACY_SIM: Final[dict[str, str]] = dict(RIVER_SPECIES_SIM_COLORS)
-_LEGACY_MEAS: Final[dict[str, str]] = dict(RIVER_SPECIES_MEAS_COLORS)
-_LEGACY_NAMES: Final[frozenset[str]] = frozenset(RIVER_SPECIES)
+LEGACY_SIM: Final[dict[str, str]] = dict(RIVER_SPECIES_SIM_COLORS)
+LEGACY_MEAS: Final[dict[str, str]] = dict(RIVER_SPECIES_MEAS_COLORS)
+LEGACY_NAMES: Final[frozenset[str]] = frozenset(RIVER_SPECIES)
 
 # Streamflow colors, matching the project's published figures.
 SIM_Q_COLOR: Final[str] = "cornflowerblue"
@@ -378,9 +378,9 @@ def build_species_colors(
     sim: dict[str, str] = {}
     meas: dict[str, str] = {}
     for index, name in enumerate(measured):
-        if name in _LEGACY_NAMES:
-            sim[name] = _LEGACY_SIM[name]
-            meas[name] = _LEGACY_MEAS[name]
+        if name in LEGACY_NAMES:
+            sim[name] = LEGACY_SIM[name]
+            meas[name] = LEGACY_MEAS[name]
         else:
             sim[name] = SPECIES_SIM_PALETTE[index % len(SPECIES_SIM_PALETTE)]
             meas[name] = SPECIES_MEAS_PALETTE[index % len(SPECIES_MEAS_PALETTE)]
@@ -449,7 +449,7 @@ def param_label(
     if "." not in name:
         raise ValueError(f"Unrecognized parameter key: {name!r}")
 
-    _zone_part, rest = name.split(".", 1)
+    zone_part, rest = name.split(".", 1)
     if "[" in rest:  # mineral parameter: {zone}.{field}[{mineral_id}]
         field, id_part = rest.split("[", 1)
         mineral_id: int = int(id_part.rstrip("]"))
@@ -488,7 +488,7 @@ def param_symbol(name: str) -> str:
     if "." not in name:
         raise ValueError(f"Unrecognized parameter key: {name!r}")
 
-    _zone_part, rest = name.split(".", 1)
+    zone_part, rest = name.split(".", 1)
     field: str = rest.split("[", 1)[0]
     if field not in PARAM_LABELS:
         raise ValueError(f"Unrecognized parameter key: {name!r}")

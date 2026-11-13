@@ -15,7 +15,7 @@ def kge(y_obs: Series, y_pred: Series) -> float:
     return 1.0 - ((r - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2) ** 0.5
 
 
-def _log10_shifted(x: Series) -> Series:
+def log10_shifted(x: Series) -> Series:
     """
     Base-10 log transform with the +0.1 offset used by the "log" metrics.
 
@@ -32,18 +32,18 @@ def _log10_shifted(x: Series) -> Series:
         The transformed series.
     """
 
-    def _transform_value(value: float) -> float:
+    def transform_value(value: float) -> float:
         if value < -0.1:
             return float(np.log10(0.0 + 0.1))
         return float(np.log10(value + 0.1))
 
-    return x.map(_transform_value)
+    return x.map(transform_value)
 
 
 def log_kge(y_obs: Series, y_pred: Series) -> float:
     """Kling-Gupta efficiency of the log-transformed data"""
-    y_obs = _log10_shifted(y_obs)
-    y_pred = _log10_shifted(y_pred)
+    y_obs = log10_shifted(y_obs)
+    y_pred = log10_shifted(y_pred)
 
     r: float = y_pred.corr(y_obs, method="pearson")
     alpha: float = float(y_pred.std() / y_obs.std())
@@ -62,8 +62,8 @@ def nse(y_obs: Series, y_pred: Series) -> float:
 
 def log_nse(y_obs: Series, y_pred: Series) -> float:
     """Nash-Sutcliffe Efficiency of the log-transformed data"""
-    y_obs = _log10_shifted(y_obs)
-    y_pred = _log10_shifted(y_pred)
+    y_obs = log10_shifted(y_obs)
+    y_pred = log10_shifted(y_pred)
     numer: float = ((y_pred - y_obs) ** 2).sum()
     denom: float = ((y_obs - y_obs.mean()) ** 2).sum()
 
@@ -163,9 +163,9 @@ def flow_weighted_log_nse(meas_series: Series, sim_series: Series, weights: Seri
     """Flow-weighted Nash-Sutcliffe efficiency on the base-10 log-transformed
     data (with a small offset so that zeros do not log to -inf; values
     below the -0.1 bound are floored at the zero-equivalent, see
-    `_log10_shifted`)."""
-    m: Series = _log10_shifted(meas_series)
-    s: Series = _log10_shifted(sim_series)
+    `log10_shifted`)."""
+    m: Series = log10_shifted(meas_series)
+    s: Series = log10_shifted(sim_series)
     return flow_weighted_nse(m, s, weights)
 
 
@@ -180,7 +180,7 @@ def flow_weighted_kge(meas_series: Series, sim_series: Series, weights: Series) 
     return 1.0 - ((r - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2) ** 0.5
 
 
-def _component_value(
+def component_value(
     meas: Series, sim: Series, weights: Series, comp: "ObjectiveComponent"
 ) -> float:
     """Evaluate one :class:`ObjectiveComponent` against the (meas, sim) series.
@@ -259,7 +259,7 @@ def evaluate_components(
         else:
             raise ValueError(f"Unknown target: {comp.target!r}")
 
-        val: float = _component_value(meas, sim, weights, comp)
+        val: float = component_value(meas, sim, weights, comp)
         total += (1.0 - val) ** comp.power
 
     return total
