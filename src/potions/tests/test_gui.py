@@ -21,9 +21,10 @@ Covers the pure-Python layer of the GUI:
   into a `proc_pool.ModelRunSession`: the constructor arguments the
   session is built with and the per-point results / error-string
   reporting.
-* `potions.gui.plots` — the four figure builders and the objective
+* `potions.gui.plots` — the figure builders and the objective
   table, asserted on the figures' artists (titles, axes, series
-  counts, legend entries, colors, linestyles, clipping).
+  counts, legend entries, colors, linestyles, clipping) and on the
+  reactions page's text lines (headings and balanced equations).
 
 The Qt-layer tests live in `test_gui_qt.py`.
 """
@@ -2107,6 +2108,7 @@ from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
+from matplotlib.text import Text
 from matplotlib.transforms import Bbox
 
 
@@ -3584,6 +3586,107 @@ class TestRateFigure:
         assert len(fig.axes) == 1
         assert len(line_artists(fig.axes[0])) == 0
         assert len(fig.legends) == 0
+
+
+class TestReactionsFigure:
+    """The reaction network's equation page, on the curated presets."""
+
+    TITLE: str = "Reaction network"
+    SECONDARY_HEADING: str = "Secondary speciation (equilibrium)"
+    EXCHANGE_HEADING: str = "Ion exchange (equilibrium)"
+    MINERAL_HEADING: str = "Minerals (kinetic)"
+    NO_REACTIONS_NOTE: str = "The reaction network carries no reactions."
+    # The SOC / calcite preset's equations, padded so that each
+    # section's equilibrium arrows share one character column.
+    EQUATIONS: ClassVar[list[str]] = [
+        "CO2(aq) + H2O \u21cc H+ + HCO3-",
+        "CO3-- + H+    \u21cc HCO3-",
+        "XDOC \u21cc DOC + X-",
+        "SOC(s)          \u21cc 0.6 CO2(aq) + 0.55 DOC",
+        "DOC + SOC-lz(s) \u21cc 0.7 CO2(aq)",
+        "Calcite(s)      \u21cc 0.5 CO3-- + 1.1 Ca++",
+    ]
+
+    def test_sections_and_equations_of_the_soc_calcite_network(self) -> None:
+        sections: list[gui_plots.ReactionSection] = gui_plots.reaction_sections(
+            get_soc_calcite_network()
+        )
+        assert [section.heading for section in sections] == [
+            self.SECONDARY_HEADING,
+            self.EXCHANGE_HEADING,
+            self.MINERAL_HEADING,
+        ]
+        assert [
+            equation
+            for section in sections
+            for equation in section.equations
+        ] == self.EQUATIONS
+
+    def test_equilibrium_arrows_share_one_column(self) -> None:
+        """A section's equations pad their reactants to the same width."""
+        for section in gui_plots.reaction_sections(get_soc_calcite_network()):
+            columns: set[int] = {
+                equation.index(gui_plots.EQUILIBRIUM_ARROW)
+                for equation in section.equations
+            }
+            assert len(columns) == 1
+
+    def test_unit_coefficients_stay_implicit(self) -> None:
+        """An equation leaves a coefficient of 1 unprinted, as chemists do."""
+        assert gui_plots.coefficient_prefix(1.0) == ""
+        assert gui_plots.coefficient_prefix(11.0) == "11 "
+        assert gui_plots.coefficient_prefix(0.55) == "0.55 "
+
+    def test_page_draws_the_title_headings_and_equations(self) -> None:
+        fig: Figure = gui_plots.make_reactions_figure(
+            get_soc_calcite_network()
+        )
+        assert len(fig.axes) == 1
+        ax: Axes = fig.axes[0]
+        assert [text.get_text() for text in ax.texts] == [
+            self.TITLE,
+            self.SECONDARY_HEADING,
+            self.EQUATIONS[0],
+            self.EQUATIONS[1],
+            self.EXCHANGE_HEADING,
+            self.EQUATIONS[2],
+            self.MINERAL_HEADING,
+            self.EQUATIONS[3],
+            self.EQUATIONS[4],
+            self.EQUATIONS[5],
+        ]
+
+    def test_equations_draw_monospaced_under_bold_headings(self) -> None:
+        """The monospace face is what makes the padded arrow column exact."""
+        texts: list[Text] = self._page_texts(get_soc_calcite_network())
+        heading_rows: set[int] = {0, 1, 4, 6}
+        assert [text.get_fontweight() == "bold" for text in texts] == [
+            row in heading_rows for row in range(len(texts))
+        ]
+        assert [text.get_fontfamily() for text in texts] == [
+            ["monospace"] if row not in heading_rows else ["sans-serif"]
+            for row in range(len(texts))
+        ]
+
+    def test_network_without_reactions_notes_it(self) -> None:
+        fig: Figure = gui_plots.make_reactions_figure(get_chloride_network())
+        assert len(fig.axes) == 1
+        assert [
+            text.get_text() for text in fig.axes[0].texts
+        ] == [self.TITLE, self.NO_REACTIONS_NOTE]
+
+    def test_page_holds_the_house_minimum_font(self) -> None:
+        """Every line of the page reads at 12 point or larger."""
+        assert all(
+            float(text.get_fontsize()) >= gui_plots.REACTIONS_MIN_FONT
+            for text in self._page_texts(get_soc_calcite_network())
+        )
+
+    def _page_texts(self, network: pt.ReactionNetwork) -> list[Text]:
+        """The lines of `network`'s reactions page, top to bottom."""
+        fig: Figure = gui_plots.make_reactions_figure(network)
+        assert len(fig.axes) == 1
+        return list(fig.axes[0].texts)
 
 
 class TestHydrologyFigure:

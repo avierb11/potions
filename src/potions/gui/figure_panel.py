@@ -3,11 +3,12 @@ The figure panel of the East River lateral-model calibration GUI.
 
 The model's figures — the hydrology, storage, and partitioning
 figures, joined by the river concentrations, river loads,
-concentration vs. discharge, zone concentrations, and reaction
-rates figures in full mode, the first three in hydrology-only mode,
-plus a gradient job's matrix and a line search's value profile as
-extra docks when those jobs have finished — each live in their own
-dock window in the main window's top dock area.  The docks are
+concentration vs. discharge, zone concentrations, reaction rates,
+and reactions figures in full mode, the first three in
+hydrology-only mode, plus a gradient job's matrix and a line
+search's value profile as extra docks when those jobs have
+finished — each live in their own dock window in the main window's
+top dock area.  The docks are
 tabbed in page order, so the tab bar flips between the figures, and
 a dock can be dragged out of the window into a floating window or
 onto another monitor: spreading the figures across displays is the

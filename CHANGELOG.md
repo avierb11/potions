@@ -139,6 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the whole job.
 - **GUI: mode-tinted window background**: the window background tints light
   blue in hydrology-only mode and warm in reactive-transport mode.
+- **GUI: a reactions page**: full-mode runs gain a ninth figure page
+  listing the active network's balanced equations as text — the
+  secondary speciation equilibria, the ion exchange equilibrium, and
+  the minerals' kinetic reactions, each under its own heading with the
+  reactants left of an equilibrium arrow and the products right, the
+  arrows aligned in a column.  The page prints the equations only (the
+  rate and equilibrium constants stay in the network editor's tables),
+  and it is saved with the other pages by *Save run*.
 
 ### Changed
 

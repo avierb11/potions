@@ -494,7 +494,7 @@ class TestMainWindowStartup:
             # than its children.
             assert win._progress_strip.isHidden()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert panel.page_count() == 8
+            assert panel.page_count() == 9
             assert panel.current_page() == 0
             assert panel._titles == [
                 "Hydrology",
@@ -505,6 +505,7 @@ class TestMainWindowStartup:
                 "Concentration vs. discharge",
                 "Zone concentrations",
                 "Reaction rates (SOC(s))",
+                "Reactions",
             ]
             # The table is transposed: one row per metric, one column
             # per measured target (the streamflow and the species).
@@ -523,7 +524,7 @@ class TestMainWindowStartup:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The first run's eight figures open as tabbed dock panels."""
+        """The first run's nine figures open as tabbed dock panels."""
         calls: list[np.ndarray] = []
         win = make_window(
             input_data,
@@ -539,7 +540,7 @@ class TestMainWindowStartup:
             win.show()
             pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert panel.page_count() == 8
+            assert panel.page_count() == 9
             titles: list[str] = [
                 "Hydrology",
                 "Storage",
@@ -549,6 +550,7 @@ class TestMainWindowStartup:
                 "Concentration vs. discharge",
                 "Zone concentrations",
                 "Reaction rates (SOC(s))",
+                "Reactions",
             ]
             docks: list[gui_figure_panel.FigureDock] = panel.docks()
             assert [dock.windowTitle() for dock in docks] == titles
@@ -897,10 +899,10 @@ class TestMainWindowStartup:
                 QRect(10, 20, 1100, 800),
                 available,
             )
-            # The eight figure pages are present (their dock layout is
+            # The nine figure pages are present (their dock layout is
             # restored in Task 4; the splitter's proportional-sizes
             # assertion retired with the splitter).
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
         finally:
             close_window(win)
 
@@ -1464,7 +1466,7 @@ class TestViewMenu:
             assert win._view_menu.title() == "&View"
             toggles: list[QAction] = figure_toggle_actions(win)
             assert [action.text() for action in toggles] == panel._titles
-            assert len(toggles) == panel.page_count() == 8
+            assert len(toggles) == panel.page_count() == 9
             assert all(
                 action.isCheckable() and action.isChecked()
                 for action in toggles
@@ -1594,7 +1596,7 @@ class TestViewMenu:
             win.show()
             pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert len(figure_toggle_actions(win)) == 8
+            assert len(figure_toggle_actions(win)) == 9
             win._mode_action.setChecked(True)
             wait_until(
                 lambda: win._run_generation == 2 and win._worker is None
@@ -1876,7 +1878,7 @@ class TestMainWindowRuns:
             assert len(saves) == 1
             assert saves[0]["results_dir"] is None
             assert win._status_label.text() == (
-                f"Saved run to {run_dir}; 8 figure page(s) saved to "
+                f"Saved run to {run_dir}; 9 figure page(s) saved to "
                 f"{run_dir / 'figures'}."
             )
             # The figures are saved as plotted, named after their
@@ -1890,6 +1892,7 @@ class TestMainWindowRuns:
                 "Hydrology.png",
                 "Partitioning.png",
                 "Reaction_rates_SOC_s.png",
+                "Reactions.png",
                 "River_concentrations.png",
                 "River_loads.png",
                 "Storage.png",
@@ -2105,12 +2108,12 @@ class TestMainWindowRuns:
             assert panel.current_page() == 2
             assert docks[2].windowTitle() == "Partitioning"
             # Wrap-around in both directions.
-            for _ in range(6):
+            for _ in range(7):
                 actions["Next figure"].triggered.emit()
             assert panel.current_page() == 0
             actions["Previous figure"].triggered.emit()
-            assert panel.current_page() == 7
-            assert docks[7].windowTitle() == "Reaction rates (SOC(s))"
+            assert panel.current_page() == 8
+            assert docks[8].windowTitle() == "Reactions"
         finally:
             close_window(win)
 
@@ -2148,7 +2151,7 @@ class TestMainWindowRuns:
             panel: gui_param_panel.ParamPanel = win._param_panel
             assert not panel._groups["reactive"].isHidden()
             assert not panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             assert win._objective_model.columnCount() == 4
 
             # Switching to hydrology-only re-runs in that mode and
@@ -2253,7 +2256,7 @@ class TestMainWindowRuns:
             assert full_calls[1][index] == pytest.approx(0.775)
             assert not panel._groups["reactive"].isHidden()
             assert not panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             assert win._objective_model.columnCount() == 4
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
@@ -2671,7 +2674,7 @@ class TestHistory:
             assert results.rt is not None
             assert not win._param_panel._groups["reactive"].isHidden()
             assert not win._param_panel._groups["initial"].isHidden()
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             assert win._objective_model.columnCount() == 4
             assert len(full_calls) == 1
             assert len(hydro_calls) == 1
@@ -4376,7 +4379,7 @@ class TestGradients:
                 for j in range(2, len(free)):
                     assert loaded.iloc[i, j] == pytest.approx(0.0)
 
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Gradients (full)"
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
@@ -4571,7 +4574,7 @@ class TestGradients:
                 f" 1 of {total} points failed; their values are shown "
                 f"as missing."
             )
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Gradients (full)"
             assert win._save_action.isEnabled()
             assert not win._run_action.isEnabled()
@@ -4652,7 +4655,7 @@ class TestGradients:
                 == "Gradients failed: ValueError: point failed"
             )
             assert win._gradient_state is None
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             # The base never arrived, so the results stay stale:
             # the save button stays down and the run button stays
             # up.
@@ -5116,7 +5119,7 @@ class TestLineSearch:
             assert len(csvs) == 1
             assert win._line_search_state.csv_path is not None
             assert tmp_path / win._line_search_state.csv_path == csvs[0]
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert re.fullmatch(
@@ -5292,7 +5295,7 @@ class TestLineSearch:
             assert len(csvs) == 1
             assert state.csv_path is not None
             assert tmp_path / state.csv_path == csvs[0]
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Line search (full)"
         finally:
             gate.touch()
@@ -5457,7 +5460,7 @@ class TestLineSearch:
             state: gui_window.LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert win._line_search_action.isEnabled()
@@ -5559,7 +5562,7 @@ class TestLineSearch:
             state: gui_window.LineSearchSnapshot = win._line_search_state
             assert state.profile is profile
             assert state.csv_path == csv_path
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Line search (full)"
 
             assert win._line_search_action.isEnabled()
@@ -5607,7 +5610,7 @@ class TestLineSearch:
             win.show()
             pump()
             panel: gui_figure_panel.FigurePanel = win._figure_panel
-            assert panel.page_count() == 8
+            assert panel.page_count() == 9
 
             # The user is on a middle page: a click on its tab.
             page: int = 5
@@ -5650,7 +5653,7 @@ class TestLineSearch:
             pump()
 
             # The profile page was appended, the outcome was adopted...
-            assert panel.page_count() == 9
+            assert panel.page_count() == 10
             assert "parameters are in the panel" in win._status_label.text()
             # ...and the user's page survived the rebuild at its title.
             assert panel._titles[page] == title
@@ -5909,7 +5912,7 @@ class TestLineSearch:
             )
 
             # Both jobs' pages ride along, in order.
-            assert win._figure_panel.page_count() == 10
+            assert win._figure_panel.page_count() == 11
             assert win._figure_panel._titles[-2:] == [
                 "Gradients (full)",
                 "Line search (full)",
@@ -6006,7 +6009,7 @@ class TestLineSearch:
                 profile["Streamflow: KGE"] + profile["Streamflow: NSE"],
             )
 
-            assert win._figure_panel.page_count() == 9
+            assert win._figure_panel.page_count() == 10
             assert win._figure_panel._titles[-1] == "Line search (full)"
             figure: Figure = win._figure_panel._canvases[-1].figure
             lines = line_artists(figure.axes[0])
@@ -6395,7 +6398,7 @@ class TestLineSearch:
             pump()
             assert win._results_are_up_to_date()
             assert win._line_search_state is None
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             assert re.fullmatch(
                 r"Run 1 finished in \d+\.\d s\.", win._status_label.text()
             ) is not None
@@ -6778,7 +6781,7 @@ class TestModelSelection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
-        A full three-layer run after a switch plots all eight pages.
+        A full three-layer run after a switch plots all nine pages.
 
         The zone-concentration figure must skip the derived river
         species (DIC carries no per-zone column) instead of raising.
@@ -6804,7 +6807,7 @@ class TestModelSelection:
             )
             pump(50)
 
-            assert win._figure_panel.page_count() == 8
+            assert win._figure_panel.page_count() == 9
             assert win._figure_panel._titles[6] == "Zone concentrations"
         finally:
             close_window(win)

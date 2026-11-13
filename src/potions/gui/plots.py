@@ -2,7 +2,7 @@
 The figures and the objective table of the East River
 lateral-model calibration GUI.
 
-The eight figure pages of the full run mode, in page order (the
+The nine figure pages of the full run mode, in page order (the
 hydrology-only run mode shows the first three):
 
 1. *Hydrology* — the simulated river discharge (mm/day) as a line
@@ -49,6 +49,14 @@ hydrology-only run mode shows the first three):
    mineral's rate columns (the model emits those only for zones in
    which the mineral's reactions run).
 
+9. *Reactions* — the active network's balanced equations, as a text
+   page: the secondary speciation equilibria, the ion exchange
+   equilibrium, and the minerals' kinetic reactions, each section
+   headed and each reaction rendered from its stoichiometry
+   (reactants on the left of the equilibrium arrow, products on the
+   right).  The page carries the equations only: rate and
+   equilibrium constants live in the network editor's tables.
+
 Every figure is clipped to the plotting window — the span between
 the panel's two water-year pickers, October 1 to September 30 per
 the plotting guidelines — so a range that ends after the record's
@@ -83,11 +91,13 @@ metric and one column per measured target (the streamflow and the
 river species), with a note explaining the metrics.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
 import pandas as pd
+import potions as pt
 from matplotlib.axes import Axes
 from matplotlib.artist import Artist
 from matplotlib.colorbar import Colorbar
@@ -1868,6 +1878,356 @@ def make_line_search_figure(
         va="bottom",
         color="gray",
     )
+
+    return fig
+
+
+# ==== Reactions figure ==== #
+
+# The arrow that joins a reaction's reactants with its products: the
+# double harpoon (U+21CC) the figures' fonts carry, read as the
+# reaction running in both directions.
+EQUILIBRIUM_ARROW: Final[str] = "\u21cc"
+
+# The text that separates one component of an equation from the next.
+REACTION_TERM_GAP: Final[str] = " + "
+
+# The face the equation lines draw in: a monospace face keeps the
+# padded reactant column — and with it every reaction's arrow —
+# aligned down the section.
+REACTION_MONOSPACE: Final[str] = "monospace"
+
+# The reactions page's figure size (inches): the whole list has to
+# fit on one page, so it gets the tall page the gradient and line
+# search pages use.
+REACTIONS_FIGSIZE: Final[tuple[float, float]] = (15.0, 9.0)
+
+# The axes the page draws in, as (left, bottom, width, height) figure
+# fractions: the whole page, inset by the margin that keeps the lines
+# off the page edge.
+REACTIONS_AXES_RECT: Final[tuple[float, float, float, float]] = (
+    0.04,
+    0.02,
+    0.92,
+    0.96,
+)
+
+# The band (as fractions of that axes' height) the reaction lines are
+# laid out in: the top leaves room for the title, the bottom keeps the
+# last line clear of the page edge.
+REACTIONS_TEXT_TOP: Final[float] = 0.90
+REACTIONS_TEXT_BOTTOM: Final[float] = 0.03
+
+# The page's own title, hung above the text band.  The page draws it as
+# one of its lines rather than through `Axes.set_title`: an axes whose
+# axis is switched off hides its own title, and the GUI's left-aligned
+# titles live where `Axes.get_title` cannot see them.
+REACTIONS_TITLE: Final[str] = "Reaction network"
+REACTIONS_TITLE_Y: Final[float] = 0.97
+
+# The line pitch as a multiple of the font size.
+REACTIONS_LINE_SPACING: Final[float] = 1.7
+
+# The typographic points in one inch: the page's geometry is in inches
+# and its font sizes in points, and the line pitch has to be chosen in
+# both.
+POINTS_PER_INCH: Final[float] = 72.0
+
+# The left edge (as an axes fraction) the lines hang from: the section
+# headings at the margin, their equations indented under them.
+REACTION_HEADING_X: Final[float] = 0.0
+REACTION_EQUATION_X: Final[float] = 0.02
+
+# The page's font-size limits (points): the largest it draws (a short
+# list reads better at a normal size than stretched to fill the page)
+# and the project's house minimum, which `set_rc_params` holds every
+# figure's text to.
+REACTIONS_MAX_FONT: Final[float] = 14.0
+REACTIONS_MIN_FONT: Final[float] = 12.0
+
+# The page's three section headings, in the order the model runs the
+# reaction kinds.
+SECONDARY_SECTION_HEADING: Final[str] = "Secondary speciation (equilibrium)"
+EXCHANGE_SECTION_HEADING: Final[str] = "Ion exchange (equilibrium)"
+MINERAL_SECTION_HEADING: Final[str] = "Minerals (kinetic)"
+
+# The line drawn when the network carries no reactions at all.
+NO_REACTIONS_NOTE: Final[str] = "The reaction network carries no reactions."
+
+
+@dataclass(slots=True)
+class ReactionSection:
+    """
+    One group of the reaction network's reactions, as the reactions
+    page renders it.
+
+    Attributes:
+        heading: The section's bold heading line.
+        equations: The balanced equation of every reaction in the
+            section, reactants on the left and products on the right
+            of the equilibrium arrow, the arrows aligned in a column.
+    """
+
+    heading: str
+    equations: list[str]
+
+
+def sorted_stoichiometry(
+    stoichiometry: Mapping[str, float],
+) -> list[tuple[str, float]]:
+    """
+    One reaction's components and coefficients, in a stable order.
+
+    The Rust database stores a stoichiometry as a `HashMap`, so the
+    order Python sees is whatever that build happened to produce; the
+    page (and its tests) need one fixed equation, so the components
+    are sorted by name, the way the long stoichiometry views of
+    `potions.reactive_transport.database_views` sort them.
+
+    Args:
+        stoichiometry: The reaction's component / coefficient mapping,
+            negative coefficients on the reactant side.
+
+    Returns:
+        The ``(component, coefficient)`` pairs, sorted by component.
+    """
+    return sorted(stoichiometry.items())
+
+
+def coefficient_prefix(value: float) -> str:
+    """
+    The text a stoichiometric coefficient puts in front of a component.
+
+    A coefficient of exactly 1 stays empty — an equation leaves it
+    implicit — and every other magnitude takes its compact general
+    form (``1.1``, ``0.55``) with the space that separates it from the
+    name.  The sign is not part of the text: it selects the side of
+    the reaction the component sits on.
+
+    Args:
+        value: The coefficient's magnitude.
+
+    Returns:
+        The component's prefix, empty for a coefficient of 1.
+    """
+    return "" if value == 1.0 else f"{value:g} "
+
+
+def reaction_side_text(components: Sequence[tuple[str, float]]) -> str:
+    """
+    One side of an equation, as its components joined by ` + `.
+
+    Args:
+        components: The ``(component, coefficient)`` pairs on that
+            side, in the order to print them.
+
+    Returns:
+        The side's text (empty when the side carries no component).
+    """
+    return REACTION_TERM_GAP.join(
+        f"{coefficient_prefix(abs(coefficient))}{component}"
+        for component, coefficient in components
+    )
+
+
+def reaction_sides(stoichiometry: Mapping[str, float]) -> tuple[str, str]:
+    """
+    The reactant and product text of one reaction.
+
+    The network's convention is that a reaction's own species carries
+    -1 in its stoichiometry, so the negative coefficients are the
+    reactants and the positive ones the products.  A zero coefficient
+    contributes to neither side.
+
+    Args:
+        stoichiometry: The reaction's component / coefficient mapping.
+
+    Returns:
+        The ``(reactants, products)`` text.
+    """
+    components: list[tuple[str, float]] = sorted_stoichiometry(stoichiometry)
+    return (
+        reaction_side_text([item for item in components if item[1] < 0.0]),
+        reaction_side_text([item for item in components if item[1] > 0.0]),
+    )
+
+
+def reaction_equation_texts(
+    stoichiometries: Sequence[Mapping[str, float]],
+) -> list[str]:
+    """
+    The balanced equations of several reactions, arrows aligned.
+
+    Every reaction of one section is padded to the width of the
+    section's longest reactant side, so the equilibrium arrows form a
+    column (the equations draw in `REACTION_MONOSPACE`, where the
+    padding is what makes the column exact).
+
+    Args:
+        stoichiometries: The reactions' component / coefficient
+            mappings, in the order to list them.
+
+    Returns:
+        The ``reactants ⇌ products`` text of every reaction.
+    """
+    sides: list[tuple[str, str]] = [
+        reaction_sides(stoichiometry) for stoichiometry in stoichiometries
+    ]
+    reactant_width: int = max(
+        (len(reactants) for reactants, _ in sides), default=0
+    )
+    return [
+        f"{reactants:<{reactant_width}} {EQUILIBRIUM_ARROW} {products}"
+        for reactants, products in sides
+    ]
+
+
+def reaction_sections(network: pt.ReactionNetwork) -> list[ReactionSection]:
+    """
+    The network's reactions, grouped into the reactions page's sections.
+
+    Sections follow the model's three reaction kinds, in the order the
+    model applies them: the secondary (speciation) equilibria, the ion
+    exchange equilibrium, and the minerals' kinetic reactions.  A kind
+    the network does not carry contributes no section, so a network
+    with no reactions contributes none at all.
+
+    Args:
+        network: The reaction network to read.
+
+    Returns:
+        The page's sections, in page order.
+    """
+    return [
+        section
+        for section in (
+            ReactionSection(
+                SECONDARY_SECTION_HEADING,
+                reaction_equation_texts(
+                    [species.stoichiometry for species in network.secondary]
+                ),
+            ),
+            ReactionSection(
+                EXCHANGE_SECTION_HEADING,
+                reaction_equation_texts(
+                    [species.stoichiometry for species in network.exchange_species]
+                ),
+            ),
+            ReactionSection(
+                MINERAL_SECTION_HEADING,
+                reaction_equation_texts(
+                    [mineral.stoichiometry for mineral in network.mineral]
+                ),
+            ),
+        )
+        if section.equations
+    ]
+
+
+def make_reactions_figure(network: pt.ReactionNetwork) -> Figure:
+    """
+    The reaction network's balanced equations, as a page of the figure
+    panel.
+
+    The page is text rather than a plot: one title, then a bold heading
+    per reaction kind the network carries — the secondary speciation
+    equilibria, the ion exchange equilibrium, the minerals' kinetic
+    reactions — each followed by that kind's equations, indented under
+    the heading and separated from the next heading by a blank line.
+    Every equation names its reactants, the equilibrium arrow, and its
+    products (`reaction_sides` documents the sign convention), and one
+    section's equations pad their reactants to the same width so their
+    arrows form a column.  The equations are all the page prints: the
+    reactions' rate and equilibrium constants belong to the network
+    editor's tables, not here.
+
+    The lines start just under the title and share one vertical pitch,
+    taken from how many of them the page has to hold: the text band
+    divided by the line count, and a font size fitted to that pitch —
+    capped at `REACTIONS_MAX_FONT` so a short list is not stretched to
+    fill the page, and never below the 12-point house minimum, which
+    leaves the pitch to tighten instead when a network lists more
+    reactions than fit at that size.
+
+    Args:
+        network: The reaction network the run used.
+
+    Returns:
+        The completed figure.
+    """
+    fig: Figure = Figure(figsize=REACTIONS_FIGSIZE)
+    ax: Axes = fig.add_axes(REACTIONS_AXES_RECT)
+    ax.axis("off")
+    ax.text(
+        REACTION_HEADING_X,
+        REACTIONS_TITLE_Y,
+        REACTIONS_TITLE,
+        ha="left",
+        va="center",
+        fontsize=REACTIONS_MAX_FONT,
+        fontweight="bold",
+    )
+
+    sections: list[ReactionSection] = reaction_sections(network)
+    if not sections:
+        ax.text(
+            REACTION_HEADING_X,
+            REACTIONS_TEXT_TOP,
+            NO_REACTIONS_NOTE,
+            ha="left",
+            va="center",
+            fontsize=REACTIONS_MAX_FONT,
+            color="gray",
+        )
+        return fig
+
+    # Every section contributes its heading and its equations, and the
+    # gaps between the sections contribute one blank line each.
+    line_count: int = len(sections) - 1 + sum(
+        1 + len(section.equations) for section in sections
+    )
+    band: float = REACTIONS_TEXT_TOP - REACTIONS_TEXT_BOTTOM
+    band_points: float = REACTIONS_AXES_RECT[3] * REACTIONS_FIGSIZE[1] * POINTS_PER_INCH
+    font: float = max(
+        REACTIONS_MIN_FONT,
+        min(
+            REACTIONS_MAX_FONT,
+            band * band_points / (line_count * REACTIONS_LINE_SPACING),
+        ),
+    )
+    # The pitch stays at the fitted font size when the font hits its
+    # cap, so a short list keeps a normal leading under the title
+    # instead of spreading its lines across the whole page.
+    pitch: float = min(
+        band / line_count, font * REACTIONS_LINE_SPACING / band_points
+    )
+    first_line_y: float = REACTIONS_TEXT_TOP
+
+    row: int = 0
+    for section_index, section in enumerate(sections):
+        # The blank line that separates this section from the last.
+        row += 1 if section_index > 0 else 0
+        ax.text(
+            REACTION_HEADING_X,
+            first_line_y - pitch * row,
+            section.heading,
+            ha="left",
+            va="center",
+            fontsize=font,
+            fontweight="bold",
+        )
+        row += 1
+        for equation in section.equations:
+            ax.text(
+                REACTION_EQUATION_X,
+                first_line_y - pitch * row,
+                equation,
+                ha="left",
+                va="center",
+                fontsize=font,
+                fontfamily=REACTION_MONOSPACE,
+            )
+            row += 1
 
     return fig
 # =================== #

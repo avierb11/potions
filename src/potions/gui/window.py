@@ -6,11 +6,12 @@ figures, one visible at a time, flipped by the panel's arrow
 buttons or the main window's Left / Right keys: the hydrology,
 storage, and partitioning figures, joined by the river
 concentrations, river loads, concentration vs. discharge, zone
-concentrations, and reaction rates figures in full mode, plus the
-gradient job's matrix and a line search's value profile as extra
-pages when those jobs have finished) and, below it, a row holding the fixed-size per-run
-objective-function table on the left and the parameter panel on
-the right.  Home+Up toggles the window's maximize.
+concentrations, reaction rates, and reactions figures in full
+mode, plus the gradient job's matrix and a line search's value
+profile as extra pages when those jobs have finished) and, below
+it, a row holding the fixed-size per-run objective-function table
+on the left and the parameter panel on the right.  Home+Up toggles
+the window's maximize.
 
 Parameter changes re-run the models on a worker thread (a short
 debounce covers a drag or a keyboard step) and refresh the figures
@@ -235,6 +236,7 @@ from potions.gui.plots import (
     make_line_search_figure,
     make_partitioning_figure,
     make_rate_figure,
+    make_reactions_figure,
     make_river_concentrations_figure,
     make_river_loads_figure,
     make_storage_figure,
@@ -2150,9 +2152,9 @@ class MainWindow(QMainWindow):
     panel (the model's figures, one visible at a time: the
     hydrology, storage, and partitioning figures, joined by the
     river concentrations, river loads, concentration vs.
-    discharge, zone concentrations, and reaction rates figures in
-    full mode, plus the gradient and line search pages when those
-    jobs have finished) and, below it, a row
+    discharge, zone concentrations, reaction rates, and reactions
+    figures in full mode, plus the gradient and line search pages
+    when those jobs have finished) and, below it, a row
     with the fixed-size per-run objective-function table on the
     left and the parameter panel on the right.  The window's
     chrome is a menu bar, a toolbar, and a status bar: the menu
@@ -5162,10 +5164,11 @@ class MainWindow(QMainWindow):
         carry no reactive-transport simulation, so the three
         hydrology figures (hydrology, storage, partitioning) are
         shown and the objective table carries only the streamflow
-        column; a full run adds the five reactive-transport
+        column; a full run adds the six reactive-transport
         figures (river concentrations, river loads, concentration
-        vs. discharge, zone concentrations, and the selected
-        mineral's reaction rates).  A previous run selected in the
+        vs. discharge, zone concentrations, the selected
+        mineral's reaction rates, and the network's balanced
+        reaction equations).  A previous run selected in the
         panel's *History* group (with its overlay checkbox on) is
         drawn faintly on every figure, behind the current run's
         series.  When a gradient job has finished, its difference
@@ -5283,12 +5286,17 @@ class MainWindow(QMainWindow):
                 zone_colors=spec.zone_colors,
                 zone_order=spec.zones,
             )
+            # The equations come from the window's own network, not
+            # from the run's results: the page shows what the run was
+            # asked to react.
+            reactions: Figure = make_reactions_figure(self._network)
             figures = figures + (
                 ("River concentrations", river_concentrations),
                 ("River loads", river_loads),
                 ("Concentration vs. discharge", conc_discharge),
                 ("Zone concentrations", zone_concentrations),
                 (f"Reaction rates ({selection.mineral})", rate),
+                ("Reactions", reactions),
             )
             table = build_objective_table(
                 hydro.objective_functions, rt.objective_functions
