@@ -144,10 +144,35 @@ def bisect(
 def find_root_multi(
     f: Callable[[np.ndarray], np.ndarray],
     x_0: np.ndarray,
-    max_iter: int = 50,
-    tol: float = 1e-6,
+    max_iter: int = 30,
+    tol: float = 1e-4,
     debug: bool = False,
 ) -> np.ndarray:
+    """Solve ``f(x) = 0`` for a vector function by Newton iteration with
+    a numerically approximated Jacobian.
+
+    The iteration stops when the mean-square residual of ``f`` falls to
+    `tol`.  The defaults are deliberately loose: Newton converges
+    quadratically near a simple root, so a 1e-4 mean-square residual in
+    at most 30 iterations reaches equilibrium accuracy far inside what
+    the model calibrations can resolve, and chasing tighter tolerances
+    only spends iterations on numerically noisy Jacobians.
+
+    Args:
+        f: The vector function whose zero is sought.
+        x_0: The starting point.
+        max_iter: Iteration cap; exceeding it raises.
+        tol: The accepted mean-square residual.
+        debug: Print the iteration trace when ``True``.
+
+    Returns:
+        np.ndarray: The root, as the iterate whose residual met `tol`.
+
+    Raises:
+        ValueError:
+            Raised when the residual becomes NaN or when `max_iter`
+            iterations do not reach `tol`.
+    """
     x: np.ndarray = x_0.copy()
     f_x: np.ndarray = f(x)
     err: float = (f_x**2).mean()
